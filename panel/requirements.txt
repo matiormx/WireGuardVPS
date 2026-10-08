@@ -1,0 +1,6 @@
+fastapi==0.115.6
+pydantic==2.10.4
+uvicorn==0.32.1
+itsdangerous==2.2.0
+cryptography==44.0.0
+segno==1.6.1

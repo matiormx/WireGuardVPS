@@ -1,0 +1,716 @@
+/* ==========================================================================
+   WireGuard Cloud — SPA sin dependencias
+   - Admin: panel, clientes (redes /24), dispositivos de cada cliente
+   - Cliente: su red privada y sus dispositivos
+   Todo el DOM se construye con textContent (sin innerHTML con datos) => sin XSS.
+   ========================================================================== */
+"use strict";
+
+const $app = document.getElementById("app");
+const state = { me: null, timer: null };
+const REFRESH_MS = 10000;
+
+/* ------------------------------------------------------------------ iconos */
+const SVG_NS = "http://www.w3.org/2000/svg";
+const ICONS = {
+  logo: '<path d="M4 7l4.5 11L12 10l3.5 8L20 7"/>',
+  dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
+  network: '<rect x="9" y="2" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="16" y="16" width="6" height="6" rx="1"/><path d="M5 16v-3h14v3M12 8v5"/>',
+  devices: '<rect x="2" y="4" width="14" height="10" rx="2"/><path d="M6 18h6M9 14v4"/><rect x="17" y="8" width="5" height="12" rx="1.5"/>',
+  key: '<circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3L21 2M16 7l3 3M19 4l2 2"/>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/>',
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+  trash: '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>',
+  power: '<path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  refresh: '<path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.5 9a9 9 0 0 1 14.9-3.4L23 10M1 14l4.6 4.4A9 9 0 0 0 20.5 15"/>',
+  x: '<path d="M18 6L6 18M6 6l12 12"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
+  activity: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+  arrows: '<path d="M7 17L17 7M7 7h10v10"/>',
+  server: '<rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01M6 17h.01"/>',
+  alert: '<path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"/>',
+  menu: '<path d="M3 12h18M3 6h18M3 18h18"/>',
+  shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 4 10 15 15 0 0 1-4 10 15 15 0 0 1-4-10 15 15 0 0 1 4-10z"/>',
+  eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>',
+};
+
+function icon(name) {
+  const s = document.createElementNS(SVG_NS, "svg");
+  s.setAttribute("viewBox", "0 0 24 24");
+  s.setAttribute("fill", "none");
+  s.setAttribute("stroke", "currentColor");
+  s.setAttribute("stroke-width", "2");
+  s.setAttribute("stroke-linecap", "round");
+  s.setAttribute("stroke-linejoin", "round");
+  s.setAttribute("aria-hidden", "true");
+  s.innerHTML = ICONS[name] || ""; // constantes propias, nunca datos de usuario
+  return s;
+}
+
+/* ------------------------------------------------------------------ DOM */
+function h(tag, props, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k === "text") el.textContent = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2).toLowerCase(), v);
+    else if (k === "style") Object.assign(el.style, v);
+    else if (k === "value") el.value = v; // también para <textarea>
+    else if (k in el && typeof v !== "string") el[k] = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  append(el, children);
+  return el;
+}
+function append(el, children) {
+  for (const c of children.flat(Infinity)) {
+    if (c === null || c === undefined || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+function clear(el) { while (el.firstChild) el.removeChild(el.firstChild); return el; }
+// Sustituye el contenido ignorando null/false (el append nativo los pintaría como texto).
+function fill(el, ...children) { return append(clear(el), children); }
+
+/* ------------------------------------------------------------------ utilidades */
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB", "PB"];
+  const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), u.length - 1);
+  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+function ago(ts) {
+  if (!ts) return "Nunca";
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (s < 60) return `hace ${s} s`;
+  if (s < 3600) return `hace ${Math.floor(s / 60)} min`;
+  if (s < 86400) return `hace ${Math.floor(s / 3600)} h`;
+  return `hace ${Math.floor(s / 86400)} d`;
+}
+function fmtDate(ts) {
+  return new Date(ts * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+function genPassword(len = 14) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+  const buf = new Uint32Array(len);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (x) => alphabet[x % alphabet.length]).join("");
+}
+function slugify(s) {
+  return s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "").slice(0, 32);
+}
+async function copyText(text, label = "Copiado al portapapeles") {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(label);
+  } catch {
+    toast("No se pudo copiar (el navegador lo bloquea sin HTTPS)", "err");
+  }
+}
+function initials(name) {
+  return (name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("");
+}
+
+/* ------------------------------------------------------------------ API */
+class ApiError extends Error {
+  constructor(message, status) { super(message); this.status = status; }
+}
+function errorMessage(data, status) {
+  if (!data) return `Error ${status}`;
+  if (typeof data.detail === "string") return data.detail;
+  if (Array.isArray(data.detail)) {
+    return data.detail.map((d) => `${(d.loc || []).slice(-1)[0] || ""}: ${d.msg}`).join(" · ");
+  }
+  return `Error ${status}`;
+}
+async function api(method, path, body) {
+  const opts = { method, headers: { "X-WGP": "1" }, credentials: "same-origin" };
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opts);
+  const isJson = (res.headers.get("content-type") || "").includes("application/json");
+  const data = isJson ? await res.json() : await res.text();
+  if (res.status === 401 && path !== "/api/auth/login") {
+    state.me = null;
+    render();
+    throw new ApiError("Sesión caducada", 401);
+  }
+  if (res.status === 403 && data && data.detail === "password_change_required") {
+    if (state.me) state.me.must_change = true;
+    render();
+    throw new ApiError("Debe cambiar la contraseña", 403);
+  }
+  if (!res.ok) throw new ApiError(errorMessage(isJson ? data : null, res.status), res.status);
+  return data;
+}
+
+/* ------------------------------------------------------------------ toasts y modales */
+function toast(msg, kind = "ok") {
+  const el = h("div", { class: `toast ${kind}`, role: "status" }, msg);
+  document.getElementById("toasts").append(el);
+  setTimeout(() => el.remove(), 3800);
+}
+
+function modal({ title, body, actions = [], wide = false, onClose }) {
+  const close = () => { overlay.remove(); document.removeEventListener("keydown", onKey); onClose && onClose(); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  const box = h("div", { class: `modal${wide ? " wide" : ""}`, role: "dialog", "aria-modal": "true" },
+    h("div", { class: "modal-head" },
+      h("h2", { text: title }),
+      h("button", { class: "btn ghost icon", "aria-label": "Cerrar", onClick: close }, icon("x"))),
+    h("div", { class: "modal-body" }, body),
+    actions.length ? h("div", { class: "modal-foot" }, actions) : null,
+  );
+  const overlay = h("div", { class: "overlay", onMousedown: (e) => { if (e.target === overlay) close(); } }, box);
+  document.addEventListener("keydown", onKey);
+  document.body.append(overlay);
+  const first = box.querySelector("input, select, textarea");
+  if (first) setTimeout(() => first.focus(), 30);
+  return { close, box };
+}
+
+function formModal({ title, fields, submitLabel = "Guardar", danger = false, onSubmit }) {
+  const form = h("form", { class: "form-grid", onSubmit: async (e) => {
+    e.preventDefault();
+    btn.disabled = true;
+    try {
+      await onSubmit(new FormData(form), m);
+      m.close();
+    } catch (err) {
+      toast(err.message, "err");
+    } finally {
+      btn.disabled = false;
+    }
+  } }, fields);
+  const btn = h("button", { class: `btn ${danger ? "danger" : "primary"}`, type: "submit" }, submitLabel);
+  form.append(h("div", { class: "modal-foot full", style: { padding: "6px 0 0" } },
+    h("button", { class: "btn", type: "button", onClick: () => m.close() }, "Cancelar"), btn));
+  const m = modal({ title, body: form });
+  return m;
+}
+
+function confirmDialog({ title, message, confirmLabel = "Confirmar", danger = true }) {
+  return new Promise((resolve) => {
+    let done = false;
+    const m = modal({
+      title,
+      body: h("p", { style: { margin: 0, color: "var(--muted)" } }, message),
+      actions: [
+        h("button", { class: "btn", onClick: () => m.close() }, "Cancelar"),
+        h("button", { class: `btn ${danger ? "danger" : "primary"}`, onClick: () => { done = true; m.close(); resolve(true); } }, confirmLabel),
+      ],
+      onClose: () => { if (!done) resolve(false); },
+    });
+  });
+}
+
+function field(label, input, help) {
+  return h("div", { class: "field" }, h("label", { text: label }), input, help ? h("div", { class: "help", text: help }) : null);
+}
+function input(props) { return h("input", { class: "input", ...props }); }
+function switchEl(name, checked, label) {
+  return h("label", { class: "switch" },
+    h("input", { type: "checkbox", name, checked: !!checked }),
+    h("span", { class: "track" }),
+    label ? h("span", { text: label }) : null);
+}
+function passwordField(name, label, help) {
+  const inp = input({ name, type: "text", required: true, minlength: "8", autocomplete: "new-password", value: genPassword() });
+  return h("div", { class: "field full" },
+    h("label", { text: label }),
+    h("div", { class: "input-group" }, inp,
+      h("button", { class: "btn icon", type: "button", title: "Generar", onClick: () => { inp.value = genPassword(); } }, icon("refresh")),
+      h("button", { class: "btn icon", type: "button", title: "Copiar", onClick: () => copyText(inp.value) }, icon("copy"))),
+    help ? h("div", { class: "help", text: help }) : null);
+}
+function spinnerBlock() { return h("div", { class: "boot", style: { minHeight: "200px" } }, h("div", { class: "spinner" })); }
+
+/* ------------------------------------------------------------------ router */
+function route() {
+  const parts = (location.hash.replace(/^#\/?/, "") || "").split("/").filter(Boolean);
+  return parts;
+}
+function go(hash) { if (location.hash !== hash) location.hash = hash; else render(); }
+window.addEventListener("hashchange", () => render());
+
+function stopTimer() { if (state.timer) { clearInterval(state.timer); state.timer = null; } }
+function every(fn) { stopTimer(); state.timer = setInterval(() => { if (!document.hidden) fn(true); }, REFRESH_MS); }
+
+async function render() {
+  stopTimer();
+  if (!state.me) return loginView();
+  if (state.me.must_change) return forcePasswordView();
+  const [section, id] = route();
+  const isAdmin = state.me.role === "admin";
+  const main = shell(section || "home");
+  try {
+    if (section === "account") return accountView(main);
+    if (isAdmin) {
+      if (section === "clients" && id) return await clientDetailView(main, Number(id));
+      if (section === "clients") return await clientsView(main);
+      return await dashboardView(main);
+    }
+    return await tenantHomeView(main);
+  } catch (err) {
+    if (err.status !== 401) {
+      fill(main, h("div", { class: "card empty" }, icon("alert"), h("h2", { text: "No se pudo cargar" }), h("p", { text: err.message })));
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ shell */
+function brand() {
+  return h("div", { class: "brand" }, h("div", { class: "logo" }, icon("logo")), h("span", { text: "WireGuard Cloud" }));
+}
+
+function shell(active) {
+  const isAdmin = state.me.role === "admin";
+  const links = isAdmin
+    ? [["home", "#/", "dashboard", "Panel"], ["clients", "#/clients", "users", "Clientes"], ["account", "#/account", "key", "Cuenta"]]
+    : [["home", "#/", "network", "Mi red"], ["account", "#/account", "key", "Cuenta"]];
+  const sidebar = h("aside", { class: "sidebar" },
+    brand(),
+    h("nav", { class: "nav" }, links.map(([key, href, ic, label]) =>
+      h("a", { href, class: key === active ? "active" : null, onClick: () => sidebar.classList.remove("open") }, icon(ic), label))),
+    h("div", { class: "spacer" }),
+    h("div", { class: "userbox" },
+      h("div", { class: "avatar", text: initials(state.me.name || state.me.username) }),
+      h("div", { class: "who" }, h("b", { text: state.me.name || state.me.username }), h("span", { text: isAdmin ? "Administrador" : "Cliente" })),
+      h("button", { class: "btn ghost icon", title: "Cerrar sesión", onClick: logout }, icon("logout"))),
+  );
+  const main = h("main", { class: "main" }, spinnerBlock());
+  const topbar = h("div", { class: "topbar" }, brand(),
+    h("button", { class: "btn ghost icon", "aria-label": "Menú", onClick: () => sidebar.classList.toggle("open") }, icon("menu")));
+  clear($app);
+  $app.className = "";
+  $app.append(h("div", { class: "layout" }, sidebar, h("div", null, topbar, main)));
+  return main;
+}
+
+function pageHead(title, sub, actions, crumbs) {
+  return h("div", { class: "page-head" },
+    h("div", null,
+      crumbs ? h("div", { class: "crumbs" }, crumbs) : null,
+      h("h1", { text: title }),
+      sub ? h("div", { class: "sub" }, sub) : null),
+    actions ? h("div", { class: "cell-flex" }, actions) : null);
+}
+
+async function logout() {
+  try { await api("POST", "/api/auth/logout"); } catch { /* ignorar */ }
+  state.me = null;
+  location.hash = "#/";
+  render();
+}
+
+/* ------------------------------------------------------------------ login */
+function loginView() {
+  $app.className = "";
+  const err = h("div", { class: "help", style: { color: "var(--danger)", minHeight: "18px" } });
+  const btn = h("button", { class: "btn primary block", type: "submit" }, "Entrar");
+  const form = h("form", { onSubmit: async (e) => {
+    e.preventDefault();
+    err.textContent = "";
+    btn.disabled = true;
+    const fd = new FormData(form);
+    try {
+      await api("POST", "/api/auth/login", { username: fd.get("username"), password: fd.get("password") });
+      state.me = await api("GET", "/api/me");
+      render();
+    } catch (ex) {
+      err.textContent = ex.message;
+    } finally {
+      btn.disabled = false;
+    }
+  } },
+    field("Usuario", input({ name: "username", required: true, autocomplete: "username", autofocus: true })),
+    field("Contraseña", input({ name: "password", type: "password", required: true, autocomplete: "current-password" })),
+    err, btn);
+  fill($app, h("div", { class: "auth" },
+    h("div", { class: "auth-card" }, brand(), h("p", { class: "lead", text: "Accede a tu red privada" }), form)));
+  setTimeout(() => form.querySelector("input").focus(), 30);
+}
+
+function passwordForm(onDone) {
+  const btn = h("button", { class: "btn primary", type: "submit" }, "Actualizar contraseña");
+  const form = h("form", { class: "form-grid", onSubmit: async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    if (fd.get("new") !== fd.get("repeat")) return toast("Las contraseñas no coinciden", "err");
+    btn.disabled = true;
+    try {
+      await api("POST", "/api/me/password", { current: fd.get("current"), new: fd.get("new") });
+      toast("Contraseña actualizada");
+      form.reset();
+      onDone && onDone();
+    } catch (ex) {
+      toast(ex.message, "err");
+    } finally {
+      btn.disabled = false;
+    }
+  } },
+    h("div", { class: "full" }, field("Contraseña actual", input({ name: "current", type: "password", required: true, autocomplete: "current-password" }))),
+    field("Nueva contraseña", input({ name: "new", type: "password", required: true, minlength: "8", autocomplete: "new-password" }), "Mínimo 8 caracteres"),
+    field("Repetir", input({ name: "repeat", type: "password", required: true, minlength: "8", autocomplete: "new-password" })),
+    h("div", { class: "full" }, btn));
+  return form;
+}
+
+function forcePasswordView() {
+  fill($app, h("div", { class: "auth" },
+    h("div", { class: "auth-card", style: { maxWidth: "520px" } },
+      brand(),
+      h("p", { class: "lead", text: "Por seguridad, establece una contraseña nueva antes de continuar." }),
+      passwordForm(async () => { state.me = await api("GET", "/api/me"); render(); }),
+      h("div", { style: { textAlign: "center", marginTop: "14px" } },
+        h("button", { class: "btn ghost sm", onClick: logout }, "Cerrar sesión")))));
+}
+
+function accountView(main) {
+  fill(main, 
+    pageHead("Cuenta", `Sesión iniciada como ${state.me.username}`),
+    h("div", { class: "card", style: { maxWidth: "640px" } }, h("div", { class: "card-head" }, h("h2", { text: "Cambiar contraseña" })), passwordForm()),
+  );
+}
+
+/* ------------------------------------------------------------------ admin: panel */
+function statCard(ic, label, value, hint) {
+  return h("div", { class: "card stat" },
+    h("div", { class: "label" }, icon(ic), label),
+    h("div", { class: "value", text: value }),
+    hint ? h("div", { class: "hint", text: hint }) : null);
+}
+
+async function dashboardView(main) {
+  const load = async (silent) => {
+    const o = await api("GET", "/api/admin/overview");
+    const content = h("div", null,
+      pageHead("Panel", "Estado de la plataforma WireGuard",
+        h("a", { class: "btn primary", href: "#/clients" }, icon("users"), "Gestionar clientes")),
+      o.server.interface_up ? null : h("div", { class: "banner" }, icon("alert"),
+        `La interfaz ${o.server.interface} no está activa en el servidor. Revisa: systemctl status wg-quick@${o.server.interface}`),
+      h("div", { class: "grid stats" },
+        statCard("users", "Clientes", String(o.tenants), `${o.tenants_enabled} activos · ${o.tenant_capacity - o.tenants} redes libres`),
+        statCard("devices", "Dispositivos", String(o.devices), "en todas las redes"),
+        statCard("activity", "En línea", String(o.online), "handshake < 3 min"),
+        statCard("arrows", "Tráfico", fmtBytes(o.rx + o.tx), `↓ ${fmtBytes(o.rx)} · ↑ ${fmtBytes(o.tx)}`)),
+      h("div", { class: "grid two" },
+        h("div", { class: "card" },
+          h("div", { class: "card-head" }, h("h2", { text: "Clientes con más tráfico" }), h("a", { href: "#/clients", class: "btn ghost sm" }, "Ver todos")),
+          o.top.length ? h("div", { class: "table-wrap" }, h("table", null,
+            h("thead", null, h("tr", null, h("th", { text: "Cliente" }), h("th", { text: "Red" }), h("th", { text: "En línea" }), h("th", { text: "Tráfico" }))),
+            h("tbody", null, o.top.map((t) => h("tr", { class: "link", onClick: () => go(`#/clients/${t.id}`) },
+              h("td", null, h("div", { class: "name", text: t.name }), h("div", { class: "meta", text: t.username })),
+              h("td", { class: "mono", text: t.network }),
+              h("td", null, `${t.online_count}/${t.device_count}`),
+              h("td", { text: fmtBytes(t.rx + t.tx) }))))))
+            : h("div", { class: "empty" }, icon("users"), h("h2", { text: "Aún no hay clientes" }),
+              h("p", { text: "Crea tu primer cliente para asignarle una red privada." }),
+              h("button", { class: "btn primary", onClick: () => newTenantModal(() => render()) }, icon("plus"), "Nuevo cliente"))),
+        h("div", { class: "card" },
+          h("div", { class: "card-head" }, h("h2", { text: "Servidor" }),
+            h("span", { class: `badge ${o.server.interface_up ? "ok" : "off"}` }, h("span", { class: `dot ${o.server.interface_up ? "on" : "dis"}` }), o.server.interface_up ? "Activo" : "Inactivo")),
+          h("dl", { class: "kv" },
+            h("dt", { text: "Endpoint" }), h("dd", { class: "mono", text: o.server.endpoint }),
+            h("dt", { text: "Interfaz" }), h("dd", { class: "mono", text: `${o.server.interface} · ${o.server.address}` }),
+            h("dt", { text: "Subred" }), h("dd", { class: "mono", text: `${o.server.subnet} (/${o.server.tenant_prefix} por cliente)` }),
+            h("dt", { text: "Clave pública" }), h("dd", null,
+              h("div", { class: "cell-flex" }, h("span", { class: "mono", text: o.server.public_key }),
+                h("button", { class: "btn ghost icon", title: "Copiar", onClick: () => copyText(o.server.public_key) }, icon("copy"))))))));
+    fill(main, content);
+  };
+  await load();
+  every(load);
+}
+
+/* ------------------------------------------------------------------ admin: clientes */
+async function clientsView(main) {
+  let filter = "";
+  let tenants = [];
+  const tableBox = h("div");
+  const draw = () => {
+    const q = filter.toLowerCase();
+    const rows = tenants.filter((t) => !q || t.name.toLowerCase().includes(q) || t.username.toLowerCase().includes(q) || t.network.includes(q));
+    fill(tableBox, !tenants.length
+      ? h("div", { class: "empty" }, icon("users"), h("h2", { text: "Sin clientes" }),
+        h("p", { text: "Cada cliente recibe su propia red privada aislada." }),
+        h("button", { class: "btn primary", onClick: () => newTenantModal(() => load()) }, icon("plus"), "Nuevo cliente"))
+      : h("div", { class: "table-wrap" }, h("table", null,
+        h("thead", null, h("tr", null, h("th", { text: "Cliente" }), h("th", { text: "Red" }), h("th", { text: "Dispositivos" }),
+          h("th", { class: "hide-sm", text: "En línea" }), h("th", { class: "hide-sm", text: "Tráfico" }), h("th", { text: "Estado" }))),
+        h("tbody", null, rows.map((t) => h("tr", { class: "link", onClick: () => go(`#/clients/${t.id}`) },
+          h("td", null, h("div", { class: "cell-flex" }, h("div", { class: "avatar", text: initials(t.name) }),
+            h("div", null, h("div", { class: "name", text: t.name }), h("div", { class: "meta", text: t.username })))),
+          h("td", { class: "mono", text: t.network }),
+          h("td", null, h("div", { class: "meta", text: `${t.device_count} / ${t.max_devices}` }),
+            h("div", { class: "progress" }, h("span", { style: { width: `${Math.min(100, (100 * t.device_count) / t.max_devices)}%` } }))),
+          h("td", { class: "hide-sm" }, h("div", { class: "cell-flex" }, h("span", { class: `dot ${t.online_count ? "on" : ""}` }), String(t.online_count))),
+          h("td", { class: "hide-sm", text: fmtBytes(t.rx + t.tx) }),
+          h("td", null, h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : "Suspendido" })))))))
+    );
+  };
+  const load = async () => { tenants = await api("GET", "/api/admin/tenants"); draw(); };
+  await load();
+  fill(main, 
+    pageHead("Clientes", "Cada cliente tiene su red /24 privada; sus dispositivos se ven entre sí, pero nunca con los de otros clientes.",
+      [h("div", { class: "search" }, icon("search"), input({ placeholder: "Buscar cliente o red…", onInput: (e) => { filter = e.target.value; draw(); } })),
+        h("button", { class: "btn primary", onClick: () => newTenantModal(() => load()) }, icon("plus"), "Nuevo cliente")]),
+    h("div", { class: "card" }, tableBox));
+  every(load);
+}
+
+function newTenantModal(onDone) {
+  const nameInp = input({ name: "name", required: true, maxlength: "64", placeholder: "Acme S.L." });
+  const userInp = input({ name: "username", required: true, pattern: "[A-Za-z0-9][A-Za-z0-9._\\-]{2,31}", placeholder: "acme" });
+  let userTouched = false;
+  userInp.addEventListener("input", () => { userTouched = true; });
+  nameInp.addEventListener("input", () => { if (!userTouched) userInp.value = slugify(nameInp.value); });
+  formModal({
+    title: "Nuevo cliente",
+    submitLabel: "Crear cliente",
+    fields: [
+      h("div", { class: "full" }, field("Nombre", nameInp)),
+      field("Usuario de acceso", userInp, "3-32 caracteres: letras, números . _ -"),
+      field("Máx. dispositivos", input({ name: "max_devices", type: "number", min: "1", max: "253", value: "10", required: true })),
+      passwordField("password", "Contraseña inicial", "El cliente deberá cambiarla en su primer acceso."),
+      h("div", { class: "full" }, field("Notas", h("textarea", { class: "input", name: "notes", maxlength: "500", placeholder: "Plan, contacto, referencia…" }))),
+    ],
+    onSubmit: async (fd) => {
+      const t = await api("POST", "/api/admin/tenants", {
+        name: fd.get("name"), username: fd.get("username"), password: fd.get("password"),
+        max_devices: Number(fd.get("max_devices")), notes: fd.get("notes") || "",
+      });
+      toast(`Cliente creado con la red ${t.network}`);
+      credentialsModal(t.name, t.username, fd.get("password"), t.network);
+      onDone && onDone(t);
+    },
+  });
+}
+
+function credentialsModal(name, username, password, network) {
+  const text = `Panel: ${location.origin}\nUsuario: ${username}\nContraseña: ${password}\nRed privada: ${network}`;
+  const m = modal({
+    title: `Acceso de ${name}`,
+    body: [h("p", { class: "note", text: "Comparte estos datos con el cliente. La contraseña no se volverá a mostrar." }), h("pre", { class: "conf", text })],
+    actions: [h("button", { class: "btn", onClick: () => copyText(text) }, icon("copy"), "Copiar"),
+      h("button", { class: "btn primary", onClick: () => m.close() }, "Hecho")],
+  });
+}
+
+async function clientDetailView(main, id) {
+  const load = async () => {
+    const [t, devices] = await Promise.all([api("GET", `/api/admin/tenants/${id}`), api("GET", `/api/devices?tenant_id=${id}`)]);
+    const reload = () => load();
+    fill(main, 
+      pageHead(t.name, h("span", { class: "cell-flex" },
+        h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : "Suspendido" }),
+        h("span", { class: "mono", text: t.network }),
+        t.must_change ? h("span", { class: "badge warn", text: "Pendiente de primer acceso" }) : null),
+      [
+        h("button", { class: "btn", onClick: () => editTenantModal(t, reload) }, icon("edit"), "Editar"),
+        h("button", { class: "btn", onClick: () => resetTenantPassword(t, reload) }, icon("key"), "Contraseña"),
+        h("button", { class: `btn ${t.enabled ? "danger" : ""}`, onClick: async () => {
+          if (t.enabled && !(await confirmDialog({ title: "Suspender cliente", message: `Se desconectarán todos los dispositivos de ${t.name} y no podrá entrar al panel.`, confirmLabel: "Suspender" }))) return;
+          try { await api("PATCH", `/api/admin/tenants/${t.id}`, { enabled: !t.enabled }); toast(t.enabled ? "Cliente suspendido" : "Cliente reactivado"); reload(); } catch (e) { toast(e.message, "err"); }
+        } }, icon("power"), t.enabled ? "Suspender" : "Reactivar"),
+        h("button", { class: "btn ghost icon", title: "Eliminar cliente", onClick: async () => {
+          if (!(await confirmDialog({ title: "Eliminar cliente", message: `Se eliminarán ${t.name}, sus ${t.device_count} dispositivos y su red ${t.network}. Esta acción no se puede deshacer.`, confirmLabel: "Eliminar" }))) return;
+          try { await api("DELETE", `/api/admin/tenants/${t.id}`); toast("Cliente eliminado"); go("#/clients"); } catch (e) { toast(e.message, "err"); }
+        } }, icon("trash")),
+      ],
+      [h("a", { href: "#/clients", text: "Clientes" }), " / ", t.name]),
+      h("div", { class: "grid stats" },
+        statCard("network", "Red privada", t.network, `${t.device_count} de ${t.max_devices} dispositivos`),
+        statCard("activity", "En línea", String(t.online_count), "dispositivos conectados"),
+        statCard("arrows", "Tráfico", fmtBytes(t.rx + t.tx), `↓ ${fmtBytes(t.rx)} · ↑ ${fmtBytes(t.tx)}`),
+        statCard("users", "Usuario", t.username, `Alta: ${fmtDate(t.created_at)}`)),
+      t.notes ? h("div", { class: "card" }, h("h3", { text: "Notas" }), h("p", { style: { margin: "8px 0 0", whiteSpace: "pre-wrap" }, text: t.notes })) : null,
+      devicesCard(devices, { tenantId: t.id, max: t.max_devices, onChange: reload }),
+    );
+  };
+  await load();
+  every(load);
+}
+
+function editTenantModal(t, onDone) {
+  formModal({
+    title: "Editar cliente",
+    fields: [
+      h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "64", value: t.name }))),
+      field("Máx. dispositivos", input({ name: "max_devices", type: "number", min: String(Math.max(1, t.device_count)), max: "253", value: String(t.max_devices), required: true })),
+      field("Red", input({ value: t.network, disabled: true })),
+      h("div", { class: "full" }, field("Notas", h("textarea", { class: "input", name: "notes", maxlength: "500", value: t.notes }))),
+    ],
+    onSubmit: async (fd) => {
+      await api("PATCH", `/api/admin/tenants/${t.id}`, { name: fd.get("name"), max_devices: Number(fd.get("max_devices")), notes: fd.get("notes") || "" });
+      toast("Cliente actualizado");
+      onDone();
+    },
+  });
+}
+
+function resetTenantPassword(t, onDone) {
+  formModal({
+    title: `Nueva contraseña para ${t.name}`,
+    submitLabel: "Restablecer",
+    fields: [passwordField("password", "Contraseña temporal", "Se cerrarán sus sesiones y deberá cambiarla al entrar.")],
+    onSubmit: async (fd) => {
+      await api("PATCH", `/api/admin/tenants/${t.id}`, { password: fd.get("password") });
+      credentialsModal(t.name, t.username, fd.get("password"), t.network);
+      onDone();
+    },
+  });
+}
+
+/* ------------------------------------------------------------------ dispositivos (común) */
+function devicesCard(devices, { tenantId, max, onChange }) {
+  const full = devices.length >= max;
+  return h("div", { class: "card" },
+    h("div", { class: "card-head" },
+      h("div", null, h("h2", { text: "Dispositivos" }), h("div", { class: "note", text: `${devices.length} de ${max} usados` })),
+      h("button", { class: "btn primary", disabled: full, title: full ? "Límite alcanzado" : null, onClick: () => newDeviceModal(tenantId, onChange) },
+        icon("plus"), "Añadir dispositivo")),
+    devices.length
+      ? h("div", { class: "table-wrap" }, h("table", null,
+        h("thead", null, h("tr", null, h("th", { text: "Dispositivo" }), h("th", { text: "IP" }), h("th", { class: "hide-sm", text: "Último contacto" }),
+          h("th", { class: "hide-sm", text: "Tráfico" }), h("th", { class: "hide-sm", text: "Modo" }), h("th"))),
+        h("tbody", null, devices.map((d) => deviceRow(d, onChange)))))
+      : h("div", { class: "empty" }, icon("devices"), h("h2", { text: "Sin dispositivos" }),
+        h("p", { text: "Añade un portátil, móvil o servidor y escanea el QR con la app de WireGuard." })));
+}
+
+function deviceRow(d, onChange) {
+  const status = !d.enabled ? ["dis", "Deshabilitado"] : d.online ? ["on", "En línea"] : ["", "Desconectado"];
+  return h("tr", null,
+    h("td", null, h("div", { class: "cell-flex" }, h("span", { class: `dot ${status[0]}`, title: status[1] }),
+      h("div", null, h("div", { class: "name", text: d.name }), h("div", { class: "meta", text: d.endpoint ? `${status[1]} · ${d.endpoint}` : status[1] })))),
+    h("td", { class: "mono", text: d.ip }),
+    h("td", { class: "hide-sm", text: ago(d.last_handshake) }),
+    h("td", { class: "hide-sm", text: `↓ ${fmtBytes(d.tx)} · ↑ ${fmtBytes(d.rx)}` }),
+    h("td", { class: "hide-sm" }, h("span", { class: `badge ${d.full_tunnel ? "accent" : ""}` }, icon(d.full_tunnel ? "globe" : "network"), d.full_tunnel ? "Todo el tráfico" : "Solo red privada")),
+    h("td", { class: "actions" },
+      h("button", { class: "btn ghost icon", title: "Configuración y QR", onClick: () => deviceConfigModal(d) }, icon("qr")),
+      h("button", { class: "btn ghost icon", title: "Editar", onClick: () => editDeviceModal(d, onChange) }, icon("edit")),
+      h("button", { class: "btn ghost icon", title: d.enabled ? "Deshabilitar" : "Habilitar", onClick: async () => {
+        try { await api("PATCH", `/api/devices/${d.id}`, { enabled: !d.enabled }); toast(d.enabled ? "Dispositivo deshabilitado" : "Dispositivo habilitado"); onChange(); } catch (e) { toast(e.message, "err"); }
+      } }, icon("power")),
+      h("button", { class: "btn ghost icon", title: "Eliminar", onClick: async () => {
+        if (!(await confirmDialog({ title: "Eliminar dispositivo", message: `${d.name} (${d.ip}) perderá el acceso inmediatamente.`, confirmLabel: "Eliminar" }))) return;
+        try { await api("DELETE", `/api/devices/${d.id}`); toast("Dispositivo eliminado"); onChange(); } catch (e) { toast(e.message, "err"); }
+      } }, icon("trash"))));
+}
+
+function tunnelField(checked) {
+  return h("div", { class: "full field" },
+    switchEl("full_tunnel", checked, "Enviar todo el tráfico por la VPN"),
+    h("div", { class: "help", text: "Activado: navega por Internet con la IP del servidor. Desactivado: solo accede a la red privada del cliente." }));
+}
+
+function newDeviceModal(tenantId, onDone) {
+  formModal({
+    title: "Añadir dispositivo",
+    submitLabel: "Crear",
+    fields: [
+      h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "48", placeholder: "Portátil de Ana, iPhone, NAS…" }))),
+      tunnelField(true),
+    ],
+    onSubmit: async (fd) => {
+      const body = { name: fd.get("name"), full_tunnel: fd.get("full_tunnel") === "on" };
+      if (state.me.role === "admin") body.tenant_id = tenantId;
+      const d = await api("POST", "/api/devices", body);
+      onDone();
+      deviceConfigModal(d, true);
+    },
+  });
+}
+
+function editDeviceModal(d, onDone) {
+  formModal({
+    title: "Editar dispositivo",
+    fields: [
+      h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "48", value: d.name }))),
+      tunnelField(d.full_tunnel),
+      h("p", { class: "note full", style: { margin: 0 }, text: "Si cambias el modo, vuelve a importar la configuración en el dispositivo." }),
+    ],
+    onSubmit: async (fd) => {
+      await api("PATCH", `/api/devices/${d.id}`, { name: fd.get("name"), full_tunnel: fd.get("full_tunnel") === "on" });
+      toast("Dispositivo actualizado");
+      onDone();
+    },
+  });
+}
+
+async function deviceConfigModal(d, fresh = false) {
+  let conf = "";
+  try { conf = await api("GET", `/api/devices/${d.id}/config`); } catch (e) { return toast(e.message, "err"); }
+  const pre = h("pre", { class: "conf", text: conf, hidden: true });
+  const m = modal({
+    title: fresh ? `${d.name} listo` : d.name,
+    wide: true,
+    body: [
+      h("div", { class: "qr-layout" },
+        h("div", { class: "qr-box" }, h("img", { src: `/api/devices/${d.id}/qr.svg?ts=${Date.now()}`, alt: `QR de ${d.name}` })),
+        h("div", { class: "grid", style: { gap: "12px" } },
+          h("dl", { class: "kv" },
+            h("dt", { text: "IP" }), h("dd", { class: "mono", text: d.ip }),
+            h("dt", { text: "Modo" }), h("dd", { text: d.full_tunnel ? "Todo el tráfico" : "Solo red privada" }),
+            h("dt", { text: "Cliente" }), h("dd", { text: d.tenant_name })),
+          h("ol", { class: "note", style: { margin: 0, paddingLeft: "18px" } },
+            h("li", { text: "Instala la app oficial de WireGuard." }),
+            h("li", { text: "Móvil: «Añadir túnel» → «Escanear QR»." }),
+            h("li", { text: "Ordenador: descarga el .conf e impórtalo." })),
+          h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+            h("a", { class: "btn primary", href: `/api/devices/${d.id}/config`, download: "" }, icon("download"), "Descargar .conf"),
+            h("button", { class: "btn", onClick: () => copyText(conf) }, icon("copy"), "Copiar"),
+            h("button", { class: "btn ghost", onClick: () => { pre.hidden = !pre.hidden; } }, icon("eye"), "Ver")))),
+      pre,
+      h("p", { class: "note", style: { margin: 0 } }, icon("shield"), " Esta configuración contiene la clave privada del dispositivo: no la compartas."),
+    ],
+    actions: [h("button", { class: "btn", onClick: () => m.close() }, "Cerrar")],
+  });
+  m.box.querySelectorAll(".note > svg").forEach((s) => Object.assign(s.style, { width: "14px", height: "14px", verticalAlign: "-2px" }));
+}
+
+/* ------------------------------------------------------------------ cliente: mi red */
+async function tenantHomeView(main) {
+  const load = async () => {
+    const devices = await api("GET", "/api/devices");
+    const me = state.me;
+    const online = devices.filter((d) => d.online).length;
+    const rx = devices.reduce((a, d) => a + d.rx, 0);
+    const tx = devices.reduce((a, d) => a + d.tx, 0);
+    fill(main, 
+      pageHead(`Hola, ${me.name}`, "Tu red privada WireGuard"),
+      h("div", { class: "card net-hero" },
+        h("div", { class: "grow" },
+          h("h3", { text: "Tu red" }),
+          h("div", { class: "big", text: me.network }),
+          h("div", { class: "note", text: "Tus dispositivos se comunican entre sí dentro de esta red. Ningún otro cliente puede verlos." })),
+        h("div", null, h("h3", { text: "Dispositivos" }), h("div", { class: "big", text: `${devices.length}/${me.max_devices}` }),
+          h("div", { class: "progress", style: { marginTop: "8px" } }, h("span", { style: { width: `${Math.min(100, (100 * devices.length) / me.max_devices)}%` } }))),
+        h("div", null, h("h3", { text: "En línea" }), h("div", { class: "big", text: String(online) })),
+        h("div", null, h("h3", { text: "Tráfico" }), h("div", { class: "big", text: fmtBytes(rx + tx) }))),
+      devicesCard(devices, { tenantId: me.id, max: me.max_devices, onChange: load }),
+    );
+  };
+  await load();
+  every(load);
+}
+
+/* ------------------------------------------------------------------ arranque */
+(async function boot() {
+  const res = await fetch("/api/me", { credentials: "same-origin" }).catch(() => null);
+  state.me = res && res.ok ? await res.json() : null;
+  render();
+})();

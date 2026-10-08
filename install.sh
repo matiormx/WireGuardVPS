@@ -14,7 +14,8 @@
 #  Variables de entorno opcionales (se heredan en wg-manager.sh):
 #    WG_REPO_RAW      Base RAW del repositorio (por defecto, este repo)
 #    WG_BRANCH        Rama a descargar (por defecto: main)
-#    WGUI_ADMIN_PASS  Contraseña inicial del panel (por defecto: admin)
+#    ADMIN_PASS       Contraseña inicial del admin (por defecto: admin; se
+#                     obliga a cambiarla en el primer acceso)
 #    PUBLIC_ENDPOINT  IP/dominio público si la autodetección no sirve
 #    ENABLE_UFW       true/false
 #    ...y cualquier otra variable de la cabecera de wg-manager.sh
@@ -25,8 +26,8 @@
 #    3. Descarga wg-manager.sh, valida su integridad y lo instala en
 #       /usr/local/sbin/wg-manager.
 #    4. Ejecuta "wg-manager install", que instala el resto de dependencias
-#       (Docker, Compose, iptables, ufw, jq, git, wireguard-tools...) y
-#       despliega la plataforma completa.
+#       (Docker, Compose, iptables, ufw, jq, git, wireguard-tools...), descarga
+#       y construye el panel y despliega la plataforma completa.
 # =============================================================================
 
 set -euo pipefail

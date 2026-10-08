@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  wg-manager.sh — Plataforma WireGuard Multi-Tenant (wireguard-ui + Docker)
+#  wg-manager.sh — Plataforma WireGuard Multi-Tenant (panel propio + Docker)
 # -----------------------------------------------------------------------------
 #  Despliega y mantiene:
 #    * Docker + Docker Compose (plugin v2)
 #    * Tuning del kernel (ip_forward + buffers UDP)
-#    * wireguard-ui (ngoduykhanh/wireguard-ui) en network_mode: host
-#    * Interfaz WireGuard del host (wg-quick@wg0) gestionada por systemd y
-#      recargada automáticamente cuando wireguard-ui reescribe wg0.conf
-#    * Aislamiento multi-tenant: los peers NO pueden verse entre sí, sólo
-#      salen a Internet a través de NAT (MASQUERADE)
-#    * Auto-actualización del propio script desde GitHub (RAW) y de la imagen
+#    * Panel web propio (carpeta panel/ del repositorio), construido localmente
+#      y ejecutado en Docker con network_mode: host
+#    * Interfaz WireGuard del host (wg-quick@wg0) gestionada por systemd
+#    * Firewall multi-tenant: cada cliente tiene su red /24; sus dispositivos se
+#      ven entre sí, pero el tráfico entre clientes distintos se descarta
+#    * Auto-actualización del script (GitHub RAW) y del panel (git pull + build)
 #
 #  Uso:
-#    sudo ./wg-manager.sh install           Instalación completa
-#    sudo ./wg-manager.sh update [--force]  Auto-actualización + contenedores
-#    sudo ./wg-manager.sh status            Estado de la plataforma
-#    ./wg-manager.sh help                   Ayuda
+#    sudo ./wg-manager.sh install             Instalación completa (idempotente)
+#    sudo ./wg-manager.sh update [--force]    Actualiza script, panel y firewall
+#    sudo ./wg-manager.sh status              Estado de la plataforma
+#    sudo ./wg-manager.sh logs                Logs del panel
+#    sudo ./wg-manager.sh reset-admin         Nueva contraseña temporal de admin
+#    ./wg-manager.sh help                     Ayuda
 #
-#  Sistemas soportados: Debian 11+/Ubuntu 20.04+ (gestor apt, systemd,
-#  kernel >= 5.6 con módulo WireGuard integrado).
+#  Sistemas soportados: Debian 11+/Ubuntu 20.04+ (apt, systemd, kernel >= 5.6).
 # =============================================================================
 
 set -o errexit   # set -e : aborta ante cualquier comando que falle
@@ -28,18 +29,16 @@ set -o pipefail  # un pipeline falla si falla cualquiera de sus etapas
 set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 
 # -----------------------------------------------------------------------------
-# VERSIÓN DEL SCRIPT (se compara con la versión publicada en GitHub)
-# Incrementar siguiendo SemVer en cada publicación.
+# VERSIÓN DEL SCRIPT (se compara con la publicada en GitHub). SemVer.
 # -----------------------------------------------------------------------------
-readonly VERSION="1.0.1"
+readonly VERSION="2.0.0"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
 # -----------------------------------------------------------------------------
-#  Todos los valores pueden sobrescribirse de forma persistente en
-#  /etc/wg-manager.conf (se genera en la instalación). Ese fichero NO se toca
-#  durante las auto-actualizaciones, de modo que la configuración local
-#  sobrevive a la sustitución del script.
+#  Cualquier valor puede fijarse de forma persistente en /etc/wg-manager.conf
+#  (se genera en la instalación y NO se toca en las auto-actualizaciones) o
+#  pasarse como variable de entorno en la primera instalación.
 # =============================================================================
 readonly CONFIG_FILE="/etc/wg-manager.conf"
 if [[ -f "${CONFIG_FILE}" ]]; then
@@ -47,72 +46,69 @@ if [[ -f "${CONFIG_FILE}" ]]; then
     source "${CONFIG_FILE}"
 fi
 
-# --- Repositorio de auto-actualización ---------------------------------------
+# --- Repositorio (auto-actualización y código del panel) ----------------------
 : "${REPO_URL:=https://github.com/matiormx/WireGuardVps}"
 : "${BRANCH:=main}"
-: "${SCRIPT_REMOTE_PATH:=wg-manager.sh}"       # ruta del script dentro del repo
+: "${SCRIPT_REMOTE_PATH:=wg-manager.sh}"
+: "${LOCAL_SOURCE:=}"                          # ruta local del repo (desarrollo); vacío = git
 
-# --- Rutas de la plataforma ---------------------------------------------------
+# --- Rutas --------------------------------------------------------------------
 : "${PLATFORM_DIR:=/opt/wg-platform}"
-: "${INSTALL_BIN:=/usr/local/sbin/wg-manager}"  # copia instalada del script
+: "${INSTALL_BIN:=/usr/local/sbin/wg-manager}"
 : "${LOG_FILE:=/var/log/wg-manager.log}"
 
-# --- wireguard-ui ---------------------------------------------------------------
-: "${WG_UI_IMAGE:=ngoduykhanh/wireguard-ui:latest}"
-: "${WG_UI_CONTAINER:=wireguard-ui}"
-: "${WGUI_BIND:=0.0.0.0}"                       # IP de escucha del panel web
-: "${WGUI_PORT:=5000}"                          # puerto del panel web
-: "${WGUI_ADMIN_USER:=admin}"                   # ¡CAMBIAR tras el primer login!
-: "${WGUI_ADMIN_PASS:=admin}"                   # ¡CAMBIAR tras el primer login!
+# --- Panel web ----------------------------------------------------------------
+: "${PANEL_BIND:=0.0.0.0}"
+: "${PANEL_PORT:=${WGUI_PORT:-5000}}"
+: "${ADMIN_USER:=${WGUI_ADMIN_USER:-admin}}"
+: "${ADMIN_PASS:=${WGUI_ADMIN_PASS:-admin}}"   # se obliga a cambiarla en el primer login
 
-# --- WireGuard -------------------------------------------------------------------
+# --- WireGuard ----------------------------------------------------------------
 : "${WG_INTERFACE:=wg0}"
-: "${WG_SUBNET:=10.252.0.0/16}"                 # subred de todos los tenants
-: "${WG_SERVER_ADDRESS:=10.252.0.1/16}"         # IP del servidor dentro del túnel
-: "${WG_PORT:=51820}"                           # puerto UDP de WireGuard
-: "${WG_DNS:=1.1.1.1,1.0.0.1}"                  # DNS que se entrega a los clientes
+: "${WG_SUBNET:=10.252.0.0/16}"                # bloque global de la plataforma
+: "${WG_SERVER_ADDRESS:=10.252.0.1/16}"        # IP del servidor (bloque 0, reservado)
+: "${TENANT_PREFIX:=24}"                       # tamaño de la red de cada cliente
+: "${WG_PORT:=51820}"
+: "${WG_DNS:=1.1.1.1, 1.0.0.1}"
 : "${WG_MTU:=1420}"
 : "${WG_KEEPALIVE:=25}"
-: "${WG_CLIENT_ALLOWED_IPS:=0.0.0.0/0}"         # full-tunnel por defecto
 
-# --- Red del host ------------------------------------------------------------------
-: "${PUBLIC_ENDPOINT:=}"                        # vacío = autodetección de IP pública
-: "${WAN_IFACE:=}"                              # vacío = interfaz de la ruta por defecto
-: "${ENABLE_UFW:=true}"                         # gestionar UFW (INPUT) automáticamente
+# --- Red del host -------------------------------------------------------------
+: "${PUBLIC_ENDPOINT:=}"                       # vacío = autodetección (IP o dominio)
+: "${WAN_IFACE:=}"                             # vacío = interfaz de la ruta por defecto
+: "${ENABLE_UFW:=true}"
 
-# --- Kernel ------------------------------------------------------------------------
+# --- Kernel -------------------------------------------------------------------
 readonly SYSCTL_FILE="/etc/sysctl.d/99-wireguard.conf"
 readonly NET_BUFFER_SIZE="2500000"
 
-# --- Derivadas (no editar) ---------------------------------------------------------
-readonly WG_CONF_DIR="/etc/wireguard"
-readonly WG_CONF_FILE="${WG_CONF_DIR}/${WG_INTERFACE}.conf"
+# --- Derivadas (no editar) ----------------------------------------------------
+readonly SRC_DIR="${PLATFORM_DIR}/src"
+readonly DATA_DIR="${PLATFORM_DIR}/data"
 readonly COMPOSE_FILE="${PLATFORM_DIR}/docker-compose.yml"
 readonly ENV_FILE="${PLATFORM_DIR}/.env"
-readonly DB_DIR="${PLATFORM_DIR}/db"
-readonly DB_SERVER_IFACE="${DB_DIR}/server/interfaces.json"
-readonly LOCK_FILE="/var/lock/wg-manager.lock"
-readonly RULE_TAG="wg-manager"                  # comentario iptables para identificar reglas
-readonly RELOAD_HELPER="/usr/local/sbin/wg-platform-reload"
+readonly CONTAINER="wgp-panel"
+readonly WG_CONF_DIR="/etc/wireguard"
+readonly WG_CONF_FILE="${WG_CONF_DIR}/${WG_INTERFACE}.conf"
+readonly WGP_DIR="${WG_CONF_DIR}/wgp"            # ficheros que el panel comparte con el host
+readonly FIREWALL_BIN="/usr/local/sbin/wgp-firewall"
+readonly TENANT_CHAIN="WGP-TENANTS"
+readonly RULE_TAG="wg-manager"
 readonly SYSTEMD_DIR="/etc/systemd/system"
+readonly LOCK_FILE="/var/lock/wg-manager.lock"
 
-# Ruta absoluta del script en ejecución (vacía si se ejecuta vía "curl | bash").
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || true)"
 [[ -f "${SCRIPT_PATH}" ]] || SCRIPT_PATH=""
 readonly ORIGINAL_ARGS=("$@")
 
-# Comando docker compose detectado en tiempo de ejecución (plugin v2 o v1).
 DOCKER_COMPOSE=()
-# Directorios temporales a limpiar en la salida.
 TMP_PATHS=()
-# Variables globales con los hooks de wg-quick (se calculan en build_hooks).
-HOOK_PRE_UP="" HOOK_POST_UP="" HOOK_PRE_DOWN="" HOOK_POST_DOWN=""
 
 # =============================================================================
 #  SALIDA CON COLORES Y LOGGING
 # =============================================================================
 if [[ -t 1 ]]; then
-    readonly C_RESET=$'\033[0m'  C_BOLD=$'\033[1m'
+    readonly C_RESET=$'\033[0m' C_BOLD=$'\033[1m'
     readonly C_RED=$'\033[1;31m' C_GREEN=$'\033[1;32m'
     readonly C_YELLOW=$'\033[1;33m' C_BLUE=$'\033[1;34m' C_CYAN=$'\033[1;36m'
 else
@@ -120,7 +116,6 @@ else
 fi
 
 _log_file() {
-    # Escribe en el log sin colores. Nunca debe abortar el script.
     { printf '%s [%s] %s\n' "$(date '+%F %T')" "$1" "$2" >>"${LOG_FILE}"; } 2>/dev/null || true
 }
 info()    { printf '%s[INFO]%s  %s\n' "${C_BLUE}" "${C_RESET}" "$*"; _log_file INFO "$*"; }
@@ -131,11 +126,10 @@ step()    { printf '\n%s==> %s%s\n' "${C_CYAN}${C_BOLD}" "$*" "${C_RESET}"; _log
 die()     { error "$*"; exit 1; }
 
 # =============================================================================
-#  TRAPS: errores y limpieza
+#  TRAPS
 # =============================================================================
 on_error() {
-    local exit_code=$1 line=$2 cmd=$3
-    error "Fallo en la línea ${line} (código ${exit_code}): ${cmd}"
+    error "Fallo en la línea $2 (código $1): $3"
     error "Revise el log: ${LOG_FILE}"
 }
 cleanup() {
@@ -152,9 +146,7 @@ trap cleanup EXIT
 #  UTILIDADES
 # =============================================================================
 check_root() {
-    if [[ "${EUID}" -ne 0 ]]; then
-        die "Este script requiere privilegios de superusuario. Ejecute: sudo $0 ${ORIGINAL_ARGS[*]-}"
-    fi
+    [[ "${EUID}" -eq 0 ]] || die "Se requieren privilegios de root. Ejecute: sudo $0 ${ORIGINAL_ARGS[*]-}"
 }
 
 os_release_field() {
@@ -162,9 +154,8 @@ os_release_field() {
 }
 
 check_os() {
-    # Sólo se soporta la familia Debian (apt) con systemd. /etc/os-release se
-    # parsea (no se hace "source") porque define su propia variable VERSION,
-    # que colisionaría con la VERSION readonly de este script.
+    # /etc/os-release se parsea (no se hace "source") porque define su propia
+    # variable VERSION, que colisionaría con la VERSION readonly de este script.
     [[ -r /etc/os-release ]] || die "No se encuentra /etc/os-release; SO no soportado."
     local os_id os_like os_name
     os_id="$(os_release_field ID)"
@@ -180,18 +171,12 @@ check_os() {
 }
 
 acquire_lock() {
-    # Evita ejecuciones concurrentes (p. ej. un cron de update + un install manual).
     mkdir -p "$(dirname "${LOCK_FILE}")"
     exec 9>"${LOCK_FILE}"
-    if ! flock -n 9; then
-        die "Ya hay otra instancia de wg-manager en ejecución (${LOCK_FILE})."
-    fi
+    flock -n 9 || die "Ya hay otra instancia de wg-manager en ejecución (${LOCK_FILE})."
 }
 
-release_lock() {
-    # flock se asocia a la descripción de fichero: cerrar fd 9 libera el lock.
-    exec 9>&- || true
-}
+release_lock() { exec 9>&- || true; }
 
 make_tmp_dir() {
     local d
@@ -207,7 +192,6 @@ is_ipv4() {
     return 0
 }
 
-# version_gt A B  -> verdadero si A > B (comparación SemVer con sort -V)
 version_gt() {
     [[ "$1" != "$2" ]] && [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]
 }
@@ -227,9 +211,8 @@ compose() {
 }
 
 detect_wan_iface() {
-    # La interfaz WAN es la que tiene la ruta por defecto IPv4. Es la interfaz
-    # sobre la que se aplica el MASQUERADE (SNAT dinámico) del tráfico de los
-    # clientes hacia Internet.
+    # La interfaz WAN es la de la ruta por defecto IPv4: por ella sale (con
+    # MASQUERADE) el tráfico de los clientes que navegan a través de la VPN.
     if [[ -z "${WAN_IFACE}" ]]; then
         WAN_IFACE="$(ip -4 route show default 2>/dev/null \
             | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
@@ -239,8 +222,6 @@ detect_wan_iface() {
 }
 
 detect_public_ip() {
-    # Devuelve la IP pública IPv4 consultando varios servicios; si todos
-    # fallan, recurre a la IP primaria de la interfaz WAN (útil en VPS sin NAT).
     local svc ip=""
     if [[ -n "${PUBLIC_ENDPOINT}" ]]; then
         printf '%s' "${PUBLIC_ENDPOINT}"; return 0
@@ -256,7 +237,6 @@ detect_public_ip() {
 }
 
 detect_ssh_ports() {
-    # Detecta los puertos reales de sshd para no bloquear la sesión al activar UFW.
     local ports=""
     if command -v sshd >/dev/null 2>&1; then
         ports="$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2 }' | sort -u | tr '\n' ' ' || true)"
@@ -273,17 +253,34 @@ random_secret() {
     openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
 }
 
+env_value() {
+    # Lee una clave del .env del panel (formato KEY='valor').
+    [[ -f "${ENV_FILE}" ]] || return 0
+    sed -n -E "s/^$1='?([^']*)'?\$/\1/p" "${ENV_FILE}" | head -n1
+}
+
+wait_for_panel() {
+    local _
+    for _ in $(seq 1 90); do
+        if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:${PANEL_PORT}/healthz" 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 # =============================================================================
-#  FASE 1 — PREPARACIÓN DEL SISTEMA OPERATIVO
+#  FASE 1 — SISTEMA OPERATIVO
 # =============================================================================
 prepare_os() {
-    step "Fase 1/7: Preparación del sistema operativo"
+    step "Fase 1/8: Preparación del sistema operativo"
     export DEBIAN_FRONTEND=noninteractive
     info "Actualizando índices de paquetes..."
     apt-get update -qq
     info "Instalando dependencias base..."
-    # wireguard-tools aporta wg/wg-quick en el HOST: la interfaz wg0 vive en el
-    # host y la gestiona systemd; wireguard-ui sólo escribe la configuración.
+    # wireguard-tools en el HOST: wg0 vive en el host (wg-quick@wg0) y el panel
+    # sólo le entrega la configuración.
     apt-get install -y -qq --no-install-recommends \
         ca-certificates curl wget gnupg lsb-release \
         iptables ufw git jq openssl iproute2 \
@@ -292,10 +289,10 @@ prepare_os() {
 }
 
 # =============================================================================
-#  FASE 2 — INSTALACIÓN DE DOCKER
+#  FASE 2 — DOCKER
 # =============================================================================
 install_docker() {
-    step "Fase 2/7: Docker Engine y Docker Compose"
+    step "Fase 2/8: Docker Engine y Docker Compose"
     if command -v docker >/dev/null 2>&1; then
         info "Docker ya instalado: $(docker --version)"
     else
@@ -306,50 +303,43 @@ install_docker() {
         sh "${tmp}/get-docker.sh" >/dev/null
         success "Docker instalado: $(docker --version)"
     fi
-
     systemctl enable --now docker >/dev/null 2>&1 || die "No se pudo iniciar el servicio docker."
-
     if ! detect_compose; then
-        info "Instalando plugin docker-compose-plugin..."
-        apt-get install -y -qq docker-compose-plugin >/dev/null \
-            || die "No se pudo instalar Docker Compose."
+        info "Instalando docker-compose-plugin..."
+        apt-get install -y -qq docker-compose-plugin >/dev/null || die "No se pudo instalar Docker Compose."
         detect_compose || die "Docker Compose sigue sin estar disponible."
     fi
     success "Docker Compose disponible: $("${DOCKER_COMPOSE[@]}" version --short 2>/dev/null || echo ok)"
 }
 
 # =============================================================================
-#  FASE 3 — TUNING DEL KERNEL
+#  FASE 3 — KERNEL
 # =============================================================================
 setup_sysctl() {
-    step "Fase 3/7: Tuning del kernel (sysctl)"
+    step "Fase 3/8: Tuning del kernel (sysctl)"
     cat >"${SYSCTL_FILE}" <<EOF
-# Generado por wg-manager ${VERSION} — $(date -u '+%F %T UTC')
+# Generado por wg-manager ${VERSION}
 #
-# ip_forward=1: convierte el host en router. Sin esto, los paquetes que entran
-# por wg0 con destino a Internet se descartan en lugar de reenviarse por la
-# interfaz WAN (la cadena FORWARD de netfilter nunca llegaría a evaluarse).
+# ip_forward=1: el host actúa como router. Sin esto los paquetes que entran por
+# wg0 (hacia Internet o hacia otro dispositivo del mismo cliente) se descartan
+# antes de llegar a la cadena FORWARD.
 net.ipv4.ip_forward = 1
 
-# Buffers máximos de socket (recepción/envío). WireGuard trabaja sobre UDP y
-# con muchos peers concurrentes los buffers por defecto (~208 KB) provocan
-# descartes en ráfagas; 2.5 MB absorbe picos sin coste relevante de memoria.
+# Buffers máximos de socket. WireGuard usa UDP; con muchos peers los valores
+# por defecto (~208 KB) provocan descartes en ráfagas. 2.5 MB los absorbe.
 net.core.rmem_max = ${NET_BUFFER_SIZE}
 net.core.wmem_max = ${NET_BUFFER_SIZE}
 EOF
     sysctl -p "${SYSCTL_FILE}" >/dev/null
-    # UFW puede reaplicar su propio sysctl al arrancar; garantizamos coherencia.
     if [[ -f /etc/ufw/sysctl.conf ]]; then
         sed -i -E 's|^#?[[:space:]]*net/ipv4/ip_forward[[:space:]]*=.*|net/ipv4/ip_forward=1|' /etc/ufw/sysctl.conf
     fi
     [[ "$(sysctl -n net.ipv4.ip_forward)" == "1" ]] || die "ip_forward no quedó activo."
     success "Parámetros de kernel aplicados (${SYSCTL_FILE})."
 
-    # Verificación del módulo WireGuard (integrado desde el kernel 5.6).
     if ! modprobe wireguard 2>/dev/null; then
-        if ! ip link add wgtest0 type wireguard 2>/dev/null; then
-            die "El kernel no soporta WireGuard (requiere >= 5.6 o el módulo wireguard-dkms)."
-        fi
+        ip link add wgtest0 type wireguard 2>/dev/null \
+            || die "El kernel no soporta WireGuard (requiere >= 5.6 o wireguard-dkms)."
         ip link del wgtest0 2>/dev/null || true
     fi
     success "Soporte WireGuard en kernel verificado."
@@ -358,154 +348,286 @@ EOF
 # =============================================================================
 #  FASE 4 — FIREWALL DE ENTRADA (UFW)
 # =============================================================================
-setup_firewall() {
-    step "Fase 4/7: Firewall de entrada (UFW)"
+setup_ufw() {
+    step "Fase 4/8: Firewall de entrada (UFW)"
     if [[ "${ENABLE_UFW}" != "true" ]]; then
-        warn "ENABLE_UFW=false: UFW no se gestiona. Abra manualmente ${WG_PORT}/udp y ${WGUI_PORT}/tcp."
+        warn "ENABLE_UFW=false: abra manualmente ${WG_PORT}/udp y ${PANEL_PORT}/tcp."
         return 0
     fi
-    # UFW controla sólo la cadena INPUT (servicios del propio host). El
-    # reenvío de los túneles se gestiona con reglas propias insertadas en la
-    # cabeza de FORWARD por los hooks de wg-quick (ver build_hooks), por lo
-    # que la política DEFAULT_FORWARD_POLICY="DROP" de UFW se mantiene como
-    # red de seguridad para cualquier otro tráfico reenviado.
+    # UFW sólo gobierna INPUT (servicios del host). El reenvío de los túneles
+    # lo controlan las reglas de wgp-firewall en la cabeza de FORWARD; la
+    # política DEFAULT_FORWARD_POLICY="DROP" de UFW queda como red de seguridad.
     local p
     for p in $(detect_ssh_ports); do
         ufw allow "${p}/tcp" comment 'SSH' >/dev/null
         info "Permitido SSH en ${p}/tcp (anti-bloqueo)."
     done
     ufw allow "${WG_PORT}/udp" comment 'WireGuard' >/dev/null
-    ufw allow "${WGUI_PORT}/tcp" comment 'wireguard-ui' >/dev/null
+    ufw allow "${PANEL_PORT}/tcp" comment 'WireGuard panel' >/dev/null
     ufw --force enable >/dev/null
-    success "UFW activo: SSH, ${WG_PORT}/udp y ${WGUI_PORT}/tcp permitidos."
+    success "UFW activo: SSH, ${WG_PORT}/udp y ${PANEL_PORT}/tcp permitidos."
 }
 
 # =============================================================================
-#  HOOKS DE wg-quick — AISLAMIENTO MULTI-TENANT + NAT
+#  FASE 5 — CÓDIGO DEL PANEL
+# =============================================================================
+fetch_source() {
+    step "Fase 5/8: Código del panel (${REPO_URL} @ ${BRANCH})"
+    install -d -m 0755 "${PLATFORM_DIR}"
+    if [[ -n "${LOCAL_SOURCE}" ]]; then
+        [[ -d "${LOCAL_SOURCE}/panel" ]] || die "LOCAL_SOURCE=${LOCAL_SOURCE} no contiene panel/"
+        rm -rf "${SRC_DIR}"
+        mkdir -p "${SRC_DIR}"
+        cp -a "${LOCAL_SOURCE}/." "${SRC_DIR}/"
+        success "Código copiado desde ${LOCAL_SOURCE}."
+        return 0
+    fi
+    if [[ -d "${SRC_DIR}/.git" ]]; then
+        git -C "${SRC_DIR}" remote set-url origin "${REPO_URL}"
+        git -C "${SRC_DIR}" fetch --depth 1 origin "${BRANCH}"
+        git -C "${SRC_DIR}" checkout -q -B "${BRANCH}" FETCH_HEAD
+        git -C "${SRC_DIR}" reset -q --hard FETCH_HEAD
+        git -C "${SRC_DIR}" clean -qfdx
+    else
+        rm -rf "${SRC_DIR}"
+        git clone -q --depth 1 --branch "${BRANCH}" "${REPO_URL}" "${SRC_DIR}"
+    fi
+    [[ -f "${SRC_DIR}/panel/Dockerfile" ]] || die "El repositorio no contiene panel/Dockerfile."
+    success "Código en ${SRC_DIR} ($(git -C "${SRC_DIR}" rev-parse --short HEAD))."
+}
+
+# =============================================================================
+#  FASE 6 — FIREWALL MULTI-TENANT EN EL HOST
 # -----------------------------------------------------------------------------
-#  wg-quick ejecuta (eval) cada hook al levantar/bajar la interfaz y sustituye
-#  %i por el nombre de la interfaz. Las reglas se insertan con posición
-#  explícita en la CABEZA de la cadena FORWARD para que se evalúen antes que
-#  las cadenas de Docker (DOCKER-USER/DOCKER-FORWARD) y de UFW (ufw-*):
+#  Esquema de reglas (insertadas en la CABEZA de FORWARD, antes que Docker/UFW):
 #
-#   FORWARD #1  -i wg0 -o wg0 -s SUBNET -d SUBNET          -> DROP
-#               Tráfico transversal cliente->cliente. En WireGuard, un paquete
-#               de un peer hacia otro peer entra por wg0 y sale por wg0 tras la
-#               decisión de enrutamiento; al descartarlo aquí, cada tenant sólo
-#               ve al servidor (10.252.0.1, cadena INPUT) e Internet.
-#   FORWARD #2  -i wg0 -o WAN -s SUBNET                    -> ACCEPT
-#               Salida de los clientes hacia Internet.
-#   FORWARD #3  -i WAN -o wg0 -d SUBNET ctstate REL,EST    -> ACCEPT
-#               Sólo retorno de conexiones iniciadas por el cliente (stateful):
-#               desde Internet no se pueden abrir conexiones hacia los peers.
-#   nat/POSTROUTING  -s SUBNET -o WAN                      -> MASQUERADE
-#               SNAT dinámico a la IP de la WAN; conntrack deshace la
-#               traducción en las respuestas.
+#   FORWARD #1  -i wg0 -o wg0                     -> WGP-TENANTS
+#   FORWARD #2  -i wg0 -o WAN -s SUBNET           -> ACCEPT    (salida a Internet)
+#   FORWARD #3  -i WAN -o wg0 -d SUBNET  REL,EST  -> ACCEPT    (sólo respuestas)
+#   nat/POSTROUTING  -s SUBNET -o WAN             -> MASQUERADE
 #
-#  Todas las reglas llevan "-m comment --comment wg-manager" para poder
-#  auditarlas (iptables -S | grep wg-manager). Se evita usar los caracteres
-#  < > & ' " en los hooks porque wireguard-ui renderiza wg0.conf mediante
-#  plantillas Go y podría escaparlos.
+#   WGP-TENANTS (una regla por cliente activo, regenerada por el panel):
+#     -s 10.252.N.0/24 -d 10.252.N.0/24 -> ACCEPT   (LAN privada del cliente N)
+#     ...
+#     -j DROP                                       (todo lo demás: entre clientes)
 #
-#  Orden de ciclo de vida:
-#   PreUp    : limpia restos de una ejecución anterior (idempotencia tras un
-#              crash o un kill -9 de wg-quick).
-#   PostUp   : inserta las 4 reglas.
-#   PreDown  : retira primero NAT y ACCEPT (corta la salida a Internet).
-#   PostDown : retira el DROP en último lugar, con la interfaz ya destruida,
-#              de modo que el aislamiento nunca queda abierto ni un instante.
+#  Un paquete de un dispositivo a otro entra por wg0 y vuelve a salir por wg0,
+#  así que TODO el tráfico entre peers pasa por WGP-TENANTS: sólo se acepta si
+#  origen y destino pertenecen a la misma red de cliente. La suplantación de IP
+#  no es posible: WireGuard descarta cualquier paquete de un peer cuyo origen no
+#  esté en su AllowedIPs (/32).
+#
+#  El panel (contenedor) sólo escribe la lista de redes en wgp/tenants.list; el
+#  host valida cada línea y construye él mismo las reglas, de modo que el
+#  contenedor nunca inyecta reglas iptables arbitrarias.
 # =============================================================================
-build_hooks() {
+install_firewall_helper() {
+    step "Fase 6/8: Firewall multi-tenant del host"
     detect_wan_iface
-    local ipt="iptables -w"
-    local tag="-m comment --comment ${RULE_TAG}"
-    local r_iso="-i %i -o %i -s ${WG_SUBNET} -d ${WG_SUBNET} ${tag} -j DROP"
-    local r_out="-i %i -o ${WAN_IFACE} -s ${WG_SUBNET} ${tag} -j ACCEPT"
-    local r_ret="-i ${WAN_IFACE} -o %i -d ${WG_SUBNET} -m conntrack --ctstate RELATED,ESTABLISHED ${tag} -j ACCEPT"
-    local r_nat="-s ${WG_SUBNET} -o ${WAN_IFACE} ${tag} -j MASQUERADE"
+    install -d -m 0700 "${WG_CONF_DIR}"
+    install -d -m 0755 "${WGP_DIR}"
 
-    local del_iso="${ipt} -D FORWARD ${r_iso} || true"
-    local del_out="${ipt} -D FORWARD ${r_out} || true"
-    local del_ret="${ipt} -D FORWARD ${r_ret} || true"
-    local del_nat="${ipt} -t nat -D POSTROUTING ${r_nat} || true"
+    cat >"${FIREWALL_BIN}" <<EOF
+#!/usr/bin/env bash
+# Generado por wg-manager ${VERSION}. No editar: se regenera en cada install/update.
+#   wgp-firewall up <iface>     PostUp de wg-quick: reglas base + cadena de clientes
+#   wgp-firewall down <iface>   PostDown de wg-quick: retira todo
+#   wgp-firewall sync           Regenera WGP-TENANTS desde ${WGP_DIR}/tenants.list
+#   wgp-firewall apply          sync + arranca wg-quick@${WG_INTERFACE} si está parado
+set -euo pipefail
 
-    HOOK_PRE_UP="${del_iso}; ${del_out}; ${del_ret}; ${del_nat}"
-    HOOK_POST_UP="${ipt} -I FORWARD 1 ${r_iso}; ${ipt} -I FORWARD 2 ${r_out}; ${ipt} -I FORWARD 3 ${r_ret}; ${ipt} -t nat -I POSTROUTING 1 ${r_nat}"
-    HOOK_PRE_DOWN="${del_nat}; ${del_ret}; ${del_out}"
-    HOOK_POST_DOWN="${del_iso}"
+SUBNET="${WG_SUBNET}"
+WAN="${WAN_IFACE}"
+IFACE_DEFAULT="${WG_INTERFACE}"
+LIST="${WGP_DIR}/tenants.list"
+CHAIN="${TENANT_CHAIN}"
+TAG="${RULE_TAG}"
+EOF
+    cat >>"${FIREWALL_BIN}" <<'EOF'
+
+ipt() { iptables -w "$@"; }
+
+# rule_specs IFACE -> una regla por línea: "tabla|cadena|posición|argumentos"
+rule_specs() {
+    local i=$1 c="-m comment --comment ${TAG}"
+    printf '%s\n' \
+        "filter|FORWARD|1|-i ${i} -o ${i} ${c} -j ${CHAIN}" \
+        "filter|FORWARD|2|-i ${i} -o ${WAN} -s ${SUBNET} ${c} -j ACCEPT" \
+        "filter|FORWARD|3|-i ${WAN} -o ${i} -d ${SUBNET} -m conntrack --ctstate RELATED,ESTABLISHED ${c} -j ACCEPT" \
+        "nat|POSTROUTING|1|-s ${SUBNET} -o ${WAN} ${c} -j MASQUERADE"
+}
+
+valid_cidr() {
+    local cidr=$1 ip pfx o
+    [[ "${cidr}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]{1,2})$ ]] || return 1
+    ip=${cidr%/*}; pfx=${cidr#*/}
+    (( 10#${pfx} >= 8 && 10#${pfx} <= 30 )) || return 1
+    IFS=. read -r -a o <<<"${ip}"
+    for x in "${o[@]}"; do (( 10#${x} <= 255 )) || return 1; done
+}
+
+sync_tenants() {
+    ipt -N "${CHAIN}" 2>/dev/null || true
+    local net n=0
+    {
+        echo "*filter"
+        echo ":${CHAIN} - [0:0]"      # con --noflush, declarar la cadena la vacía
+        if [[ -f "${LIST}" ]]; then
+            while IFS= read -r net || [[ -n "${net}" ]]; do
+                net="${net//[[:space:]]/}"
+                [[ -z "${net}" ]] && continue
+                if valid_cidr "${net}"; then
+                    echo "-A ${CHAIN} -s ${net} -d ${net} -m comment --comment ${TAG} -j ACCEPT"
+                    n=$((n + 1))
+                else
+                    logger -t wgp-firewall "Línea ignorada en ${LIST}: ${net}" || true
+                fi
+            done <"${LIST}"
+        fi
+        echo "-A ${CHAIN} -m comment --comment ${TAG} -j DROP"
+        echo "COMMIT"
+    } | iptables-restore -w --noflush
+    logger -t wgp-firewall "Cadena ${CHAIN} sincronizada: ${n} redes de cliente" || true
+}
+
+up() {
+    local iface=${1:-${IFACE_DEFAULT}} table chain pos args
+    sync_tenants
+    while IFS='|' read -r table chain pos args; do
+        # shellcheck disable=SC2086
+        ipt -t "${table}" -C "${chain}" ${args} 2>/dev/null || ipt -t "${table}" -I "${chain}" "${pos}" ${args}
+    done < <(rule_specs "${iface}")
+}
+
+down() {
+    local iface=${1:-${IFACE_DEFAULT}} table chain pos args
+    while IFS='|' read -r table chain pos args; do
+        # shellcheck disable=SC2086
+        while ipt -t "${table}" -D "${chain}" ${args} 2>/dev/null; do :; done
+    done < <(rule_specs "${iface}")
+    ipt -F "${CHAIN}" 2>/dev/null || true
+    ipt -X "${CHAIN}" 2>/dev/null || true
+}
+
+apply() {
+    sync_tenants
+    if [[ -s "/etc/wireguard/${IFACE_DEFAULT}.conf" ]] && ! systemctl is-active --quiet "wg-quick@${IFACE_DEFAULT}"; then
+        systemctl start "wg-quick@${IFACE_DEFAULT}" || true
+    fi
+}
+
+case "${1:-}" in
+    up)    up "${2:-}" ;;
+    down)  down "${2:-}" ;;
+    sync)  sync_tenants ;;
+    apply) apply ;;
+    *) echo "Uso: $0 {up|down|sync|apply} [iface]" >&2; exit 2 ;;
+esac
+EOF
+    chmod 0755 "${FIREWALL_BIN}"
+    bash -n "${FIREWALL_BIN}"
+
+    # El panel escribe wgp/apply.stamp tras cada cambio; esta unidad .path lo
+    # detecta y el host regenera la cadena de clientes (y levanta wg0 si hace falta).
+    cat >"${SYSTEMD_DIR}/wgp-apply.service" <<EOF
+[Unit]
+Description=Sincroniza el firewall multi-tenant de WireGuard
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=${FIREWALL_BIN} apply
+EOF
+    cat >"${SYSTEMD_DIR}/wgp-apply.path" <<EOF
+[Unit]
+Description=Vigila los cambios del panel WireGuard
+
+[Path]
+PathChanged=${WGP_DIR}/apply.stamp
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Limpieza de la versión 1.x (wireguard-ui).
+    if [[ -f "${SYSTEMD_DIR}/wg-platform-reload.path" ]]; then
+        systemctl disable --now wg-platform-reload.path >/dev/null 2>&1 || true
+        rm -f "${SYSTEMD_DIR}/wg-platform-reload.path" "${SYSTEMD_DIR}/wg-platform-reload.service" \
+              /usr/local/sbin/wg-platform-reload
+        info "Unidades de wireguard-ui (v1) eliminadas."
+    fi
+
+    systemctl daemon-reload
+    systemctl enable --now wgp-apply.path >/dev/null 2>&1
+    success "wgp-firewall instalado (WAN=${WAN_IFACE}, subred ${WG_SUBNET})."
 }
 
 # =============================================================================
-#  FASE 5 — GENERACIÓN Y DESPLIEGUE DEL STACK DOCKER
+#  FASE 7 — DESPLIEGUE DEL PANEL
 # =============================================================================
-deploy_stack() {
-    step "Fase 5/7: Despliegue de wireguard-ui en ${PLATFORM_DIR}"
-    build_hooks
-
-    local endpoint
+deploy_panel() {
+    step "Fase 7/8: Despliegue del panel en ${PLATFORM_DIR}"
+    local endpoint session_secret
     endpoint="$(detect_public_ip)" || die "No se pudo determinar la IP pública. Defina PUBLIC_ENDPOINT en ${CONFIG_FILE}."
     info "Endpoint público de WireGuard: ${endpoint}:${WG_PORT}"
-    info "Interfaz WAN para NAT: ${WAN_IFACE}"
 
-    install -d -m 0750 "${PLATFORM_DIR}" "${DB_DIR}"
-    install -d -m 0700 "${WG_CONF_DIR}"
+    install -d -m 0700 "${DATA_DIR}"
 
-    # El SESSION_SECRET firma las cookies de sesión del panel; se conserva entre
-    # reinstalaciones para no invalidar sesiones ni romper el login.
-    local session_secret=""
-    if [[ -f "${ENV_FILE}" ]]; then
-        session_secret="$(sed -n -E "s/^SESSION_SECRET='?([^']*)'?$/\1/p" "${ENV_FILE}" | head -n1)"
+    # Migración desde v1: wireguard-ui generó otro wg0.conf con otras claves.
+    if [[ -f "${WG_CONF_FILE}" ]] && ! grep -q "Generado por el panel WireGuard Multi-Tenant" "${WG_CONF_FILE}"; then
+        cp -p "${WG_CONF_FILE}" "${WG_CONF_FILE}.pre-panel.bak"
+        warn "Se ha guardado el wg0.conf anterior en ${WG_CONF_FILE}.pre-panel.bak (será reemplazado)."
     fi
+
+    session_secret="$(env_value SESSION_SECRET)"
     [[ -n "${session_secret}" ]] || session_secret="$(random_secret)"
 
-    # Fichero .env con permisos 600 (contiene credenciales y secretos).
-    # NOTA: WGUI_ENDPOINT_ADDRESS es la dirección PÚBLICA que se escribe como
-    # "Endpoint" en la configuración de los clientes; la subred del túnel
-    # (10.252.0.0/16) se define en WGUI_SERVER_INTERFACE_ADDRESSES.
-    # Las variables WGUI_SERVER_* sólo se aplican cuando wireguard-ui crea su
-    # base de datos por primera vez; después manda la BD (db/server/*.json),
-    # que este script sincroniza en configure_isolation().
     umask 077
     cat >"${ENV_FILE}" <<EOF
-# Generado por wg-manager ${VERSION} — $(date -u '+%F %T UTC')
-WGUI_USERNAME='${WGUI_ADMIN_USER}'
-WGUI_PASSWORD='${WGUI_ADMIN_PASS}'
+# Generado por wg-manager ${VERSION}. Para cambiar valores edite ${CONFIG_FILE}
+# y ejecute: wg-manager update
+PANEL_BIND='${PANEL_BIND}'
+PANEL_PORT='${PANEL_PORT}'
 SESSION_SECRET='${session_secret}'
-BIND_ADDRESS='${WGUI_BIND}:${WGUI_PORT}'
-WGUI_ENDPOINT_ADDRESS='${endpoint}'
-WGUI_SERVER_INTERFACE_ADDRESSES='${WG_SERVER_ADDRESS}'
-WGUI_SERVER_LISTEN_PORT='${WG_PORT}'
-WGUI_DNS='${WG_DNS}'
-WGUI_MTU='${WG_MTU}'
-WGUI_PERSISTENT_KEEPALIVE='${WG_KEEPALIVE}'
-WGUI_DEFAULT_CLIENT_ALLOWED_IPS='${WG_CLIENT_ALLOWED_IPS}'
-WGUI_DEFAULT_CLIENT_ENABLE_AFTER_CREATION='true'
-WGUI_CONFIG_FILE_PATH='${WG_CONF_FILE}'
-WGUI_SERVER_POST_UP_SCRIPT='${HOOK_POST_UP}'
-WGUI_SERVER_POST_DOWN_SCRIPT='${HOOK_POST_DOWN}'
-WGUI_MANAGE_START='false'
-WGUI_MANAGE_RESTART='false'
-WGUI_LOG_LEVEL='INFO'
+ADMIN_USER='${ADMIN_USER}'
+ADMIN_PASSWORD='${ADMIN_PASS}'
+DATA_DIR='/data'
+WG_CONF_DIR='${WG_CONF_DIR}'
+WG_INTERFACE='${WG_INTERFACE}'
+WG_SUBNET='${WG_SUBNET}'
+WG_SERVER_ADDRESS='${WG_SERVER_ADDRESS}'
+TENANT_PREFIX='${TENANT_PREFIX}'
+WG_PORT='${WG_PORT}'
+WG_ENDPOINT='${endpoint}'
+WG_DNS='${WG_DNS}'
+WG_MTU='${WG_MTU}'
+WG_KEEPALIVE='${WG_KEEPALIVE}'
+FIREWALL_HOOK='${FIREWALL_BIN}'
+COOKIE_SECURE='false'
+LOG_LEVEL='INFO'
 EOF
     umask 022
     chmod 600 "${ENV_FILE}"
 
-    # network_mode: host -> el panel escucha directamente en el host y no hay
-    # NAT de Docker de por medio. wireguard-ui no necesita NET_ADMIN porque NO
-    # levanta la interfaz: sólo escribe /etc/wireguard/wg0.conf, y systemd en el
-    # host (wg-quick@wg0 + unidad .path) aplica los cambios.
+    # network_mode: host -> el panel escucha en el host y `wg` ve la interfaz wg0.
+    # NET_ADMIN sólo para `wg syncconf`/`wg show` (netlink de WireGuard); las
+    # reglas iptables las aplica el host (wgp-firewall), no el contenedor.
     cat >"${COMPOSE_FILE}" <<EOF
-# Generado por wg-manager ${VERSION} — $(date -u '+%F %T UTC')
+# Generado por wg-manager ${VERSION}
 services:
-  wireguard-ui:
-    image: ${WG_UI_IMAGE}
-    container_name: ${WG_UI_CONTAINER}
+  panel:
+    build:
+      context: ./src/panel
+    image: wgp-panel:local
+    container_name: ${CONTAINER}
     restart: unless-stopped
     network_mode: host
+    cap_add:
+      - NET_ADMIN
     env_file:
       - .env
     volumes:
-      - ./db:/app/db
+      - ./data:/data
       - ${WG_CONF_DIR}:${WG_CONF_DIR}
     logging:
       driver: json-file
@@ -514,203 +636,70 @@ services:
         max-file: "3"
 EOF
 
-    info "Validando docker-compose.yml..."
     compose config -q
-    info "Descargando imagen ${WG_UI_IMAGE}..."
-    compose pull -q
+    info "Construyendo la imagen del panel (puede tardar un par de minutos)..."
+    compose build --pull -q
+    # --remove-orphans retira el contenedor wireguard-ui de la v1 (mismo proyecto).
     compose up -d --remove-orphans
-    wait_for_ui || die "wireguard-ui no responde en el puerto ${WGUI_PORT}. Ver: docker logs ${WG_UI_CONTAINER}"
-    success "wireguard-ui en ejecución."
+    wait_for_panel || die "El panel no responde en el puerto ${PANEL_PORT}. Ver: docker logs ${CONTAINER}"
+    success "Panel en ejecución."
 }
 
-wait_for_ui() {
+# =============================================================================
+#  FASE 8 — INTERFAZ WIREGUARD
+# =============================================================================
+start_wireguard() {
+    step "Fase 8/8: Interfaz ${WG_INTERFACE}"
     local _
-    for _ in $(seq 1 60); do
-        if curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:${WGUI_PORT}/login" 2>/dev/null; then
-            return 0
-        fi
+    # El panel genera wg0.conf (claves del servidor + peers) al arrancar.
+    for _ in $(seq 1 30); do
+        [[ -s "${WG_CONF_FILE}" ]] && grep -q "Generado por el panel" "${WG_CONF_FILE}" && break
         sleep 1
     done
-    return 1
-}
+    grep -q "Generado por el panel" "${WG_CONF_FILE}" 2>/dev/null || die "El panel no generó ${WG_CONF_FILE}."
 
-# =============================================================================
-#  FASE 6 — INYECCIÓN DEL AISLAMIENTO MULTI-TENANT
-# =============================================================================
-configure_isolation() {
-    step "Fase 6/7: Inyección de reglas PreUp/PostUp/PreDown/PostDown"
-    build_hooks
-
-    # 1) Esperar a que wireguard-ui inicialice su base de datos JSON.
-    local _
-    for _ in $(seq 1 60); do
-        [[ -s "${DB_SERVER_IFACE}" ]] && break
-        sleep 1
-    done
-    [[ -s "${DB_SERVER_IFACE}" ]] || die "No apareció ${DB_SERVER_IFACE}; wireguard-ui no inicializó la BD."
-
-    # 2) Escribir los hooks en la BD (fuente de verdad del panel). Así cada vez
-    #    que un administrador pulse "Apply Config", wireguard-ui regenerará
-    #    wg0.conf con las reglas de aislamiento incluidas.
-    local tmp_json
-    tmp_json="$(make_tmp_dir)/interfaces.json"
-    jq --arg pre_up "${HOOK_PRE_UP}" --arg post_up "${HOOK_POST_UP}" \
-       --arg pre_down "${HOOK_PRE_DOWN}" --arg post_down "${HOOK_POST_DOWN}" \
-       '.pre_up = $pre_up | .post_up = $post_up | .pre_down = $pre_down
-        | .post_down = $post_down | .updated_at = (now | todate)' \
-       "${DB_SERVER_IFACE}" >"${tmp_json}"
-    jq -e . "${tmp_json}" >/dev/null || die "JSON resultante inválido; no se modifica la BD."
-    cp -p "${DB_SERVER_IFACE}" "${DB_SERVER_IFACE}.bak"
-    cat "${tmp_json}" >"${DB_SERVER_IFACE}"   # conserva inode/permisos del bind mount
-    success "Hooks inyectados en la BD de wireguard-ui."
-
-    # 3) Reiniciar el contenedor para que recargue la BD sin caché.
-    compose restart "wireguard-ui" >/dev/null
-    wait_for_ui || die "wireguard-ui no volvió a responder tras el reinicio."
-
-    # 4) Regenerar wg0.conf: primero vía API oficial ("Apply Config"); si falla
-    #    (p. ej. contraseña ya cambiada), se parchea wg0.conf de forma directa.
-    if apply_config_via_api; then
-        success "wg0.conf regenerado vía API de wireguard-ui."
-    else
-        warn "No se pudo usar la API (¿credenciales cambiadas?). Se parchea ${WG_CONF_FILE} directamente."
-        patch_wg_conf
-    fi
-
-    grep -q -- "--comment ${RULE_TAG}" "${WG_CONF_FILE}" 2>/dev/null \
-        || die "Las reglas no están presentes en ${WG_CONF_FILE}."
-    success "Aislamiento multi-tenant configurado en ${WG_CONF_FILE}."
-}
-
-apply_config_via_api() {
-    local jar base="http://127.0.0.1:${WGUI_PORT}" user pass resp
-    jar="$(make_tmp_dir)/cookies"
-    user="$(sed -n -E "s/^WGUI_USERNAME='?([^']*)'?$/\1/p" "${ENV_FILE}" | head -n1)"
-    pass="$(sed -n -E "s/^WGUI_PASSWORD='?([^']*)'?$/\1/p" "${ENV_FILE}" | head -n1)"
-
-    resp="$(curl -fsS --max-time 10 -c "${jar}" -H 'Content-Type: application/json' \
-        -H "Origin: ${base}" -X POST "${base}/login" \
-        -d "$(jq -cn --arg u "${user}" --arg p "${pass}" '{username: $u, password: $p, rememberMe: false}')" \
-        2>/dev/null)" || return 1
-    jq -e '.success == true' >/dev/null 2>&1 <<<"${resp}" || return 1
-
-    resp="$(curl -fsS --max-time 15 -b "${jar}" -H 'Content-Type: application/json' \
-        -H "Origin: ${base}" -X POST "${base}/api/apply-wg-config" 2>/dev/null)" || return 1
-    jq -e '.success == true' >/dev/null 2>&1 <<<"${resp}" || return 1
-    [[ -s "${WG_CONF_FILE}" ]]
-}
-
-patch_wg_conf() {
-    # Reescribe sólo la sección [Interface]: elimina cualquier Pre/PostUp/Down
-    # previo e inserta los nuevos hooks justo tras la cabecera. Los [Peer] no
-    # se tocan. wireguard-ui generará lo mismo desde la BD en el próximo
-    # "Apply Config", por lo que no hay deriva entre panel y fichero.
-    [[ -s "${WG_CONF_FILE}" ]] || die "${WG_CONF_FILE} no existe todavía. Entre en el panel y pulse 'Apply Config', luego ejecute: $0 update"
-    local tmp
-    tmp="$(make_tmp_dir)/wg.conf"
-    awk -v pre_up="${HOOK_PRE_UP}" -v post_up="${HOOK_POST_UP}" \
-        -v pre_down="${HOOK_PRE_DOWN}" -v post_down="${HOOK_POST_DOWN}" '
-        BEGIN { in_iface = 0 }
-        /^[[:space:]]*\[Interface\][[:space:]]*$/ {
-            print; in_iface = 1
-            print "PreUp = " pre_up
-            print "PostUp = " post_up
-            print "PreDown = " pre_down
-            print "PostDown = " post_down
-            next
-        }
-        /^[[:space:]]*\[/ { in_iface = 0 }
-        in_iface && /^[[:space:]]*(PreUp|PostUp|PreDown|PostDown)[[:space:]]*=/ { next }
-        { print }
-    ' "${WG_CONF_FILE}" >"${tmp}"
-    cp -p "${WG_CONF_FILE}" "${WG_CONF_FILE}.bak"
-    install -m 0600 "${tmp}" "${WG_CONF_FILE}"
-}
-
-# =============================================================================
-#  FASE 7 — SERVICIO WIREGUARD EN EL HOST (systemd)
-# =============================================================================
-setup_wg_service() {
-    step "Fase 7/7: Servicio WireGuard del host (systemd)"
-
-    # Helper de recarga: si la interfaz ya está levantada, "wg syncconf" aplica
-    # altas/bajas de peers en caliente SIN cortar las sesiones existentes. Si
-    # no lo está, se arranca con wg-quick (que ejecuta los hooks de red).
-    cat >"${RELOAD_HELPER}" <<EOF
-#!/usr/bin/env bash
-# Generado por wg-manager ${VERSION}. Recarga ${WG_INTERFACE} tras cambios de wireguard-ui.
-set -euo pipefail
-if ip link show ${WG_INTERFACE} >/dev/null 2>&1; then
-    wg syncconf ${WG_INTERFACE} <(wg-quick strip ${WG_INTERFACE})
-else
-    systemctl restart wg-quick@${WG_INTERFACE}.service
-fi
-EOF
-    chmod 0755 "${RELOAD_HELPER}"
-
-    cat >"${SYSTEMD_DIR}/wg-platform-reload.service" <<EOF
-[Unit]
-Description=Recarga ${WG_INTERFACE} tras cambios de wireguard-ui
-After=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=${RELOAD_HELPER}
-EOF
-
-    # La unidad .path vigila wg0.conf: cada "Apply Config" del panel dispara
-    # la recarga automática sin dar privilegios de red al contenedor.
-    cat >"${SYSTEMD_DIR}/wg-platform-reload.path" <<EOF
-[Unit]
-Description=Vigila ${WG_CONF_FILE} (wireguard-ui)
-
-[Path]
-PathChanged=${WG_CONF_FILE}
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    systemctl enable --now wg-platform-reload.path >/dev/null 2>&1
     systemctl enable "wg-quick@${WG_INTERFACE}.service" >/dev/null 2>&1
-
-    # Reinicio completo (no syncconf) para que los hooks nuevos se ejecuten.
-    systemctl restart "wg-quick@${WG_INTERFACE}.service" \
-        || die "wg-quick@${WG_INTERFACE} no arrancó. Ver: journalctl -u wg-quick@${WG_INTERFACE}"
-    systemctl is-active --quiet "wg-quick@${WG_INTERFACE}.service" \
-        || die "wg-quick@${WG_INTERFACE} no está activo."
-
+    if systemctl is-active --quiet "wg-quick@${WG_INTERFACE}.service"; then
+        # Ya activa (reinstalación/update): no se reinicia para no cortar a los
+        # clientes; se reaplican las reglas (idempotente) y la cadena de clientes.
+        "${FIREWALL_BIN}" up "${WG_INTERFACE}"
+        info "${WG_INTERFACE} ya estaba activa; reglas reaplicadas sin cortar conexiones."
+    else
+        # wg-quick lee wg0.conf completo (clave + peers) y su PostUp llama a
+        # wgp-firewall up, que crea las reglas base y la cadena de clientes.
+        systemctl start "wg-quick@${WG_INTERFACE}.service" \
+            || die "wg-quick@${WG_INTERFACE} no arrancó. Ver: journalctl -u wg-quick@${WG_INTERFACE}"
+    fi
+    systemctl is-active --quiet "wg-quick@${WG_INTERFACE}.service" || die "wg-quick@${WG_INTERFACE} no está activo."
     verify_rules
-    success "Interfaz ${WG_INTERFACE} activa con aislamiento y NAT."
+    success "Interfaz ${WG_INTERFACE} activa con aislamiento entre clientes y NAT."
 }
 
 verify_rules() {
     local rules
-    rules="$(iptables -w -S FORWARD; iptables -w -t nat -S POSTROUTING)"
-    grep -q -- "-o ${WG_INTERFACE} .*--comment ${RULE_TAG} -j DROP" <<<"${rules}" \
-        || die "La regla de aislamiento (DROP ${WG_INTERFACE}->${WG_INTERFACE}) no está cargada."
-    grep -q -- "--comment ${RULE_TAG} -j MASQUERADE" <<<"${rules}" \
-        || die "La regla MASQUERADE no está cargada."
-    success "Reglas iptables verificadas (aislamiento + MASQUERADE)."
+    rules="$(iptables -w -S FORWARD; iptables -w -S "${TENANT_CHAIN}"; iptables -w -t nat -S POSTROUTING)"
+    grep -q -- "-i ${WG_INTERFACE} -o ${WG_INTERFACE} .*-j ${TENANT_CHAIN}" <<<"${rules}" \
+        || die "Falta el salto ${WG_INTERFACE}->${WG_INTERFACE} a ${TENANT_CHAIN}."
+    grep -q -- "-A ${TENANT_CHAIN} .*-j DROP" <<<"${rules}" || die "Falta el DROP final de ${TENANT_CHAIN}."
+    grep -q -- "--comment ${RULE_TAG} -j MASQUERADE" <<<"${rules}" || die "Falta la regla MASQUERADE."
+    success "Reglas verificadas (aislamiento por cliente + MASQUERADE)."
 }
 
 # =============================================================================
-#  PERSISTENCIA: copia del script y fichero de configuración
+#  PERSISTENCIA
 # =============================================================================
 persist_installation() {
     if [[ ! -f "${CONFIG_FILE}" ]]; then
         cat >"${CONFIG_FILE}" <<EOF
-# Configuración local de wg-manager (prevalece sobre los valores del script
-# y NO se sobrescribe en las auto-actualizaciones).
+# Configuración local de wg-manager. Prevalece sobre los valores del script y
+# NO se sobrescribe en las auto-actualizaciones. Tras editar: wg-manager update
 REPO_URL="${REPO_URL}"
 BRANCH="${BRANCH}"
-PLATFORM_DIR="${PLATFORM_DIR}"
-WG_UI_IMAGE="${WG_UI_IMAGE}"
-WGUI_BIND="${WGUI_BIND}"
-WGUI_PORT="${WGUI_PORT}"
+PANEL_BIND="${PANEL_BIND}"
+PANEL_PORT="${PANEL_PORT}"
 WG_SUBNET="${WG_SUBNET}"
 WG_SERVER_ADDRESS="${WG_SERVER_ADDRESS}"
+TENANT_PREFIX="${TENANT_PREFIX}"
 WG_PORT="${WG_PORT}"
 WG_DNS="${WG_DNS}"
 PUBLIC_ENDPOINT="${PUBLIC_ENDPOINT}"
@@ -722,7 +711,7 @@ EOF
     fi
     if [[ -n "${SCRIPT_PATH}" && "${SCRIPT_PATH}" != "${INSTALL_BIN}" ]]; then
         install -m 0755 "${SCRIPT_PATH}" "${INSTALL_BIN}"
-        info "Script instalado en ${INSTALL_BIN} (use: wg-manager update)."
+        info "Script instalado en ${INSTALL_BIN}."
     fi
 }
 
@@ -730,7 +719,6 @@ EOF
 #  AUTO-ACTUALIZACIÓN DEL SCRIPT
 # =============================================================================
 raw_script_url() {
-    # https://github.com/OWNER/REPO(.git) -> https://raw.githubusercontent.com/OWNER/REPO/BRANCH/PATH
     local repo="${REPO_URL%/}"
     repo="${repo%.git}"
     repo="${repo#https://github.com/}"
@@ -745,35 +733,25 @@ self_update() {
         success "Script ya actualizado en esta ejecución (v${VERSION})."
         return 0
     fi
-
-    local target="${SCRIPT_PATH:-${INSTALL_BIN}}"
-    local url tmp remote_version
+    local target="${SCRIPT_PATH:-${INSTALL_BIN}}" url tmp remote_version
     url="$(raw_script_url)"
     tmp="$(make_tmp_dir)/wg-manager.sh"
-
     info "Consultando ${url}"
     if ! curl -fsSL --retry 3 --max-time 30 -H 'Cache-Control: no-cache' -o "${tmp}" "${url}"; then
         warn "No se pudo descargar la versión remota; se continúa con v${VERSION}."
         return 0
     fi
-
-    # Validaciones de integridad antes de sustituir nada.
     head -n1 "${tmp}" | grep -Eq '^#!.*bash' || { warn "Fichero remoto sin shebang bash; se ignora."; return 0; }
     bash -n "${tmp}" || { warn "El script remoto tiene errores de sintaxis; se ignora."; return 0; }
     remote_version="$(sed -n -E 's/^(readonly[[:space:]]+)?VERSION="([^"]+)".*/\2/p' "${tmp}" | head -n1)"
     [[ -n "${remote_version}" ]] || { warn "No se encontró VERSION en el script remoto."; return 0; }
-
     if ! version_gt "${remote_version}" "${VERSION}"; then
         success "El script está al día (local v${VERSION}, remoto v${remote_version})."
         return 0
     fi
-
     info "Nueva versión disponible: v${VERSION} -> v${remote_version}"
-    if [[ -f "${target}" ]]; then
-        cp -p "${target}" "${target}.v${VERSION}.bak"
-    fi
-    # install + mv: sustitución atómica. El proceso bash actual conserva el
-    # inode antiguo abierto, por lo que no lee código mezclado.
+    [[ -f "${target}" ]] && cp -p "${target}" "${target}.v${VERSION}.bak"
+    # install + mv: sustitución atómica; el bash en curso conserva el inode antiguo.
     install -m 0755 "${tmp}" "${target}.new"
     mv -f "${target}.new" "${target}"
     chmod +x "${target}"
@@ -781,7 +759,6 @@ self_update() {
         install -m 0755 "${target}" "${INSTALL_BIN}"
     fi
     success "Script actualizado a v${remote_version}. Relanzando..."
-
     release_lock
     cleanup   # el trap EXIT no se ejecuta con exec
     export WG_MANAGER_SELF_UPDATED=1
@@ -789,48 +766,26 @@ self_update() {
 }
 
 # =============================================================================
-#  ACTUALIZACIÓN DE CONTENEDORES
-# =============================================================================
-update_containers() {
-    local force=$1
-    step "Actualización de contenedores"
-    [[ -f "${COMPOSE_FILE}" ]] || die "No existe ${COMPOSE_FILE}. Ejecute primero: $0 install"
-    detect_compose || die "Docker Compose no disponible."
-
-    local running_image latest_image
-    info "Descargando últimas imágenes (docker compose pull)..."
-    compose pull -q
-    latest_image="$(docker image inspect -f '{{.Id}}' "${WG_UI_IMAGE}" 2>/dev/null || true)"
-    running_image="$(docker inspect -f '{{.Image}}' "${WG_UI_CONTAINER}" 2>/dev/null || true)"
-
-    if [[ "${force}" == "true" || -z "${running_image}" || "${running_image}" != "${latest_image}" ]]; then
-        info "Recreando contenedores (imagen nueva o --force)..."
-        compose up -d --force-recreate --remove-orphans
-        wait_for_ui || die "wireguard-ui no responde tras la recreación."
-        docker image prune -f >/dev/null 2>&1 || true
-        success "Contenedores recreados con ${WG_UI_IMAGE} (${latest_image:7:12})."
-    else
-        success "La imagen ya es la más reciente; no se recrea nada."
-    fi
-}
-
-# =============================================================================
 #  COMANDOS
 # =============================================================================
+banner() {
+    printf '%s%sWireGuard Multi-Tenant Platform — wg-manager v%s%s\n' "${C_BOLD}" "${C_GREEN}" "${VERSION}" "${C_RESET}"
+}
+
 cmd_install() {
     check_root
     check_os
     acquire_lock
     touch "${LOG_FILE}" && chmod 600 "${LOG_FILE}"
-    printf '%s%sWireGuard Multi-Tenant Platform — wg-manager v%s%s\n' "${C_BOLD}" "${C_GREEN}" "${VERSION}" "${C_RESET}"
-
+    banner
     prepare_os
     install_docker
     setup_sysctl
-    setup_firewall
-    deploy_stack
-    configure_isolation
-    setup_wg_service
+    setup_ufw
+    fetch_source
+    install_firewall_helper
+    deploy_panel
+    start_wireguard
     persist_installation
     print_summary
 }
@@ -839,77 +794,99 @@ cmd_update() {
     local force="false" skip_self="false" arg
     for arg in "$@"; do
         case "${arg}" in
-            --force)      force="true" ;;
-            --skip-self)  skip_self="true" ;;
+            --force)     force="true" ;;
+            --skip-self) skip_self="true" ;;
             *) die "Opción desconocida para update: ${arg}" ;;
         esac
     done
     check_root
     acquire_lock
     touch "${LOG_FILE}" && chmod 600 "${LOG_FILE}"
-
+    banner
     [[ "${skip_self}" == "true" ]] || self_update
     detect_compose || die "Docker Compose no disponible. Ejecute: $0 install"
-    update_containers "${force}"
-    # Re-sincroniza los hooks: si la nueva versión del script cambió las
-    # reglas de red, quedan aplicadas sin intervención manual.
-    configure_isolation
-    setup_wg_service
+    [[ -f "${COMPOSE_FILE}" ]] || die "No existe ${COMPOSE_FILE}. Ejecute: $0 install"
+
+    setup_sysctl
+    fetch_source
+    install_firewall_helper
+    if [[ "${force}" == "true" ]]; then
+        deploy_panel
+        compose up -d --force-recreate >/dev/null
+        wait_for_panel || die "El panel no responde tras recrearlo."
+    else
+        # deploy_panel reconstruye la imagen; compose sólo recrea el
+        # contenedor si la imagen o la configuración han cambiado.
+        deploy_panel
+    fi
+    start_wireguard
     print_summary
 }
 
 cmd_status() {
     check_root
     detect_compose || die "Docker Compose no disponible."
-    step "Contenedores"
+    step "Panel"
     compose ps || true
     step "Interfaz ${WG_INTERFACE}"
-    wg show "${WG_INTERFACE}" 2>/dev/null || warn "${WG_INTERFACE} no está activa."
-    step "Reglas iptables de wg-manager"
+    wg show "${WG_INTERFACE}" 2>/dev/null | head -n 12 || warn "${WG_INTERFACE} no está activa."
+    step "Redes de cliente (${TENANT_CHAIN})"
+    iptables -w -S "${TENANT_CHAIN}" 2>/dev/null || warn "Cadena ${TENANT_CHAIN} no cargada."
+    step "Reglas base"
     { iptables -w -S FORWARD; iptables -w -t nat -S POSTROUTING; } | grep -- "${RULE_TAG}" || warn "Sin reglas cargadas."
     step "Servicios"
-    systemctl --no-pager --lines=0 status "wg-quick@${WG_INTERFACE}" wg-platform-reload.path || true
+    systemctl --no-pager --lines=0 status "wg-quick@${WG_INTERFACE}" wgp-apply.path || true
+}
+
+cmd_logs() {
+    check_root
+    detect_compose || die "Docker Compose no disponible."
+    compose logs --tail 200 -f
+}
+
+cmd_reset_admin() {
+    check_root
+    docker exec "${CONTAINER}" python -m app.cli reset-admin "$@"
 }
 
 print_summary() {
     local ip
+    detect_wan_iface
     ip="$(detect_public_ip 2>/dev/null || echo '<IP-PUBLICA>')"
     printf '\n%s%s════════════════════════════════════════════════════════════%s\n' "${C_GREEN}" "${C_BOLD}" "${C_RESET}"
     printf '%s  Plataforma WireGuard Multi-Tenant operativa (v%s)%s\n' "${C_GREEN}${C_BOLD}" "${VERSION}" "${C_RESET}"
     printf '%s%s════════════════════════════════════════════════════════════%s\n' "${C_GREEN}" "${C_BOLD}" "${C_RESET}"
-    printf '  Panel web       : %shttp://%s:%s%s\n' "${C_CYAN}" "${ip}" "${WGUI_PORT}" "${C_RESET}"
+    printf '  Panel web       : %shttp://%s:%s%s\n' "${C_CYAN}" "${ip}" "${PANEL_PORT}" "${C_RESET}"
     printf '  Endpoint WG     : %s:%s/udp\n' "${ip}" "${WG_PORT}"
-    printf '  Subred túnel    : %s (servidor %s)\n' "${WG_SUBNET}" "${WG_SERVER_ADDRESS}"
-    printf '  Aislamiento     : tráfico cliente<->cliente BLOQUEADO; salida NAT por %s\n' "${WAN_IFACE}"
-    printf '  Stack           : %s\n' "${PLATFORM_DIR}"
+    printf '  Subred          : %s (una /%s por cliente; servidor %s)\n' "${WG_SUBNET}" "${TENANT_PREFIX}" "${WG_SERVER_ADDRESS}"
+    printf '  Aislamiento     : LAN privada por cliente; tráfico entre clientes BLOQUEADO\n'
+    printf '  Salida Internet : NAT por %s\n' "${WAN_IFACE}"
     printf '  Actualizar      : %s update\n' "${INSTALL_BIN}"
-    printf '\n%s  ⚠  Credenciales por defecto: %s / %s%s\n' "${C_YELLOW}${C_BOLD}" "${WGUI_ADMIN_USER}" "${WGUI_ADMIN_PASS}" "${C_RESET}"
-    printf '%s     Cámbielas INMEDIATAMENTE en el panel (Users → Edit).%s\n' "${C_YELLOW}" "${C_RESET}"
-    printf '%s     El panel se sirve por HTTP: se recomienda un proxy TLS o restringir%s\n' "${C_YELLOW}" "${C_RESET}"
-    printf '%s     el puerto %s/tcp a IPs de administración (ufw allow from <IP>).%s\n\n' "${C_YELLOW}" "${WGUI_PORT}" "${C_RESET}"
+    printf '\n%s  ⚠  Acceso inicial: %s / (contraseña de instalación, por defecto "admin")%s\n' "${C_YELLOW}${C_BOLD}" "${ADMIN_USER}" "${C_RESET}"
+    printf '%s     El panel obliga a cambiarla en el primer inicio de sesión.%s\n' "${C_YELLOW}" "${C_RESET}"
+    printf '%s     Se sirve por HTTP: use un proxy TLS o limite %s/tcp a IPs de confianza.%s\n\n' "${C_YELLOW}" "${PANEL_PORT}" "${C_RESET}"
 }
 
 usage() {
     cat <<EOF
-${C_BOLD}wg-manager v${VERSION}${C_RESET} — Plataforma WireGuard Multi-Tenant (wireguard-ui + Docker)
+${C_BOLD}wg-manager v${VERSION}${C_RESET} — Plataforma WireGuard Multi-Tenant
 
 ${C_BOLD}Uso:${C_RESET}
   sudo $0 install                Instalación completa (idempotente)
-  sudo $0 update [opciones]      Auto-actualiza el script y los contenedores
-       --force                   Recrea los contenedores aunque no haya imagen nueva
+  sudo $0 update [opciones]      Actualiza script, panel (git + build) y firewall
+       --force                   Recrea el contenedor aunque no haya cambios
        --skip-self               No auto-actualiza el script
-  sudo $0 status                 Estado de contenedores, interfaz y reglas
-  $0 version                     Muestra la versión
-  $0 help                        Muestra esta ayuda
+  sudo $0 status                 Estado del panel, interfaz y reglas
+  sudo $0 logs                   Logs del panel (Ctrl+C para salir)
+  sudo $0 reset-admin [--username U] [--password P]
+                                 Contraseña temporal para el administrador
+  $0 version | help
 
 ${C_BOLD}Configuración:${C_RESET} ${CONFIG_FILE}
 ${C_BOLD}Repositorio:${C_RESET}   ${REPO_URL} (rama ${BRANCH})
 EOF
 }
 
-# =============================================================================
-#  PARSEO DE ARGUMENTOS / PUNTO DE ENTRADA
-# =============================================================================
 main() {
     local cmd="${1:-help}"
     [[ $# -gt 0 ]] && shift
@@ -917,6 +894,8 @@ main() {
         install)              cmd_install "$@" ;;
         update)               cmd_update "$@" ;;
         status)               cmd_status "$@" ;;
+        logs)                 cmd_logs "$@" ;;
+        reset-admin)          cmd_reset_admin "$@" ;;
         version|-v|--version) echo "wg-manager v${VERSION}" ;;
         help|-h|--help)       usage ;;
         *) usage; die "Comando desconocido: ${cmd}" ;;
