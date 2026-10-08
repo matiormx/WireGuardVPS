@@ -7,7 +7,7 @@ Plataforma WireGuard **multi-tenant** basada en [wireguard-ui](https://github.co
 En un VPS Debian 11+/Ubuntu 20.04+ limpio:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matiormx/wireguardvps/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/matiormx/WireGuardVps/main/install.sh | sudo bash
 ```
 
 `install.sh` instala lo mínimo (curl, certificados), descarga y valida `wg-manager.sh`, lo deja en `/usr/local/sbin/wg-manager` y ejecuta `wg-manager install`, que se encarga del resto (Docker, Compose, iptables, UFW, jq, git, wireguard-tools, sysctl, panel y reglas de aislamiento).
@@ -15,7 +15,7 @@ curl -fsSL https://raw.githubusercontent.com/matiormx/wireguardvps/main/install.
 Opciones por variables de entorno, por ejemplo una contraseña inicial distinta de `admin`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matiormx/wireguardvps/main/install.sh | sudo WGUI_ADMIN_PASS='MiClaveSegura' bash
+curl -fsSL https://raw.githubusercontent.com/matiormx/WireGuardVps/main/install.sh | sudo WGUI_ADMIN_PASS='MiClaveSegura' bash
 ```
 
 Otras útiles: `PUBLIC_ENDPOINT` (IP o dominio si la autodetección falla), `ENABLE_UFW=false`, `WG_PORT`, `WGUI_PORT`, `WG_BRANCH` (rama a descargar).

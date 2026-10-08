@@ -31,7 +31,7 @@ set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 # VERSIÓN DEL SCRIPT (se compara con la versión publicada en GitHub)
 # Incrementar siguiendo SemVer en cada publicación.
 # -----------------------------------------------------------------------------
-readonly VERSION="1.0.0"
+readonly VERSION="1.0.1"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
@@ -48,7 +48,7 @@ if [[ -f "${CONFIG_FILE}" ]]; then
 fi
 
 # --- Repositorio de auto-actualización ---------------------------------------
-: "${REPO_URL:=https://github.com/matiormx/wireguardvps}"
+: "${REPO_URL:=https://github.com/matiormx/WireGuardVps}"
 : "${BRANCH:=main}"
 : "${SCRIPT_REMOTE_PATH:=wg-manager.sh}"       # ruta del script dentro del repo
 

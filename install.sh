@@ -4,7 +4,7 @@
 # -----------------------------------------------------------------------------
 #  Uso (en un VPS Debian/Ubuntu limpio, como root):
 #
-#    curl -fsSL https://raw.githubusercontent.com/matiormx/wireguardvps/main/install.sh | sudo bash
+#    curl -fsSL https://raw.githubusercontent.com/matiormx/WireGuardVps/main/install.sh | sudo bash
 #
 #  Con opciones (se reenvían a wg-manager):
 #
@@ -34,7 +34,7 @@ set -euo pipefail
 # Todo el código va dentro de main() y se invoca en la última línea: si la
 # descarga vía "curl | bash" se corta a medias, bash no ejecuta nada parcial.
 main() {
-    local raw_base="${WG_REPO_RAW:-https://raw.githubusercontent.com/matiormx/wireguardvps}"
+    local raw_base="${WG_REPO_RAW:-https://raw.githubusercontent.com/matiormx/WireGuardVps}"
     local branch="${WG_BRANCH:-main}"
     local target="/usr/local/sbin/wg-manager"
     local url="${raw_base%/}/${branch}/wg-manager.sh"
