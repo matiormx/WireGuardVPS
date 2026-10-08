@@ -2,15 +2,25 @@
 
 Plataforma WireGuard **multi-tenant** basada en [wireguard-ui](https://github.com/ngoduykhanh/wireguard-ui) + Docker, desplegada y mantenida por `wg-manager.sh`.
 
-## Instalación
+## Instalación (un solo comando)
+
+En un VPS Debian 11+/Ubuntu 20.04+ limpio:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/matiormx/wireguardvps/main/wg-manager.sh -o wg-manager.sh
-chmod +x wg-manager.sh
-sudo ./wg-manager.sh install
+curl -fsSL https://raw.githubusercontent.com/matiormx/wireguardvps/main/install.sh | sudo bash
 ```
 
-Requisitos: Debian 11+/Ubuntu 20.04+, systemd, kernel ≥ 5.6 y acceso root.
+`install.sh` instala lo mínimo (curl, certificados), descarga y valida `wg-manager.sh`, lo deja en `/usr/local/sbin/wg-manager` y ejecuta `wg-manager install`, que se encarga del resto (Docker, Compose, iptables, UFW, jq, git, wireguard-tools, sysctl, panel y reglas de aislamiento).
+
+Opciones por variables de entorno, por ejemplo una contraseña inicial distinta de `admin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/matiormx/wireguardvps/main/install.sh | sudo WGUI_ADMIN_PASS='MiClaveSegura' bash
+```
+
+Otras útiles: `PUBLIC_ENDPOINT` (IP o dominio si la autodetección falla), `ENABLE_UFW=false`, `WG_PORT`, `WGUI_PORT`, `WG_BRANCH` (rama a descargar).
+
+Requisitos: systemd, kernel ≥ 5.6 (WireGuard integrado) y acceso root. En VPS LXC/OpenVZ el proveedor debe habilitar WireGuard y Docker.
 
 ## Comandos
 
