@@ -15,9 +15,9 @@ def main() -> None:
         create_app(),
         host=os.environ.get("PANEL_BIND", "0.0.0.0"),
         port=int(os.environ.get("PANEL_PORT", "5000")),
-        # Detrás de Caddy (PANEL_DOMAIN) se confía en X-Forwarded-For sólo si
-        # la conexión viene de localhost, para conocer la IP real del cliente.
-        proxy_headers=os.environ.get("TRUST_PROXY", "false").lower() == "true",
+        # Detrás de Caddy se confía en X-Forwarded-For/-Proto sólo si la conexión
+        # viene de localhost: así se conoce la IP real y si la petición fue HTTPS.
+        proxy_headers=os.environ.get("TRUST_PROXY", "true").lower() == "true",
         forwarded_allow_ips="127.0.0.1",
         access_log=False,
     )

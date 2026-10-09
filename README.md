@@ -25,7 +25,8 @@ curl -fsSL https://raw.githubusercontent.com/matiormx/WireGuardVps/main/install.
 |---|---|---|
 | `ADMIN_USER` / `ADMIN_PASS` | `admin` / `admin` | Credenciales iniciales del administrador |
 | `PUBLIC_ENDPOINT` | autodetectada | IP o dominio que usarán los dispositivos |
-| `PANEL_DOMAIN` | — | Dominio del panel: activa HTTPS automático (Let's Encrypt) y lo hace instalable como app |
+| `ENABLE_HTTPS` | `true` | Caddy con HTTPS automático para los dominios configurados en el panel |
+| `PANEL_DOMAIN` | — | Dominio inicial del panel (opcional: también se configura desde *Ajustes*) |
 | `ACME_EMAIL` | — | Email opcional para avisos de Let's Encrypt |
 | `PANEL_PORT` | `5000` | Puerto del panel web (sin dominio) |
 | `WG_PORT` | `51820` | Puerto UDP de WireGuard |
@@ -59,19 +60,19 @@ Incluye perfiles rápidos (*Protección básica*, *Familia*, *Máxima*), listas 
 
 Los dispositivos en modo «solo red privada» creados antes de esta versión deben **reimportar su configuración** para usar el resolver. Los de «todo el tráfico» se filtran sin cambios.
 
-## HTTPS y app instalable (PWA)
+## Dominios, HTTPS y app instalable (PWA)
 
-El panel se puede instalar como app en el móvil y en el ordenador: icono propio, pantalla completa y sin zoom. El acceso «Instalar app» está en el menú y en la pantalla de login.
+Todo se configura **desde el panel**, sin entrar al servidor:
 
-- **iPhone/iPad:** funciona también por HTTP. En Safari: Compartir → *Añadir a pantalla de inicio*.
-- **Android/Chrome/Edge:** exigen **HTTPS**. Apunta un dominio (registro A) a la IP del VPS y ejecuta:
+- **Admin → Ajustes → Dominio del panel:** escribe tu dominio (por ejemplo `vpn.tudominio.com`), crea un registro **A** hacia la IP del VPS y pulsa *Comprobar*. El certificado HTTPS de Let's Encrypt se emite solo y se renueva automáticamente. Cuando funcione, activa **Forzar HTTPS**: el acceso por `http://IP:5000` redirigirá al dominio.
+- **Dominio propio de cada cliente:** cada cliente puede poner el suyo desde *Cuenta* (o el admin desde la ficha del cliente → *Dominio*), por ejemplo `vpn.suempresa.com`. En ese dominio el panel muestra su nombre (también como nombre de la app instalada) y solo puede entrar ese cliente.
 
-```bash
-echo 'PANEL_DOMAIN="vpn.midominio.com"' | sudo tee -a /etc/wg-manager.conf
-sudo wg-manager update
-```
+Por dentro, Caddy funciona en modo *on-demand TLS*: la primera vez que se visita un dominio, pregunta al panel si está dado de alta y si su DNS apunta a este servidor; solo entonces pide el certificado. Así nadie puede generar certificados para dominios ajenos y no hay que reiniciar nada al añadir o quitar dominios. Se usan los puertos 80 y 443; para no instalar Caddy, usa `ENABLE_HTTPS=false`.
 
-Esto despliega Caddy con un certificado gratuito que se renueva solo. El panel queda en `https://vpn.midominio.com`: abre los puertos 80 y 443 y cierra el 5000.
+La app se instala desde el botón **Instalar app** (menú o pantalla de login):
+
+- **iPhone/iPad:** Safari → Compartir → *Añadir a pantalla de inicio* (funciona también sin HTTPS).
+- **Android/Chrome/Edge:** requieren HTTPS, es decir, un dominio configurado.
 
 ## Cómo funciona
 
@@ -126,4 +127,4 @@ sudo tests/firewall_netns_test.sh                     # firewall con tráfico re
 
 Para publicar una versión nueva del script, sube `readonly VERSION="x.y.z"` en `wg-manager.sh`; `wg-manager update` solo lo sustituye si la versión remota es mayor.
 
-> ⚠️ Sin `PANEL_DOMAIN` el panel se sirve por HTTP en el puerto 5000. Configura un dominio (arriba) o limita el acceso: `ufw delete allow 5000/tcp && ufw allow from <tu-IP> to any port 5000`.
+> ⚠️ Hasta que configures un dominio y actives *Forzar HTTPS* (en *Ajustes*), el panel también responde por HTTP en el puerto 5000.

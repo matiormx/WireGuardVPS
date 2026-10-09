@@ -434,3 +434,16 @@ body { overflow-x: clip; } /* clip: no crea un contenedor de scroll (hidden sí)
   .filter-grid { grid-template-columns: 1fr; }
   .presets { gap: 8px; }
 }
+
+/* ==========================================================================
+   Dominios
+   ========================================================================== */
+.domain-status { display: grid; gap: 8px; padding: 14px; border-radius: var(--radius-sm); background: var(--bg-elev); border: 1px solid var(--border); }
+.domain-status .btn { justify-self: start; }
+.check-line { display: flex; align-items: flex-start; gap: 8px; font-size: 13.5px; }
+.check-line svg { width: 16px; height: 16px; flex: none; margin-top: 2px; }
+.check-line.ok { color: var(--success); }
+.check-line.bad { color: var(--warning); }
+.check-line span { color: var(--text); overflow-wrap: anywhere; }
+ol.steps { margin: 0; padding-left: 20px; color: var(--muted); font-size: 13.5px; line-height: 1.8; }
+ol.steps code { color: var(--text); background: var(--surface-2); padding: 1px 6px; border-radius: 6px; overflow-wrap: anywhere; }

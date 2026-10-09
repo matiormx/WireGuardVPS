@@ -7,7 +7,7 @@
 "use strict";
 
 const $app = document.getElementById("app");
-const state = { me: null, timer: null, installPrompt: null };
+const state = { me: null, timer: null, installPrompt: null, brand: { title: "WireGuard Cloud", tenant: false } };
 const REFRESH_MS = 10000;
 
 /* ------------------------------------------------------------------ iconos */
@@ -250,7 +250,14 @@ function go(hash) { if (location.hash !== hash) location.hash = hash; else rende
 window.addEventListener("hashchange", () => render());
 
 function stopTimer() { if (state.timer) { clearInterval(state.timer); state.timer = null; } }
-function every(fn) { stopTimer(); state.timer = setInterval(() => { if (!document.hidden) fn(true); }, REFRESH_MS); }
+function isEditing() {
+  const el = document.activeElement;
+  return Boolean(el && ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName));
+}
+function every(fn) {
+  stopTimer();
+  state.timer = setInterval(() => { if (!document.hidden && !isEditing()) fn(true); }, REFRESH_MS);
+}
 
 async function render() {
   stopTimer();
@@ -261,6 +268,7 @@ async function render() {
   const main = shell(section || "home");
   try {
     if (section === "account") return accountView(main);
+    if (section === "settings" && isAdmin) return await settingsView(main);
     if (isAdmin) {
       if (section === "clients" && id && sub === "filters") return await filtersView(main, Number(id));
       if (section === "clients" && id) return await clientDetailView(main, Number(id));
@@ -278,13 +286,13 @@ async function render() {
 
 /* ------------------------------------------------------------------ shell */
 function brand() {
-  return h("div", { class: "brand" }, h("div", { class: "logo" }, icon("logo")), h("span", { text: "WireGuard Cloud" }));
+  return h("div", { class: "brand" }, h("div", { class: "logo" }, icon("logo")), h("span", { text: state.brand.title }));
 }
 
 function shell(active) {
   const isAdmin = state.me.role === "admin";
   const links = isAdmin
-    ? [["home", "#/", "dashboard", "Panel"], ["clients", "#/clients", "users", "Clientes"], ["account", "#/account", "key", "Cuenta"]]
+    ? [["home", "#/", "dashboard", "Panel"], ["clients", "#/clients", "users", "Clientes"], ["settings", "#/settings", "globe", "Ajustes"], ["account", "#/account", "key", "Cuenta"]]
     : [["home", "#/", "network", "Mi red"], ["filters", "#/filters", "shield", "Filtros"], ["account", "#/account", "key", "Cuenta"]];
   const sidebar = h("aside", { class: "sidebar" },
     brand(),
@@ -389,10 +397,149 @@ function forcePasswordView() {
 }
 
 function accountView(main) {
-  fill(main, 
+  fill(main,
     pageHead("Cuenta", `Sesión iniciada como ${state.me.username}`),
-    h("div", { class: "card", style: { maxWidth: "640px" } }, h("div", { class: "card-head" }, h("h2", { text: "Cambiar contraseña" })), passwordForm()),
+    h("div", { class: "card", style: { maxWidth: "720px" } }, h("div", { class: "card-head" }, h("h2", { text: "Cambiar contraseña" })), passwordForm()),
+    state.me.role === "tenant" ? h("div", { class: "card", style: { maxWidth: "720px" } },
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dominio personalizado" }),
+        h("div", { class: "note", text: "Accede a tu panel con tu propio dominio y HTTPS, por ejemplo vpn.tuempresa.com." }))),
+      domainEditor({
+        load: () => api("GET", "/api/tenant-domain"),
+        save: (domain) => api("PUT", "/api/tenant-domain", { domain }),
+        statusUrl: "/api/domain-status",
+        example: "vpn.tuempresa.com",
+      })) : null,
   );
+}
+
+/* ------------------------------------------------------------------ dominios */
+function checkLine(ok, okText, badText) {
+  return h("div", { class: `check-line ${ok ? "ok" : "bad"}` }, icon(ok ? "check" : "alert"), h("span", { text: ok ? okText : badText }));
+}
+
+function domainStatusBlock(st) {
+  if (!st || !st.domain) return null;
+  const dns = st.dns;
+  const expected = dns.expected.join(", ") || "la IP del servidor";
+  return h("div", { class: "domain-status" },
+    checkLine(dns.ok, `DNS correcto: ${st.domain} → ${dns.resolved.join(", ")}`,
+      dns.resolved.length ? `El DNS apunta a ${dns.resolved.join(", ")}; debe apuntar a ${expected}`
+        : `${st.domain} todavía no resuelve. Crea el registro A hacia ${expected} (puede tardar unos minutos).`),
+    checkLine(st.https.ok, "HTTPS activo con certificado válido",
+      `HTTPS pendiente${st.https.error ? `: ${st.https.error}` : ""}`),
+    st.https.ok ? h("a", { class: "btn sm", href: `https://${st.domain}`, target: "_blank", rel: "noopener" }, icon("globe"), `Abrir https://${st.domain}`) : null);
+}
+
+/* Editor de dominio reutilizable: cuenta del cliente, ficha del cliente (admin). */
+function domainEditor({ load, save, statusUrl, example, onChange }) {
+  const box = h("div", { class: "grid", style: { gap: "14px" } }, spinnerBlock());
+  let data = null;
+  let status = null;
+
+  const check = async (btn) => {
+    if (btn) { btn.disabled = true; btn.lastChild.textContent = "Comprobando…"; }
+    try { status = await api("GET", statusUrl); } catch (e) { toast(e.message, "err"); }
+    draw();
+  };
+  const store = async (value, msg) => {
+    try {
+      data = await save(value);
+      status = null;
+      toast(msg);
+      onChange && onChange(data);
+      draw();
+      if (data.domain) check();
+    } catch (e) { toast(e.message, "err"); }
+  };
+
+  const draw = () => {
+    const ip = (data.server_ips || [])[0] || "IP del servidor";
+    const inp = input({ placeholder: example, value: data.domain || "", autocapitalize: "off", spellcheck: false, inputmode: "url" });
+    const checkBtn = data.domain ? h("button", { class: "btn", onClick: (e) => check(e.currentTarget) }, icon("refresh"), "Comprobar") : null;
+    fill(box,
+      h("div", { class: "input-group" }, inp,
+        h("button", { class: "btn primary", onClick: () => store(inp.value.trim() || null, inp.value.trim() ? "Dominio guardado" : "Dominio eliminado") }, "Guardar")),
+      data.domain ? h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+        h("span", { class: "badge accent" }, icon("globe"), data.domain), checkBtn,
+        h("button", { class: "btn ghost sm", onClick: () => store(null, "Dominio eliminado") }, icon("trash"), "Quitar")) : null,
+      domainStatusBlock(status),
+      h("ol", { class: "steps" },
+        h("li", null, "En tu proveedor de dominios crea un registro ", h("b", { text: "A" }), ": ",
+          h("code", { text: data.domain || example }), " → ", h("code", { text: ip }), "."),
+        h("li", { text: "Escríbelo arriba y pulsa Guardar." }),
+        h("li", { text: "Pulsa Comprobar: el certificado HTTPS se emite solo en cuanto el DNS apunta aquí (suele tardar menos de un minuto)." })),
+    );
+  };
+
+  load().then((d) => { data = d; draw(); if (d.domain) check(); }).catch((e) => fill(box, h("p", { class: "note", text: e.message })));
+  return box;
+}
+
+async function settingsView(main) {
+  let cfg = await api("GET", "/api/admin/settings");
+  let status = null;
+  const body = h("div");
+
+  const check = async (btn) => {
+    if (btn) { btn.disabled = true; btn.lastChild.textContent = "Comprobando…"; }
+    try { status = await api("GET", "/api/domain-status?target=main"); } catch (e) { toast(e.message, "err"); }
+    draw();
+  };
+  const store = async (patch, msg) => {
+    try {
+      cfg = await api("PUT", "/api/admin/settings", { main_domain: cfg.main_domain, force_https: cfg.force_https, ...patch });
+      toast(msg);
+      draw();
+      if (patch.main_domain !== undefined) { status = null; if (cfg.main_domain) check(); }
+    } catch (e) { toast(e.message, "err"); draw(); }
+  };
+
+  const draw = () => {
+    const ip = cfg.server_ips[0] || "IP del servidor";
+    const inp = input({ placeholder: "vpn.tudominio.com", value: cfg.main_domain || "", autocapitalize: "off", spellcheck: false, inputmode: "url" });
+    const httpsOk = location.protocol === "https:" || (status && status.https && status.https.ok);
+    fill(body,
+      h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dominio del panel" }),
+          h("div", { class: "note", text: "Con un dominio el panel funciona con HTTPS (certificado gratuito de Let's Encrypt, renovado automáticamente) y se puede instalar como app en Android." }))),
+        h("div", { class: "grid", style: { gap: "14px" } },
+          h("div", { class: "input-group" }, inp,
+            h("button", { class: "btn primary", onClick: () => store({ main_domain: inp.value.trim() || null, force_https: inp.value.trim() ? cfg.force_https : false },
+              inp.value.trim() ? "Dominio guardado" : "Dominio eliminado") }, "Guardar")),
+          cfg.main_domain ? h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+            h("span", { class: "badge accent" }, icon("globe"), cfg.main_domain),
+            h("button", { class: "btn", onClick: (e) => check(e.currentTarget) }, icon("refresh"), "Comprobar")) : null,
+          domainStatusBlock(status),
+          cfg.main_domain ? h("div", { class: "field" },
+            h("label", { class: "switch" },
+              h("input", { type: "checkbox", checked: cfg.force_https, disabled: !cfg.force_https && !httpsOk,
+                onChange: (e) => store({ force_https: e.target.checked }, e.target.checked ? "HTTPS obligatorio activado" : "HTTPS obligatorio desactivado") }),
+              h("span", { class: "track" }), h("span", { text: "Forzar HTTPS" })),
+            h("div", { class: "help", text: cfg.force_https
+              ? `El acceso por http://IP:puerto redirige a https://${cfg.main_domain}.`
+              : "Redirige el acceso por IP y HTTP al dominio seguro. Se habilita cuando la comprobación de HTTPS es correcta." })) : null,
+          h("ol", { class: "steps" },
+            h("li", null, "En tu proveedor de dominios crea un registro ", h("b", { text: "A" }), ": ",
+              h("code", { text: cfg.main_domain || "vpn.tudominio.com" }), " → ", h("code", { text: ip }), "."),
+            h("li", { text: "Escríbelo arriba y pulsa Guardar." }),
+            h("li", { text: "Pulsa Comprobar. Cuando HTTPS esté activo, abre el panel con el dominio y activa «Forzar HTTPS»." })))),
+      h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dominios de clientes" }),
+          h("div", { class: "note", text: "Cada cliente puede usar su propio dominio (desde su Cuenta o desde su ficha). Allí verá el panel con su nombre y sólo podrá entrar él." }))),
+        cfg.tenant_domains.length
+          ? h("div", { class: "table-wrap" }, h("table", { class: "cards" },
+            h("thead", null, h("tr", null, h("th", { text: "Cliente" }), h("th", { text: "Dominio" }), h("th", { text: "Estado" }))),
+            h("tbody", null, cfg.tenant_domains.map((t) => h("tr", { class: "link", onClick: () => go(`#/clients/${t.tenant_id}`) },
+              h("td", { class: "primary" }, h("div", { class: "name", text: t.name })),
+              h("td", { class: "mono", "data-label": "Dominio", text: t.domain }),
+              h("td", { class: "aside" }, h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : "Suspendido" })))))))
+          : h("p", { class: "note", text: "Ningún cliente tiene dominio propio todavía." })),
+    );
+  };
+
+  fill(main, pageHead("Ajustes", "Dominio, HTTPS y dominios personalizados de los clientes"), body);
+  draw();
+  if (cfg.main_domain) check();
 }
 
 /* ------------------------------------------------------------------ admin: panel */
@@ -477,7 +624,7 @@ async function clientsView(main) {
   };
   const load = async () => { tenants = await api("GET", "/api/admin/tenants"); draw(); };
   await load();
-  fill(main, 
+  fill(main,
     pageHead("Clientes", "Cada cliente tiene su red /24 privada; sus dispositivos se ven entre sí, pero nunca con los de otros clientes.",
       [h("div", { class: "search" }, icon("search"), input({ placeholder: "Buscar cliente o red…", onInput: (e) => { filter = e.target.value; draw(); } })),
         h("button", { class: "btn primary", onClick: () => newTenantModal(() => load()) }, icon("plus"), "Nuevo cliente")]),
@@ -535,6 +682,17 @@ async function clientDetailView(main, id) {
         filterBadges(t.filters)),
       [
         h("a", { class: "btn", href: `#/clients/${t.id}/filters` }, icon("shield"), "Filtros"),
+        h("button", { class: "btn", onClick: () => {
+          const m = modal({ title: `Dominio de ${t.name}`, wide: true,
+            body: domainEditor({
+              load: () => api("GET", `/api/tenant-domain?tenant_id=${t.id}`),
+              save: (domain) => api("PUT", `/api/tenant-domain?tenant_id=${t.id}`, { domain }),
+              statusUrl: `/api/domain-status?tenant_id=${t.id}`,
+              example: "vpn.cliente.com",
+            }),
+            actions: [h("button", { class: "btn", onClick: () => m.close() }, "Cerrar")],
+            onClose: reload });
+        } }, icon("globe"), "Dominio"),
         h("button", { class: "btn", onClick: () => editTenantModal(t, reload) }, icon("edit"), "Editar"),
         h("button", { class: "btn", onClick: () => resetTenantPassword(t, reload) }, icon("key"), "Contraseña"),
         h("button", { class: `btn ${t.enabled ? "danger" : ""}`, onClick: async () => {
@@ -914,7 +1072,12 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
 
 /* ------------------------------------------------------------------ arranque */
 (async function boot() {
-  const res = await fetch("/api/me", { credentials: "same-origin" }).catch(() => null);
-  state.me = res && res.ok ? await res.json() : null;
+  const [me, br] = await Promise.all([
+    fetch("/api/me", { credentials: "same-origin" }).catch(() => null),
+    fetch("/api/branding", { credentials: "same-origin" }).catch(() => null),
+  ]);
+  if (br && br.ok) state.brand = await br.json();
+  document.title = state.brand.title;
+  state.me = me && me.ok ? await me.json() : null;
   render();
 })();

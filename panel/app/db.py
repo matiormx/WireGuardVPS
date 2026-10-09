@@ -99,6 +99,8 @@ def _migrate(c: sqlite3.Connection) -> None:
     _ensure_column(c, "tenants", "dns_allow", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(c, "tenants", "dns_deny", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(c, "devices", "dns_filter", "INTEGER NOT NULL DEFAULT 1")
+    _ensure_column(c, "tenants", "domain", "TEXT")
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_domain ON tenants(domain) WHERE domain IS NOT NULL")
 
 
 def get_setting(c: sqlite3.Connection, key: str) -> str | None:

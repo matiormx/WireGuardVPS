@@ -1,5 +1,6 @@
 """API HTTP y servidor de la SPA del panel WireGuard Multi-Tenant."""
 
+import asyncio
 import hashlib
 import io
 import json
@@ -14,11 +15,11 @@ from typing import Annotated
 
 import segno
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import dnsfilter, security, wg
+from . import dnsfilter, domains, security, wg
 from .config import Settings, load_settings
 from .db import Database, get_setting, username_taken
 
@@ -130,6 +131,24 @@ class FiltersIn(BaseModel):
         return out
 
 
+class SettingsIn(BaseModel):
+    main_domain: str | None = Field(default=None, max_length=253)
+    force_https: bool = False
+
+
+class DomainIn(BaseModel):
+    domain: str | None = Field(default=None, max_length=253)
+
+
+def _clean_host(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    host = domains.normalize_host(value)
+    if host is None:
+        raise HTTPException(422, f"Dominio no válido: {value!r} (ejemplo: vpn.miempresa.com)")
+    return host
+
+
 @dataclass
 class Principal:
     role: str
@@ -152,6 +171,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     sessions = security.SessionManager(settings.session_secret, settings.session_hours * 3600)
     limiter = security.RateLimiter(limit=10, window=300)
     dns = dnsfilter.DnsFilter(settings, database)
+    doms = domains.Domains(settings, database)
+    doms.seed_from_env(settings.panel_domain)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -166,10 +187,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings, app.state.db, app.state.wg, app.state.dns = settings, database, wgm, dns
+    app.state.domains = doms
 
     # ------------------------------------------------------------------ middleware
     @app.middleware("http")
     async def guard(request: Request, call_next):
+        # HTTPS forzado: el acceso directo por HTTP (http://IP:5000) se redirige al
+        # dominio. Se exceptúan las peticiones locales sin proxy (healthchecks,
+        # instalador y la consulta de Caddy a /internal/tls-ask).
+        if not local_direct(request) and request.url.scheme != "https":
+            with database.conn() as c:
+                force, main = doms.force_https(c), doms.main_domain(c)
+                host = domains.host_of(request.headers.get("host"))
+                target = host if doms.registered(c, host) else main
+            if force and target:
+                url = f"https://{target}{request.url.path}" + (f"?{request.url.query}" if request.url.query else "")
+                return RedirectResponse(url, status_code=308)
         # CSRF: toda petición mutante a la API debe llevar la cabecera X-WGP.
         # Un formulario o <img> de otro sitio no puede añadir cabeceras propias
         # sin un preflight CORS, que este servidor nunca autoriza.
@@ -188,6 +221,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if request.url.path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
         return response
+
+    def local_direct(request: Request) -> bool:
+        """Conexión desde el propio servidor que no viene a través de Caddy."""
+        client = request.client.host if request.client else ""
+        return client in ("127.0.0.1", "::1") and "x-forwarded-for" not in request.headers
 
     # ------------------------------------------------------------------ dependencias
     def db_conn():
@@ -226,10 +264,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     Admin = Annotated[Principal, Depends(admin)]
 
-    def set_session(response: Response, role: str, uid: int, password_hash: str) -> None:
+    def set_session(request: Request, response: Response, role: str, uid: int, password_hash: str) -> None:
         response.set_cookie(
             sessions.COOKIE, sessions.dump(role, uid, security.password_version(password_hash)),
-            max_age=sessions.max_age, httponly=True, samesite="strict", secure=settings.cookie_secure, path="/",
+            max_age=sessions.max_age, httponly=True, samesite="strict", path="/",
+            secure=settings.cookie_secure or request.url.scheme == "https",
         )
 
     # ------------------------------------------------------------------ helpers
@@ -297,8 +336,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(401, "Usuario o contraseña incorrectos")
         if role == "tenant" and not row["enabled"]:
             raise HTTPException(403, "Cuenta deshabilitada. Contacte con su proveedor.")
+        # En el dominio propio de un cliente sólo puede entrar ese cliente.
+        owner = doms.tenant_for_host(c, domains.host_of(request.headers.get("host")))
+        if owner is not None and not (role == "tenant" and row["id"] == owner["id"]):
+            raise HTTPException(403, "Esta cuenta no puede acceder desde este dominio")
         limiter.reset(key)
-        set_session(response, role, row["id"], row["password_hash"])
+        set_session(request, response, role, row["id"], row["password_hash"])
         return {"role": role, "must_change": bool(row["must_change"])}
 
     @app.post("/api/auth/logout")
@@ -315,7 +358,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return data
 
     @app.post("/api/me/password")
-    def change_password(body: PasswordIn, p: AnyUser, response: Response, c: Conn):
+    def change_password(body: PasswordIn, p: AnyUser, request: Request, response: Response, c: Conn):
         table = "admins" if p.is_admin else "tenants"
         row = c.execute(f"SELECT password_hash FROM {table} WHERE id = ?", (p.id,)).fetchone()
         if not security.verify_password(body.current, row["password_hash"]):
@@ -324,7 +367,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, "La nueva contraseña debe ser distinta")
         new_hash = security.hash_password(body.new)
         c.execute(f"UPDATE {table} SET password_hash = ?, must_change = 0 WHERE id = ?", (new_hash, p.id))
-        set_session(response, p.role, p.id, new_hash)  # el resto de sesiones quedan invalidadas
+        set_session(request, response, p.role, p.id, new_hash)  # el resto de sesiones quedan invalidadas
         return {"ok": True}
 
     # ------------------------------------------------------------------ admin
@@ -543,6 +586,85 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         apply_wg()
         return filters_json(c, tid)
 
+    # ------------------------------------------------------------------ dominios
+    @app.get("/internal/tls-ask", include_in_schema=False)
+    async def tls_ask(request: Request, domain: str = ""):
+        # Caddy pregunta antes de pedir un certificado (on-demand TLS).
+        if not local_direct(request):
+            raise HTTPException(404)
+        ok = await asyncio.to_thread(doms.allow_certificate, domain)
+        if not ok:
+            raise HTTPException(404, "Dominio no autorizado")
+        return {"ok": True}
+
+    def branding_for(c: sqlite3.Connection, request: Request) -> dict:
+        owner = doms.tenant_for_host(c, domains.host_of(request.headers.get("host")))
+        if owner is not None:
+            return {"title": owner["name"], "tenant": True}
+        return {"title": "WireGuard Cloud", "tenant": False}
+
+    @app.get("/api/branding")
+    def branding(request: Request, c: Conn):
+        return branding_for(c, request)
+
+    @app.get("/api/admin/settings")
+    def get_settings(_: Admin, c: Conn):
+        return {
+            "main_domain": doms.main_domain(c), "force_https": doms.force_https(c),
+            "server_ips": sorted(doms.expected_ips()),
+            "tenant_domains": [
+                {"tenant_id": r["id"], "name": r["name"], "domain": r["domain"], "enabled": bool(r["enabled"])}
+                for r in c.execute("SELECT id, name, domain, enabled FROM tenants WHERE domain IS NOT NULL ORDER BY name")
+            ],
+        }
+
+    @app.put("/api/admin/settings")
+    def put_settings(body: SettingsIn, request: Request, _: Admin, c: Conn):
+        host = _clean_host(body.main_domain)
+        if host and doms.taken(c, host) and host != doms.main_domain(c):
+            raise HTTPException(409, "Ese dominio ya lo usa un cliente")
+        if body.force_https:
+            if not host:
+                raise HTTPException(409, "Para forzar HTTPS hace falta un dominio")
+            # Evita dejar el panel inaccesible: el HTTPS debe funcionar antes de forzarlo.
+            if request.url.scheme != "https" and not doms.https_status(host)["ok"]:
+                raise HTTPException(409, f"HTTPS todavía no funciona en {host}; compruébalo antes de forzarlo")
+        doms.set_main(c, host, body.force_https)
+        return get_settings(_, c)
+
+    def domain_tenant(p: Principal, tenant_id: int | None) -> int:
+        if p.is_admin:
+            if tenant_id is None:
+                raise HTTPException(400, "tenant_id es obligatorio")
+            return tenant_id
+        return p.id
+
+    @app.get("/api/domain-status")
+    async def domain_status(p: User, c: Conn, target: str = "tenant", tenant_id: int | None = None):
+        """Comprobación de DNS y HTTPS (sólo de dominios dados de alta, nunca arbitrarios)."""
+        if target == "main":
+            if not p.is_admin:
+                raise HTTPException(403, "Sólo administradores")
+            host = doms.main_domain(c)
+        else:
+            host = tenant_or_404(c, domain_tenant(p, tenant_id))["domain"]
+        return await asyncio.to_thread(doms.status, host)
+
+    @app.get("/api/tenant-domain")
+    def get_tenant_domain(p: User, c: Conn, tenant_id: int | None = None):
+        t = tenant_or_404(c, domain_tenant(p, tenant_id))
+        return {"tenant_id": t["id"], "domain": t["domain"], "server_ips": sorted(doms.expected_ips())}
+
+    @app.put("/api/tenant-domain")
+    def put_tenant_domain(body: DomainIn, p: User, c: Conn, tenant_id: int | None = None):
+        tid = domain_tenant(p, tenant_id)
+        tenant_or_404(c, tid)
+        host = _clean_host(body.domain)
+        if host and doms.taken(c, host, exclude_tenant=tid):
+            raise HTTPException(409, "Ese dominio ya está en uso")
+        c.execute("UPDATE tenants SET domain = ? WHERE id = ?", (host, tid))
+        return get_tenant_domain(p, c, tid)
+
     # ------------------------------------------------------------------ SPA
     @app.get("/healthz", include_in_schema=False)
     def healthz():
@@ -563,8 +685,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
 
     @app.get("/manifest.webmanifest", include_in_schema=False)
-    def manifest():
-        return FileResponse(STATIC_DIR / "manifest.webmanifest", media_type="application/manifest+json",
-                            headers={"Cache-Control": "no-cache"})
+    def manifest(request: Request, c: Conn):
+        data = json.loads((STATIC_DIR / "manifest.webmanifest").read_text())
+        brand = branding_for(c, request)
+        if brand["tenant"]:
+            data["name"] = brand["title"]
+            data["short_name"] = brand["title"][:12]
+        return JSONResponse(data, media_type="application/manifest+json", headers={"Cache-Control": "no-cache"})
 
     return app

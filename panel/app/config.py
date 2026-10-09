@@ -47,6 +47,7 @@ class Settings:
     dns_enabled: bool
     dns_bind: str
     dns_port: int
+    panel_domain: str
 
     @property
     def dns_upstreams(self) -> list[str]:
@@ -109,4 +110,5 @@ def load_settings() -> Settings:
         dns_enabled=_env_bool("DNS_ENABLED", True),
         dns_bind=_env("DNS_BIND", "auto"),
         dns_port=_env_int("DNS_PORT", 53),
+        panel_domain=_env("PANEL_DOMAIN", ""),
     )

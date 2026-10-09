@@ -31,7 +31,7 @@ set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 # -----------------------------------------------------------------------------
 # VERSIÓN DEL SCRIPT (se compara con la publicada en GitHub). SemVer.
 # -----------------------------------------------------------------------------
-readonly VERSION="2.2.0"
+readonly VERSION="2.3.0"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
@@ -62,7 +62,8 @@ fi
 : "${PANEL_PORT:=${WGUI_PORT:-5000}}"
 : "${ADMIN_USER:=${WGUI_ADMIN_USER:-admin}}"
 : "${ADMIN_PASS:=${WGUI_ADMIN_PASS:-admin}}"   # se obliga a cambiarla en el primer login
-: "${PANEL_DOMAIN:=}"                          # p. ej. vpn.midominio.com -> HTTPS automático (Caddy)
+: "${ENABLE_HTTPS:=true}"                      # Caddy: HTTPS automático para los dominios del panel
+: "${PANEL_DOMAIN:=}"                          # opcional: dominio inicial (también se configura desde el panel)
 : "${ACME_EMAIL:=}"                            # opcional: avisos de Let's Encrypt
 
 # --- WireGuard ----------------------------------------------------------------
@@ -368,20 +369,17 @@ setup_ufw() {
         info "Permitido SSH en ${p}/tcp (anti-bloqueo)."
     done
     ufw allow "${WG_PORT}/udp" comment 'WireGuard' >/dev/null
-    if [[ -n "${PANEL_DOMAIN}" ]]; then
-        # Con dominio el panel sólo se publica por HTTPS (Caddy) y el puerto HTTP
-        # directo se cierra. 80/tcp hace falta para emitir y renovar el certificado.
+    # El puerto directo del panel queda abierto para el primer acceso por IP;
+    # al activar «Forzar HTTPS» en Ajustes, el panel lo redirige al dominio.
+    ufw allow "${PANEL_PORT}/tcp" comment 'WireGuard panel' >/dev/null
+    if [[ "${ENABLE_HTTPS}" == "true" ]]; then
+        # 80/tcp: emisión y renovación de certificados (ACME) y redirección a HTTPS.
         ufw allow 80/tcp comment 'HTTP (ACME)' >/dev/null
         ufw allow 443/tcp comment 'HTTPS panel' >/dev/null
         ufw allow 443/udp comment 'HTTP/3 panel' >/dev/null
-        ufw delete allow "${PANEL_PORT}/tcp" >/dev/null 2>&1 || true
-        ufw --force enable >/dev/null
-        success "UFW activo: SSH, ${WG_PORT}/udp, 80/tcp y 443 permitidos (${PANEL_PORT}/tcp cerrado)."
-    else
-        ufw allow "${PANEL_PORT}/tcp" comment 'WireGuard panel' >/dev/null
-        ufw --force enable >/dev/null
-        success "UFW activo: SSH, ${WG_PORT}/udp y ${PANEL_PORT}/tcp permitidos."
     fi
+    ufw --force enable >/dev/null
+    success "UFW activo: SSH, ${WG_PORT}/udp, ${PANEL_PORT}/tcp$([[ "${ENABLE_HTTPS}" == "true" ]] && echo ", 80/tcp y 443") permitidos."
 }
 
 # =============================================================================
@@ -646,22 +644,16 @@ deploy_panel() {
     session_secret="$(env_value SESSION_SECRET)"
     [[ -n "${session_secret}" ]] || session_secret="$(random_secret)"
 
-    # Con dominio: el panel escucha sólo en localhost detrás de Caddy (HTTPS),
-    # las cookies se marcan Secure y se confía en X-Forwarded-For de 127.0.0.1
-    # para que el límite de intentos de login siga siendo por IP real.
-    local bind="${PANEL_BIND}" secure="false" trust_proxy="false"
-    if [[ -n "${PANEL_DOMAIN}" ]]; then
-        bind="127.0.0.1" secure="true" trust_proxy="true"
-        check_domain_dns "${endpoint}"
-    fi
+    [[ -z "${PANEL_DOMAIN}" ]] || check_domain_dns "${endpoint}"
 
     umask 077
     cat >"${ENV_FILE}" <<EOF
 # Generado por wg-manager ${VERSION}. Para cambiar valores edite ${CONFIG_FILE}
 # y ejecute: wg-manager update
-PANEL_BIND='${bind}'
+PANEL_BIND='${PANEL_BIND}'
 PANEL_PORT='${PANEL_PORT}'
-TRUST_PROXY='${trust_proxy}'
+PANEL_DOMAIN='${PANEL_DOMAIN}'
+TRUST_PROXY='true'
 SESSION_SECRET='${session_secret}'
 ADMIN_USER='${ADMIN_USER}'
 ADMIN_PASSWORD='${ADMIN_PASS}'
@@ -678,7 +670,7 @@ WG_MTU='${WG_MTU}'
 WG_KEEPALIVE='${WG_KEEPALIVE}'
 FIREWALL_HOOK='${FIREWALL_BIN}'
 DNS_ENABLED='${DNS_ENABLED}'
-COOKIE_SECURE='${secure}'
+COOKIE_SECURE='false'
 LOG_LEVEL='INFO'
 EOF
     umask 022
@@ -710,11 +702,12 @@ services:
         max-size: "10m"
         max-file: "3"
 EOF
-    if [[ -n "${PANEL_DOMAIN}" ]]; then
+    if [[ "${ENABLE_HTTPS}" == "true" ]]; then
         write_caddy_config
         cat >>"${COMPOSE_FILE}" <<EOF
 
-  # Proxy HTTPS con certificado automático de Let's Encrypt (renovación incluida).
+  # Proxy HTTPS con certificados automáticos de Let's Encrypt (on-demand TLS):
+  # cualquier dominio dado de alta en el panel obtiene su certificado al visitarlo.
   caddy:
     image: caddy:2-alpine
     container_name: wgp-caddy
@@ -736,12 +729,15 @@ EOF
     [[ "${DNS_ENABLED}" != "true" ]] || check_dns_port
     info "Construyendo la imagen del panel (puede tardar un par de minutos)..."
     compose build --pull -q
-    [[ -z "${PANEL_DOMAIN}" ]] || compose pull -q caddy
+    if [[ "${ENABLE_HTTPS}" == "true" ]]; then
+        check_web_ports
+        compose pull -q caddy
+    fi
     # --remove-orphans retira el contenedor wireguard-ui de la v1 (mismo proyecto).
     compose up -d --remove-orphans
     wait_for_panel || die "El panel no responde en el puerto ${PANEL_PORT}. Ver: docker logs ${CONTAINER}"
     success "Panel en ejecución."
-    if [[ -n "${PANEL_DOMAIN}" ]]; then
+    if [[ "${ENABLE_HTTPS}" == "true" && -n "${PANEL_DOMAIN}" ]]; then
         local _
         for _ in $(seq 1 45); do
             curl -fsS -o /dev/null --max-time 5 "https://${PANEL_DOMAIN}/healthz" 2>/dev/null && break
@@ -768,6 +764,16 @@ check_dns_port() {
     fi
 }
 
+check_web_ports() {
+    # Caddy necesita 80 y 443. Otro servidor web (nginx, apache...) lo impediría.
+    local busy
+    busy="$(ss -H -ltnp 2>/dev/null | awk '$4 ~ /:(80|443)$/ { print $4, $NF }' | grep -v -e caddy -e wgp-caddy || true)"
+    if [[ -n "${busy}" ]]; then
+        warn "Los puertos 80/443 están ocupados por otro servicio: ${busy}"
+        warn "El HTTPS automático no funcionará hasta liberarlos (o desactívelo con ENABLE_HTTPS=false)."
+    fi
+}
+
 check_domain_dns() {
     local expected=$1 resolved
     resolved="$(getent ahostsv4 "${PANEL_DOMAIN}" 2>/dev/null | awk 'NR == 1 { print $1 }')"
@@ -781,15 +787,22 @@ check_domain_dns() {
 }
 
 write_caddy_config() {
+    # On-demand TLS: antes de pedir un certificado, Caddy pregunta al panel
+    # (/internal/tls-ask) si el dominio está dado de alta y apunta aquí.
     install -d -m 0755 "${PLATFORM_DIR}/caddy" "${PLATFORM_DIR}/caddy/data" "${PLATFORM_DIR}/caddy/config"
     {
-        if [[ -n "${ACME_EMAIL}" ]]; then
-            printf '{\n\temail %s\n}\n\n' "${ACME_EMAIL}"
-        fi
-        printf '%s {\n' "${PANEL_DOMAIN}"
+        printf '{\n'
+        [[ -z "${ACME_EMAIL}" ]] || printf '\temail %s\n' "${ACME_EMAIL}"
+        printf '\ton_demand_tls {\n\t\task http://127.0.0.1:%s/internal/tls-ask\n\t}\n' "${PANEL_PORT}"
+        printf '}\n\n'
+        printf 'https:// {\n'
+        printf '\ttls {\n\t\ton_demand\n\t}\n'
         printf '\tencode zstd gzip\n'
         printf '\theader Strict-Transport-Security "max-age=31536000"\n'
         printf '\treverse_proxy 127.0.0.1:%s\n' "${PANEL_PORT}"
+        printf '}\n\n'
+        printf 'http:// {\n'
+        printf '\tredir https://{host}{uri} 308\n'
         printf '}\n'
     } >"${PLATFORM_DIR}/caddy/Caddyfile"
 }
@@ -864,7 +877,7 @@ EOF
     # Claves añadidas en versiones posteriores: se guardan si se pasaron por
     # entorno (p. ej. sudo PANEL_DOMAIN=vpn.ejemplo.com wg-manager update).
     local key
-    for key in PANEL_DOMAIN ACME_EMAIL DNS_ENABLED; do
+    for key in PANEL_DOMAIN ACME_EMAIL DNS_ENABLED ENABLE_HTTPS; do
         if [[ -n "${!key}" ]] && ! grep -q "^${key}=" "${CONFIG_FILE}"; then
             printf '%s="%s"\n' "${key}" "${!key}" >>"${CONFIG_FILE}"
             info "${key} guardado en ${CONFIG_FILE}."
@@ -1033,9 +1046,9 @@ print_summary() {
     printf '  Actualizar      : %s update\n' "${INSTALL_BIN}"
     printf '\n%s  ⚠  Acceso inicial: %s / (contraseña de instalación, por defecto "admin")%s\n' "${C_YELLOW}${C_BOLD}" "${ADMIN_USER}" "${C_RESET}"
     printf '%s     El panel obliga a cambiarla en el primer inicio de sesión.%s\n' "${C_YELLOW}" "${C_RESET}"
-    if [[ -z "${PANEL_DOMAIN}" ]]; then
-        printf '%s     Se sirve por HTTP: defina PANEL_DOMAIN en %s para HTTPS automático%s\n' "${C_YELLOW}" "${CONFIG_FILE}" "${C_RESET}"
-        printf '%s     (necesario para instalar la app en Android/Chrome).%s\n\n' "${C_YELLOW}" "${C_RESET}"
+    if [[ -z "${PANEL_DOMAIN}" && "${ENABLE_HTTPS}" == "true" ]]; then
+        printf '%s     HTTPS: configure su dominio en el panel (Ajustes) y, si quiere, active%s\n' "${C_YELLOW}" "${C_RESET}"
+        printf '%s     «Forzar HTTPS». Cada cliente puede añadir el suyo desde su Cuenta.%s\n\n' "${C_YELLOW}" "${C_RESET}"
     else
         printf '\n'
     fi
