@@ -31,7 +31,7 @@ set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 # -----------------------------------------------------------------------------
 # VERSIÓN DEL SCRIPT (se compara con la publicada en GitHub). SemVer.
 # -----------------------------------------------------------------------------
-readonly VERSION="2.1.0"
+readonly VERSION="2.2.0"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
@@ -71,7 +71,8 @@ fi
 : "${WG_SERVER_ADDRESS:=10.252.0.1/16}"        # IP del servidor (bloque 0, reservado)
 : "${TENANT_PREFIX:=24}"                       # tamaño de la red de cada cliente
 : "${WG_PORT:=51820}"
-: "${WG_DNS:=1.1.1.1, 1.0.0.1}"
+: "${WG_DNS:=1.1.1.1, 1.0.0.1}"              # DNS de subida del resolver con filtros
+: "${DNS_ENABLED:=true}"                       # resolver propio con filtros por cliente
 : "${WG_MTU:=1420}"
 : "${WG_KEEPALIVE:=25}"
 
@@ -95,6 +96,8 @@ readonly WG_CONF_FILE="${WG_CONF_DIR}/${WG_INTERFACE}.conf"
 readonly WGP_DIR="${WG_CONF_DIR}/wgp"            # ficheros que el panel comparte con el host
 readonly FIREWALL_BIN="/usr/local/sbin/wgp-firewall"
 readonly TENANT_CHAIN="WGP-TENANTS"
+readonly EGRESS_CHAIN="WGP-EGRESS"
+readonly DNS_CHAIN="WGP-DNS"
 readonly RULE_TAG="wg-manager"
 readonly SYSTEMD_DIR="/etc/systemd/system"
 readonly LOCK_FILE="/var/lock/wg-manager.lock"
@@ -419,6 +422,15 @@ fetch_source() {
 #   FORWARD #3  -i WAN -o wg0 -d SUBNET  REL,EST  -> ACCEPT    (sólo respuestas)
 #   nat/POSTROUTING  -s SUBNET -o WAN             -> MASQUERADE
 #
+#   INPUT    #1/#2  -i wg0 -d 10.252.0.1 udp/tcp 53  -> ACCEPT   (resolver con filtros)
+#   FORWARD  -i wg0 -o WAN                     -> WGP-EGRESS (antes del ACCEPT de salida)
+#   nat/PREROUTING  -i wg0                     -> WGP-DNS
+#
+#   WGP-DNS / WGP-EGRESS (por cada cliente con filtros activos, wgp/dns.list):
+#     DNS (53) a cualquier servidor -> DNAT al resolver 10.252.0.1:53, de modo
+#     que el filtro se aplica aunque el dispositivo tenga otro DNS configurado;
+#     DNS-over-TLS/QUIC (853) -> REJECT, para que no se pueda saltar el filtro.
+#
 #   WGP-TENANTS (una regla por cliente activo, regenerada por el panel):
 #     -s 10.252.N.0/24 -d 10.252.N.0/24 -> ACCEPT   (LAN privada del cliente N)
 #     ...
@@ -452,8 +464,12 @@ set -euo pipefail
 SUBNET="${WG_SUBNET}"
 WAN="${WAN_IFACE}"
 IFACE_DEFAULT="${WG_INTERFACE}"
+SERVER_IP="${WG_SERVER_ADDRESS%/*}"
 LIST="${WGP_DIR}/tenants.list"
+DNS_LIST="${WGP_DIR}/dns.list"
 CHAIN="${TENANT_CHAIN}"
+EGRESS="${EGRESS_CHAIN}"
+DNSCHAIN="${DNS_CHAIN}"
 TAG="${RULE_TAG}"
 EOF
     cat >>"${FIREWALL_BIN}" <<'EOF'
@@ -464,9 +480,13 @@ ipt() { iptables -w "$@"; }
 rule_specs() {
     local i=$1 c="-m comment --comment ${TAG}"
     printf '%s\n' \
+        "filter|INPUT|1|-i ${i} -d ${SERVER_IP} -p udp --dport 53 ${c} -j ACCEPT" \
+        "filter|INPUT|2|-i ${i} -d ${SERVER_IP} -p tcp --dport 53 ${c} -j ACCEPT" \
         "filter|FORWARD|1|-i ${i} -o ${i} ${c} -j ${CHAIN}" \
-        "filter|FORWARD|2|-i ${i} -o ${WAN} -s ${SUBNET} ${c} -j ACCEPT" \
-        "filter|FORWARD|3|-i ${WAN} -o ${i} -d ${SUBNET} -m conntrack --ctstate RELATED,ESTABLISHED ${c} -j ACCEPT" \
+        "filter|FORWARD|2|-i ${i} -o ${WAN} ${c} -j ${EGRESS}" \
+        "filter|FORWARD|3|-i ${i} -o ${WAN} -s ${SUBNET} ${c} -j ACCEPT" \
+        "filter|FORWARD|4|-i ${WAN} -o ${i} -d ${SUBNET} -m conntrack --ctstate RELATED,ESTABLISHED ${c} -j ACCEPT" \
+        "nat|PREROUTING|1|-i ${i} ${c} -j ${DNSCHAIN}" \
         "nat|POSTROUTING|1|-s ${SUBNET} -o ${WAN} ${c} -j MASQUERADE"
 }
 
@@ -479,28 +499,55 @@ valid_cidr() {
     for x in "${o[@]}"; do (( 10#${x} <= 255 )) || return 1; done
 }
 
-sync_tenants() {
-    ipt -N "${CHAIN}" 2>/dev/null || true
-    local net n=0
-    {
-        echo "*filter"
-        echo ":${CHAIN} - [0:0]"      # con --noflush, declarar la cadena la vacía
-        if [[ -f "${LIST}" ]]; then
-            while IFS= read -r net || [[ -n "${net}" ]]; do
-                net="${net//[[:space:]]/}"
-                [[ -z "${net}" ]] && continue
-                if valid_cidr "${net}"; then
-                    echo "-A ${CHAIN} -s ${net} -d ${net} -m comment --comment ${TAG} -j ACCEPT"
-                    n=$((n + 1))
-                else
-                    logger -t wgp-firewall "Línea ignorada en ${LIST}: ${net}" || true
-                fi
-            done <"${LIST}"
+# read_nets FICHERO -> redes válidas, una por línea (las inválidas se registran y se ignoran)
+read_nets() {
+    local file=$1 net
+    [[ -f "${file}" ]] || return 0
+    while IFS= read -r net || [[ -n "${net}" ]]; do
+        net="${net//[[:space:]]/}"
+        [[ -z "${net}" ]] && continue
+        if valid_cidr "${net}"; then
+            echo "${net}"
+        else
+            logger -t wgp-firewall "Línea ignorada en ${file}: ${net}" || true
         fi
-        echo "-A ${CHAIN} -m comment --comment ${TAG} -j DROP"
+    done <"${file}"
+}
+
+ensure_chains() {
+    ipt -N "${CHAIN}" 2>/dev/null || true
+    ipt -N "${EGRESS}" 2>/dev/null || true
+    ipt -t nat -N "${DNSCHAIN}" 2>/dev/null || true
+}
+
+sync_tenants() {
+    ensure_chains
+    local net c="-m comment --comment ${TAG}" tenants dns
+    tenants="$(read_nets "${LIST}")"
+    dns="$(read_nets "${DNS_LIST}")"
+    {
+        # Con --noflush, declarar una cadena la vacía: el cambio es atómico.
+        echo "*filter"
+        echo ":${CHAIN} - [0:0]"
+        echo ":${EGRESS} - [0:0]"
+        for net in ${tenants}; do
+            echo "-A ${CHAIN} -s ${net} -d ${net} ${c} -j ACCEPT"
+        done
+        echo "-A ${CHAIN} ${c} -j DROP"
+        for net in ${dns}; do
+            echo "-A ${EGRESS} -s ${net} -p tcp --dport 853 ${c} -j REJECT --reject-with tcp-reset"
+            echo "-A ${EGRESS} -s ${net} -p udp --dport 853 ${c} -j REJECT"
+        done
+        echo "COMMIT"
+        echo "*nat"
+        echo ":${DNSCHAIN} - [0:0]"
+        for net in ${dns}; do
+            echo "-A ${DNSCHAIN} -s ${net} ! -d ${SERVER_IP} -p udp --dport 53 ${c} -j DNAT --to-destination ${SERVER_IP}:53"
+            echo "-A ${DNSCHAIN} -s ${net} ! -d ${SERVER_IP} -p tcp --dport 53 ${c} -j DNAT --to-destination ${SERVER_IP}:53"
+        done
         echo "COMMIT"
     } | iptables-restore -w --noflush
-    logger -t wgp-firewall "Cadena ${CHAIN} sincronizada: ${n} redes de cliente" || true
+    logger -t wgp-firewall "Sincronizado: $(wc -w <<<"${tenants}") redes de cliente, $(wc -w <<<"${dns}") con filtrado DNS" || true
 }
 
 up() {
@@ -520,6 +567,10 @@ down() {
     done < <(rule_specs "${iface}")
     ipt -F "${CHAIN}" 2>/dev/null || true
     ipt -X "${CHAIN}" 2>/dev/null || true
+    ipt -F "${EGRESS}" 2>/dev/null || true
+    ipt -X "${EGRESS}" 2>/dev/null || true
+    ipt -t nat -F "${DNSCHAIN}" 2>/dev/null || true
+    ipt -t nat -X "${DNSCHAIN}" 2>/dev/null || true
 }
 
 apply() {
@@ -626,6 +677,7 @@ WG_DNS='${WG_DNS}'
 WG_MTU='${WG_MTU}'
 WG_KEEPALIVE='${WG_KEEPALIVE}'
 FIREWALL_HOOK='${FIREWALL_BIN}'
+DNS_ENABLED='${DNS_ENABLED}'
 COOKIE_SECURE='${secure}'
 LOG_LEVEL='INFO'
 EOF
@@ -681,6 +733,7 @@ EOF
     fi
 
     compose config -q
+    [[ "${DNS_ENABLED}" != "true" ]] || check_dns_port
     info "Construyendo la imagen del panel (puede tardar un par de minutos)..."
     compose build --pull -q
     [[ -z "${PANEL_DOMAIN}" ]] || compose pull -q caddy
@@ -699,6 +752,19 @@ EOF
         else
             warn "HTTPS aún no responde. Compruebe que ${PANEL_DOMAIN} apunta a este servidor y vea: docker logs wgp-caddy"
         fi
+    fi
+}
+
+check_dns_port() {
+    # El resolver con filtros escucha en la IP del servidor dentro del túnel
+    # (puerto 53). Otro servicio escuchando en 0.0.0.0:53 o en esa IP lo impediría
+    # (systemd-resolved usa 127.0.0.53 y no molesta).
+    local server_ip="${WG_SERVER_ADDRESS%/*}" busy
+    busy="$(ss -H -lnup 2>/dev/null | awk -v ip="${server_ip}" \
+        '$4 == "0.0.0.0:53" || $4 == "*:53" || $4 == ip":53" { print $4, $NF }' | grep -v wgp-panel || true)"
+    if [[ -n "${busy}" ]]; then
+        warn "Otro servicio ocupa el puerto DNS (53): ${busy}"
+        warn "El filtrado de navegación no funcionará hasta liberarlo (o desactívelo con DNS_ENABLED=false)."
     fi
 }
 
@@ -765,6 +831,7 @@ verify_rules() {
         || die "Falta el salto ${WG_INTERFACE}->${WG_INTERFACE} a ${TENANT_CHAIN}."
     grep -q -- "-A ${TENANT_CHAIN} .*-j DROP" <<<"${rules}" || die "Falta el DROP final de ${TENANT_CHAIN}."
     grep -q -- "--comment ${RULE_TAG} -j MASQUERADE" <<<"${rules}" || die "Falta la regla MASQUERADE."
+    iptables -w -t nat -S PREROUTING | grep -q -- "-j ${DNS_CHAIN}" || die "Falta el salto a ${DNS_CHAIN}."
     success "Reglas verificadas (aislamiento por cliente + MASQUERADE)."
 }
 
@@ -797,7 +864,7 @@ EOF
     # Claves añadidas en versiones posteriores: se guardan si se pasaron por
     # entorno (p. ej. sudo PANEL_DOMAIN=vpn.ejemplo.com wg-manager update).
     local key
-    for key in PANEL_DOMAIN ACME_EMAIL; do
+    for key in PANEL_DOMAIN ACME_EMAIL DNS_ENABLED; do
         if [[ -n "${!key}" ]] && ! grep -q "^${key}=" "${CONFIG_FILE}"; then
             printf '%s="%s"\n' "${key}" "${!key}" >>"${CONFIG_FILE}"
             info "${key} guardado en ${CONFIG_FILE}."
@@ -960,6 +1027,9 @@ print_summary() {
     printf '  Subred          : %s (una /%s por cliente; servidor %s)\n' "${WG_SUBNET}" "${TENANT_PREFIX}" "${WG_SERVER_ADDRESS}"
     printf '  Aislamiento     : LAN privada por cliente; tráfico entre clientes BLOQUEADO\n'
     printf '  Salida Internet : NAT por %s\n' "${WAN_IFACE}"
+    if [[ "${DNS_ENABLED}" == "true" ]]; then
+        printf '  Filtros DNS     : resolver en %s:53 (anuncios, malware, familia por cliente)\n' "${WG_SERVER_ADDRESS%/*}"
+    fi
     printf '  Actualizar      : %s update\n' "${INSTALL_BIN}"
     printf '\n%s  ⚠  Acceso inicial: %s / (contraseña de instalación, por defecto "admin")%s\n' "${C_YELLOW}${C_BOLD}" "${ADMIN_USER}" "${C_RESET}"
     printf '%s     El panel obliga a cambiarla en el primer inicio de sesión.%s\n' "${C_YELLOW}" "${C_RESET}"

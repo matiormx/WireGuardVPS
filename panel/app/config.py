@@ -44,6 +44,26 @@ class Settings:
     admin_user: str
     admin_password: str
     cookie_secure: bool
+    dns_enabled: bool
+    dns_bind: str
+    dns_port: int
+
+    @property
+    def dns_upstreams(self) -> list[str]:
+        """Servidores DNS de subida del resolver (WG_DNS)."""
+        out = []
+        for item in self.dns.replace(",", " ").split():
+            try:
+                ipaddress.ip_address(item)
+            except ValueError:
+                continue
+            out.append(item)
+        return out or ["1.1.1.1", "1.0.0.1"]
+
+    @property
+    def client_dns(self) -> str:
+        """DNS que se entrega a los dispositivos: el resolver del servidor si está activo."""
+        return str(self.server_address.ip) if self.dns_enabled else self.dns
 
     @property
     def tenant_capacity(self) -> int:
@@ -86,4 +106,7 @@ def load_settings() -> Settings:
         admin_user=_env("ADMIN_USER", "admin"),
         admin_password=_env("ADMIN_PASSWORD", "admin"),
         cookie_secure=_env_bool("COOKIE_SECURE", False),
+        dns_enabled=_env_bool("DNS_ENABLED", True),
+        dns_bind=_env("DNS_BIND", "auto"),
+        dns_port=_env_int("DNS_PORT", 53),
     )

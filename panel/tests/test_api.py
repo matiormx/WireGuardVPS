@@ -19,6 +19,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("WG_ENDPOINT", "203.0.113.10")
     monkeypatch.setenv("SESSION_SECRET", "test-secret")
     monkeypatch.setenv("ADMIN_PASSWORD", "admin")
+    monkeypatch.setenv("DNS_BIND", "127.0.0.1")
+    monkeypatch.setenv("DNS_PORT", "0")
+    # Sin descargas de listas reales en los tests.
+    monkeypatch.setattr("app.dnsfilter.ListStore.refresh", lambda self: None)
     return tmp_path
 
 
@@ -90,7 +94,7 @@ def test_tenant_networks_and_device_flow(client, env):
     assert "AllowedIPs = 0.0.0.0/0, ::/0" in cfg
     client.patch(f"/api/devices/{dev['id']}", json={"full_tunnel": False}, headers=H)
     cfg = client.get(f"/api/devices/{dev['id']}/config").text
-    assert "AllowedIPs = 10.252.1.0/24" in cfg and "DNS" not in cfg
+    assert "AllowedIPs = 10.252.1.0/24, 10.252.0.1/32" in cfg and "DNS = 10.252.0.1" in cfg
     qr = client.get(f"/api/devices/{dev['id']}/qr.svg")
     assert qr.status_code == 200 and qr.headers["content-type"].startswith("image/svg+xml")
 

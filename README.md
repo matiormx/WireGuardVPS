@@ -30,11 +30,34 @@ curl -fsSL https://raw.githubusercontent.com/matiormx/WireGuardVps/main/install.
 | `PANEL_PORT` | `5000` | Puerto del panel web (sin dominio) |
 | `WG_PORT` | `51820` | Puerto UDP de WireGuard |
 | `WG_SUBNET` | `10.252.0.0/16` | Bloque global (una /24 por cliente) |
-| `WG_DNS` | `1.1.1.1, 1.0.0.1` | DNS para dispositivos en modo «todo el tráfico» |
+| `WG_DNS` | `1.1.1.1, 1.0.0.1` | DNS de subida del resolver con filtros |
+| `DNS_ENABLED` | `true` | Resolver propio con filtros por cliente (`false` = los dispositivos usan `WG_DNS` directamente) |
 | `ENABLE_UFW` | `true` | Gestionar UFW (abre SSH, WireGuard y panel) |
 | `WG_BRANCH` | `main` | Rama del repositorio a instalar |
 
 Requisitos: systemd, kernel ≥ 5.6 (WireGuard integrado) y acceso root. En VPS LXC/OpenVZ el proveedor debe habilitar WireGuard y Docker.
+
+## Filtros de navegación (anuncios, malware y familia)
+
+Cada cliente activa desde su panel (**Filtros**) lo que quiere bloquear en todos sus dispositivos:
+
+| Filtro | Listas |
+|---|---|
+| Anuncios y rastreadores | AdGuard DNS filter, Peter Lowe's list (listas de uBlock Origin / AdGuard compatibles con DNS) |
+| Malware y phishing | URLhaus Malicious URL Blocklist, Phishing URL Blocklist |
+| Contenido para adultos | StevenBlack porn, OISD NSFW small |
+| Apuestas | StevenBlack gambling |
+| Búsqueda segura | SafeSearch obligatorio en Google, Bing y DuckDuckGo y modo restringido de YouTube |
+
+Incluye perfiles rápidos (*Protección básica*, *Familia*, *Máxima*), listas propias de «siempre permitir» y «siempre bloquear», estadísticas de las últimas 24 h y un botón **Permitir** en cada dominio bloqueado. Cada dispositivo puede quedar **exento** (por ejemplo, el de un adulto).
+
+**Cómo funciona:** uBlock Origin es una extensión de navegador; en una VPN lo equivalente es filtrar el DNS. El panel incluye un resolver en `10.252.0.1:53` que aplica a cada cliente sus filtros según la red de origen. Las listas se descargan y se actualizan cada 24 h, con mirrors de respaldo. Para que el filtro no se pueda saltar, en los clientes con filtros el host:
+
+- redirige cualquier consulta DNS (puerto 53) al resolver, aunque el dispositivo tenga otro DNS configurado;
+- bloquea DNS-over-TLS (853);
+- desactiva el DNS-over-HTTPS automático de Firefox.
+
+Los dispositivos en modo «solo red privada» creados antes de esta versión deben **reimportar su configuración** para usar el resolver. Los de «todo el tráfico» se filtran sin cambios.
 
 ## HTTPS y app instalable (PWA)
 

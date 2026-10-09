@@ -38,6 +38,11 @@ const ICONS = {
   shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
   globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15 15 0 0 1 4 10 15 15 0 0 1-4 10 15 15 0 0 1-4-10 15 15 0 0 1 4-10z"/>',
   eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>',
+  ban: '<circle cx="12" cy="12" r="10"/><path d="M4.9 4.9l14.2 14.2"/>',
+  bug: '<rect x="8" y="6" width="8" height="14" rx="4"/><path d="M19 7l-3 2M5 7l3 2M19 19l-3-2M5 19l3-2M20 13h-4M4 13h4M10 4l1 2M14 4l-1 2"/>',
+  heart: '<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8z"/>',
+  dice: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.2"/><circle cx="16" cy="16" r="1.2"/><circle cx="12" cy="12" r="1.2"/>',
+  check: '<path d="M20 6L9 17l-5-5"/>',
 };
 
 function icon(name) {
@@ -251,16 +256,18 @@ async function render() {
   stopTimer();
   if (!state.me) return loginView();
   if (state.me.must_change) return forcePasswordView();
-  const [section, id] = route();
+  const [section, id, sub] = route();
   const isAdmin = state.me.role === "admin";
   const main = shell(section || "home");
   try {
     if (section === "account") return accountView(main);
     if (isAdmin) {
+      if (section === "clients" && id && sub === "filters") return await filtersView(main, Number(id));
       if (section === "clients" && id) return await clientDetailView(main, Number(id));
       if (section === "clients") return await clientsView(main);
       return await dashboardView(main);
     }
+    if (section === "filters") return await filtersView(main, state.me.id);
     return await tenantHomeView(main);
   } catch (err) {
     if (err.status !== 401) {
@@ -278,7 +285,7 @@ function shell(active) {
   const isAdmin = state.me.role === "admin";
   const links = isAdmin
     ? [["home", "#/", "dashboard", "Panel"], ["clients", "#/clients", "users", "Clientes"], ["account", "#/account", "key", "Cuenta"]]
-    : [["home", "#/", "network", "Mi red"], ["account", "#/account", "key", "Cuenta"]];
+    : [["home", "#/", "network", "Mi red"], ["filters", "#/filters", "shield", "Filtros"], ["account", "#/account", "key", "Cuenta"]];
   const sidebar = h("aside", { class: "sidebar" },
     brand(),
     h("nav", { class: "nav" }, links.map(([key, href, ic, label]) =>
@@ -429,6 +436,10 @@ async function dashboardView(main) {
             h("dt", { text: "Endpoint" }), h("dd", { class: "mono", text: o.server.endpoint }),
             h("dt", { text: "Interfaz" }), h("dd", { class: "mono", text: `${o.server.interface} · ${o.server.address}` }),
             h("dt", { text: "Subred" }), h("dd", { class: "mono", text: `${o.server.subnet} (/${o.server.tenant_prefix} por cliente)` }),
+            h("dt", { text: "Filtrado DNS" }), h("dd", null,
+              !o.dns.enabled ? "Desactivado"
+                : o.dns.running ? `Activo · ${o.dns.filtering_tenants} clientes con filtros · ${o.dns.blocked_24h} bloqueos (24 h)`
+                  : h("span", { style: { color: "var(--danger)" }, text: `Error: ${o.dns.error || "no está en ejecución"}` })),
             h("dt", { text: "Clave pública" }), h("dd", null,
               h("div", { class: "cell-flex" }, h("span", { class: "mono", text: o.server.public_key }),
                 h("button", { class: "btn ghost icon", title: "Copiar", onClick: () => copyText(o.server.public_key) }, icon("copy"))))))));
@@ -520,8 +531,10 @@ async function clientDetailView(main, id) {
       pageHead(t.name, h("span", { class: "cell-flex" },
         h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : "Suspendido" }),
         h("span", { class: "mono", text: t.network }),
-        t.must_change ? h("span", { class: "badge warn", text: "Pendiente de primer acceso" }) : null),
+        t.must_change ? h("span", { class: "badge warn", text: "Pendiente de primer acceso" }) : null,
+        filterBadges(t.filters)),
       [
+        h("a", { class: "btn", href: `#/clients/${t.id}/filters` }, icon("shield"), "Filtros"),
         h("button", { class: "btn", onClick: () => editTenantModal(t, reload) }, icon("edit"), "Editar"),
         h("button", { class: "btn", onClick: () => resetTenantPassword(t, reload) }, icon("key"), "Contraseña"),
         h("button", { class: `btn ${t.enabled ? "danger" : ""}`, onClick: async () => {
@@ -598,7 +611,8 @@ function deviceRow(d, onChange) {
   const status = !d.enabled ? ["dis", "Deshabilitado"] : d.online ? ["on", "En línea"] : ["", "Desconectado"];
   return h("tr", null,
     h("td", { class: "primary" }, h("div", { class: "cell-flex" }, h("span", { class: `dot ${status[0]}`, title: status[1] }),
-      h("div", null, h("div", { class: "name", text: d.name }), h("div", { class: "meta", text: d.endpoint ? `${status[1]} · ${d.endpoint}` : status[1] })))),
+      h("div", null, h("div", { class: "name", text: d.name }),
+        h("div", { class: "meta", text: [d.endpoint ? `${status[1]} · ${d.endpoint}` : status[1], d.dns_filter ? null : "sin filtros"].filter(Boolean).join(" · ") })))),
     h("td", { class: "mono", "data-label": "IP", text: d.ip }),
     h("td", { class: "hide-sm", "data-label": "Último contacto", text: ago(d.last_handshake) }),
     h("td", { class: "hide-sm", "data-label": "Tráfico", text: `↓ ${fmtBytes(d.tx)} · ↑ ${fmtBytes(d.rx)}` }),
@@ -645,10 +659,15 @@ function editDeviceModal(d, onDone) {
     fields: [
       h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "48", value: d.name }))),
       tunnelField(d.full_tunnel),
-      h("p", { class: "note full", style: { margin: 0 }, text: "Si cambias el modo, vuelve a importar la configuración en el dispositivo." }),
+      h("div", { class: "full field" },
+        switchEl("dns_filter", d.dns_filter, "Aplicar los filtros de navegación"),
+        h("div", { class: "help", text: "Desactívalo para que este dispositivo (p. ej. el de un adulto) navegue sin los filtros del cliente." })),
+      h("p", { class: "note full", style: { margin: 0 }, text: "Si cambias el modo de túnel, vuelve a importar la configuración en el dispositivo." }),
     ],
     onSubmit: async (fd) => {
-      await api("PATCH", `/api/devices/${d.id}`, { name: fd.get("name"), full_tunnel: fd.get("full_tunnel") === "on" });
+      await api("PATCH", `/api/devices/${d.id}`, {
+        name: fd.get("name"), full_tunnel: fd.get("full_tunnel") === "on", dns_filter: fd.get("dns_filter") === "on",
+      });
       toast("Dispositivo actualizado");
       onDone();
     },
@@ -686,6 +705,128 @@ async function deviceConfigModal(d, fresh = false) {
   m.box.querySelectorAll(".note > svg").forEach((s) => Object.assign(s.style, { width: "14px", height: "14px", verticalAlign: "-2px" }));
 }
 
+/* ------------------------------------------------------------------ filtros de navegación */
+const FILTER_ICONS = { ads: "ban", security: "bug", adult: "heart", gambling: "dice", safesearch: "search" };
+const FILTER_SHORT = { ads: "Anuncios", security: "Malware", adult: "Adultos", gambling: "Apuestas", safesearch: "Búsqueda segura" };
+const PRESETS = [
+  ["Protección básica", "Anuncios, rastreadores y malware", { ads: true, security: true, adult: false, gambling: false, safesearch: false }],
+  ["Familia", "Malware, adultos, apuestas y búsqueda segura", { ads: false, security: true, adult: true, gambling: true, safesearch: true }],
+  ["Máxima", "Todos los filtros", { ads: true, security: true, adult: true, gambling: true, safesearch: true }],
+  ["Sin filtros", "Navegación sin restricciones", { ads: false, security: false, adult: false, gambling: false, safesearch: false }],
+];
+
+function filterBadges(filters) {
+  const on = Object.entries(filters || {}).filter(([, v]) => v).map(([k]) => k);
+  if (!on.length) return null;
+  return h("span", { class: "badge accent" }, icon("shield"), on.map((k) => FILTER_SHORT[k] || k).join(" · "));
+}
+
+async function filtersView(main, tenantId) {
+  const isAdmin = state.me.role === "admin";
+  const qs = isAdmin ? `?tenant_id=${tenantId}` : "";
+  const [catalog, initial, devices, tenant] = await Promise.all([
+    api("GET", "/api/filters/catalog"),
+    api("GET", `/api/filters${qs}`),
+    api("GET", `/api/devices${isAdmin ? `?tenant_id=${tenantId}` : ""}`),
+    isAdmin ? api("GET", `/api/admin/tenants/${tenantId}`) : Promise.resolve({ name: state.me.name }),
+  ]);
+  let data = initial;
+  const deviceName = Object.fromEntries(devices.map((d) => [d.ip, d.name]));
+  const body = h("div");
+
+  const save = async (patch, msg = "Filtros actualizados") => {
+    const payload = { ...data.filters, allowlist: data.allowlist, denylist: data.denylist, ...patch };
+    try {
+      data = await api("PUT", `/api/filters${qs}`, payload);
+      toast(msg);
+      draw();
+    } catch (e) {
+      toast(e.message, "err");
+      draw();
+    }
+  };
+
+  const toggleCard = (key, name, description, extra) => {
+    const sw = h("input", { type: "checkbox", checked: !!data.filters[key], onChange: (e) => save({ [key]: e.target.checked },
+      e.target.checked ? `${name}: activado` : `${name}: desactivado`) });
+    return h("label", { class: `card filter-card${data.filters[key] ? " on" : ""}` },
+      h("div", { class: "filter-icon" }, icon(FILTER_ICONS[key])),
+      h("div", { class: "grow" }, h("div", { class: "name", text: name }), h("div", { class: "note", text: description }),
+        extra ? h("div", { class: "meta", text: extra }) : null),
+      h("span", { class: "switch" }, sw, h("span", { class: "track" })));
+  };
+
+  const listEditor = (key, title, help) => {
+    const ta = h("textarea", { class: "input mono", rows: "6", spellcheck: false, placeholder: "ejemplo.com\notro-dominio.net",
+      value: data[key].join("\n") });
+    return h("div", { class: "field" }, h("label", { text: title }), ta, h("div", { class: "help", text: help }),
+      h("div", null, h("button", { class: "btn sm", onClick: () => save({ [key]: ta.value.split(/[\s,]+/).filter(Boolean) }, "Lista guardada") },
+        icon("check"), "Guardar")));
+  };
+
+  const draw = () => {
+    const st = data.stats;
+    const pct = st.queries_24h ? Math.round((100 * st.blocked_24h) / st.queries_24h) : 0;
+    const resolver = data.resolver;
+    fill(body,
+      !resolver.enabled ? h("div", { class: "banner" }, icon("alert"), "El filtrado DNS está desactivado en este servidor.")
+        : !resolver.running ? h("div", { class: "banner" }, icon("alert"), `El resolver DNS no está activo${resolver.error ? `: ${resolver.error}` : ""}.`) : null,
+      h("div", { class: "grid stats" },
+        statCard("activity", "Consultas DNS", String(st.queries_24h), "últimas 24 h"),
+        statCard("ban", "Bloqueadas", String(st.blocked_24h), `${pct}% de las consultas`),
+        statCard("shield", "Filtros activos", String(Object.values(data.filters).filter(Boolean).length), "de 5 disponibles"),
+        statCard("devices", "Dispositivos", String(devices.filter((d) => d.dns_filter).length), `con filtros de ${devices.length}`)),
+      h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("h2", { text: "Perfiles rápidos" })),
+        h("div", { class: "presets" }, PRESETS.map(([name, desc, flags]) => {
+          const active = Object.entries(flags).every(([k, v]) => !!data.filters[k] === v);
+          return h("button", { class: `preset${active ? " on" : ""}`, onClick: () => save(flags, `Perfil «${name}» aplicado`) },
+            h("b", { text: name }), h("span", { text: desc }));
+        }))),
+      h("div", { class: "filter-grid" },
+        catalog.categories.map((c) => toggleCard(c.key, c.name, c.description,
+          `${c.domains ? `${c.domains.toLocaleString()} dominios` : "Listas pendientes de descarga"} · ${c.sources.join(", ")}`)),
+        toggleCard("safesearch", "Búsqueda segura",
+          "Fuerza SafeSearch en Google, Bing y DuckDuckGo y el modo restringido de YouTube.", null)),
+      h("div", { class: "grid two" },
+        h("div", { class: "card" },
+          h("div", { class: "card-head" }, h("h2", { text: "Bloqueados recientemente" })),
+          st.recent.length
+            ? h("div", { class: "blocked-list" }, st.recent.map((r) => h("div", { class: "blocked-row" },
+              h("div", { class: "grow" }, h("div", { class: "mono name", text: r.domain }),
+                h("div", { class: "meta", text: `${deviceName[r.client] || r.client} · ${ago(r.ts)}` })),
+              data.allowlist.includes(r.domain) ? h("span", { class: "badge ok", text: "Permitido" })
+                : h("button", { class: "btn sm", title: "Añadir a «Siempre permitir»",
+                  onClick: () => save({ allowlist: [...data.allowlist, r.domain] }, `${r.domain} permitido`) }, "Permitir"))))
+            : h("div", { class: "empty" }, icon("shield"), h("p", { text: "Aún no se ha bloqueado nada." }))),
+        h("div", { class: "card" },
+          h("div", { class: "card-head" }, h("h2", { text: "Listas propias" })),
+          h("div", { class: "grid", style: { gap: "16px" } },
+            listEditor("allowlist", "Siempre permitir", "Un dominio por línea. Incluye sus subdominios. Tiene prioridad sobre todo lo demás."),
+            listEditor("denylist", "Siempre bloquear", "Por ejemplo tiktok.com o roblox.com. Se aplica aunque no haya otros filtros activos.")))),
+      st.top.length ? h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("h2", { text: "Más bloqueados (24 h)" })),
+        h("div", { class: "table-wrap" }, h("table", { class: "cards" },
+          h("thead", null, h("tr", null, h("th", { text: "Dominio" }), h("th", { text: "Veces" }))),
+          h("tbody", null, st.top.map((t) => h("tr", null,
+            h("td", { class: "primary mono", text: t.domain }), h("td", { class: "aside", text: String(t.count) }))))))) : null,
+      h("p", { class: "note" }, icon("shield"),
+        " El filtrado se aplica en el servidor (DNS) a todos los dispositivos del cliente, con las listas de uBlock Origin y AdGuard compatibles con DNS. ",
+        "Puedes excluir un dispositivo concreto desde su edición."),
+    );
+    body.querySelectorAll(".note > svg").forEach((svg) => Object.assign(svg.style, { width: "14px", height: "14px", verticalAlign: "-2px" }));
+  };
+
+  const crumbs = isAdmin ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / Filtros"] : null;
+  fill(main, pageHead("Navegación segura", `Filtros de Internet para todos los dispositivos de ${tenant.name}`, null, crumbs), body);
+  draw();
+  every(async () => {
+    if (document.activeElement && document.activeElement.tagName === "TEXTAREA") return; // no pisar lo que se escribe
+    data = await api("GET", `/api/filters${qs}`);
+    draw();
+  });
+}
+
 /* ------------------------------------------------------------------ cliente: mi red */
 async function tenantHomeView(main) {
   const load = async () => {
@@ -695,7 +836,8 @@ async function tenantHomeView(main) {
     const rx = devices.reduce((a, d) => a + d.rx, 0);
     const tx = devices.reduce((a, d) => a + d.tx, 0);
     fill(main, 
-      pageHead(`Hola, ${me.name}`, "Tu red privada WireGuard"),
+      pageHead(`Hola, ${me.name}`, "Tu red privada WireGuard",
+        h("a", { class: "btn", href: "#/filters" }, icon("shield"), "Filtros de navegación")),
       h("div", { class: "card net-hero" },
         h("div", { class: "grow" },
           h("h3", { text: "Tu red" }),

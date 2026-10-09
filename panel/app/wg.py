@@ -10,6 +10,8 @@ Dentro de cada bloque la .1 queda reservada y los dispositivos reciben .2-.254.
 El panel escribe tres cosas en /etc/wireguard (montado desde el host):
   * wg0.conf             configuración completa (la usa wg-quick@wg0 al arrancar)
   * wgp/tenants.list     redes de clientes activos, una por línea
+  * wgp/dns.list         redes de clientes con filtrado DNS: el host redirige su
+                         DNS (puerto 53) al resolver y bloquea DNS-over-TLS
   * wgp/apply.stamp      marca temporal; su escritura dispara en el host la
                          unidad systemd que resincroniza el firewall
 y aplica los peers en caliente con `wg syncconf` (sin cortar sesiones).
@@ -38,6 +40,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from .config import Settings
 from .db import Database, get_setting
+from .dnsfilter import tenant_filtering_active
 
 log = logging.getLogger("wgp.wg")
 
@@ -143,16 +146,21 @@ def render_server_conf(settings: Settings, private_key: str, peers: list[Peer], 
 def render_client_conf(settings: Settings, server_public: str, tenant: sqlite3.Row, device: sqlite3.Row) -> str:
     net = tenant_network(settings, tenant["net_index"])
     # full tunnel: todo el tráfico (y ::/0 para evitar fugas IPv6);
-    # split tunnel: sólo la red privada del cliente.
-    allowed = "0.0.0.0/0, ::/0" if device["full_tunnel"] else str(net)
+    # split tunnel: sólo la red privada del cliente (+ el resolver DNS del servidor).
+    if device["full_tunnel"]:
+        allowed = "0.0.0.0/0, ::/0"
+    elif settings.dns_enabled:
+        allowed = f"{net}, {settings.server_address.ip}/32"
+    else:
+        allowed = str(net)
     lines = [
         "[Interface]",
         f"# {_comment(tenant['name'])} / {_comment(device['name'])}",
         f"PrivateKey = {device['private_key']}",
         f"Address = {device['ip']}/32",
     ]
-    if device["full_tunnel"]:
-        lines.append(f"DNS = {settings.dns}")
+    if device["full_tunnel"] or settings.dns_enabled:
+        lines.append(f"DNS = {settings.client_dns}")
     lines += [
         f"MTU = {settings.mtu}",
         "",
@@ -192,6 +200,7 @@ class WireGuardManager:
         self.conf_path = settings.wg_conf_dir / f"{settings.wg_interface}.conf"
         self.fw_dir = settings.wg_conf_dir / "wgp"
         self.tenants_list = self.fw_dir / "tenants.list"
+        self.dns_list = self.fw_dir / "dns.list"
         self.stamp = self.fw_dir / "apply.stamp"
 
     def server_public_key(self) -> str:
@@ -211,14 +220,17 @@ class WireGuardManager:
                        FROM devices d JOIN tenants t ON t.id = d.tenant_id
                        WHERE d.enabled = 1 AND t.enabled = 1 ORDER BY t.net_index, d.id"""
                 ).fetchall()
-                nets = [
-                    tenant_network(self.settings, r["net_index"])
-                    for r in c.execute("SELECT net_index FROM tenants WHERE enabled = 1 ORDER BY net_index")
-                ]
+                active = c.execute(
+                    "SELECT net_index, dns_filters, dns_deny FROM tenants WHERE enabled = 1 ORDER BY net_index"
+                ).fetchall()
+            nets = [tenant_network(self.settings, r["net_index"]) for r in active]
+            dns_nets = [tenant_network(self.settings, r["net_index"]) for r in active
+                        if self.settings.dns_enabled and tenant_filtering_active(r)]
             peers = [Peer(r["tenant"], r["name"], r["ip"], r["public_key"], r["preshared_key"]) for r in rows]
 
             _atomic_write(self.conf_path, render_server_conf(self.settings, private, peers), 0o600)
             _atomic_write(self.tenants_list, "".join(f"{n}\n" for n in nets), 0o644)
+            _atomic_write(self.dns_list, "".join(f"{n}\n" for n in dns_nets), 0o644)
             # Escritura in situ (IN_CLOSE_WRITE) para disparar la unidad .path del host.
             with open(self.stamp, "w") as fh:
                 fh.write(f"{time.time():.3f}\n")

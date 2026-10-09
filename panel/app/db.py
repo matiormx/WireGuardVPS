@@ -75,6 +75,7 @@ class Database:
         with self.conn() as c:
             c.execute("PRAGMA journal_mode = WAL")
             c.executescript(SCHEMA)
+            _migrate(c)
             if get_setting(c, "server_private_key") is None:
                 private, public = keygen()
                 set_setting(c, "server_private_key", private)
@@ -85,6 +86,19 @@ class Database:
                     (admin_user, security.hash_password(admin_password), int(time.time())),
                 )
         self.path.chmod(0o600)
+
+
+def _ensure_column(c: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    if column not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
+def _migrate(c: sqlite3.Connection) -> None:
+    """Columnas añadidas en versiones posteriores (bases de datos existentes)."""
+    _ensure_column(c, "tenants", "dns_filters", "TEXT NOT NULL DEFAULT '{}'")
+    _ensure_column(c, "tenants", "dns_allow", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(c, "tenants", "dns_deny", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(c, "devices", "dns_filter", "INTEGER NOT NULL DEFAULT 1")
 
 
 def get_setting(c: sqlite3.Connection, key: str) -> str | None:

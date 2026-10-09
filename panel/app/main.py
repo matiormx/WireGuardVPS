@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 import logging
 import re
 import sqlite3
@@ -17,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import security, wg
+from . import dnsfilter, security, wg
 from .config import Settings, load_settings
 from .db import Database, get_setting, username_taken
 
@@ -99,11 +100,34 @@ class DeviceUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=48)
     enabled: bool | None = None
     full_tunnel: bool | None = None
+    dns_filter: bool | None = None
 
     @field_validator("name")
     @classmethod
     def _name(cls, v: str | None) -> str | None:
         return None if v is None else _clean_name(v)
+
+
+class FiltersIn(BaseModel):
+    ads: bool = False
+    security: bool = False
+    adult: bool = False
+    gambling: bool = False
+    safesearch: bool = False
+    allowlist: list[str] = Field(default_factory=list, max_length=500)
+    denylist: list[str] = Field(default_factory=list, max_length=500)
+
+    @field_validator("allowlist", "denylist")
+    @classmethod
+    def _domains(cls, values: list[str]) -> list[str]:
+        out: list[str] = []
+        for v in values:
+            d = dnsfilter.normalize_domain(v)
+            if d is None:
+                raise ValueError(f"Dominio no válido: {v!r}")
+            if d not in out:
+                out.append(d)
+        return out
 
 
 @dataclass
@@ -127,6 +151,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     wgm = wg.WireGuardManager(settings, database)
     sessions = security.SessionManager(settings.session_secret, settings.session_hours * 3600)
     limiter = security.RateLimiter(limit=10, window=300)
+    dns = dnsfilter.DnsFilter(settings, database)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -134,10 +159,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             wgm.apply()
         except Exception:  # noqa: BLE001 - el panel debe arrancar aunque falle la aplicación
             log.exception("No se pudo aplicar la configuración WireGuard al arrancar")
+        if settings.dns_enabled:
+            await dns.start()
         yield
+        await dns.stop()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    app.state.settings, app.state.db, app.state.wg = settings, database, wgm
+    app.state.settings, app.state.db, app.state.wg, app.state.dns = settings, database, wgm, dns
 
     # ------------------------------------------------------------------ middleware
     @app.middleware("http")
@@ -223,6 +251,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "id": d["id"], "tenant_id": d["tenant_id"], "tenant_name": tenant["name"],
             "name": d["name"], "ip": d["ip"], "public_key": d["public_key"],
             "full_tunnel": bool(d["full_tunnel"]), "enabled": bool(d["enabled"]),
+            "dns_filter": bool(d["dns_filter"]),
             "created_at": d["created_at"],
             "online": bool(st.get("online")) and bool(d["enabled"]) and bool(tenant["enabled"]),
             "last_handshake": st.get("last_handshake"), "endpoint": st.get("endpoint"),
@@ -237,11 +266,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "network": str(wg.tenant_network(settings, t["net_index"])),
             "max_devices": t["max_devices"], "enabled": bool(t["enabled"]), "notes": t["notes"],
             "created_at": t["created_at"], "must_change": bool(t["must_change"]),
+            "filters": dnsfilter.parse_filters(t["dns_filters"]),
             "device_count": len(dj), "online_count": sum(d["online"] for d in dj),
             "rx": sum(d["rx"] for d in dj), "tx": sum(d["tx"] for d in dj),
         }
 
     def apply_wg() -> None:
+        dns.reload_policies()
         try:
             wgm.apply()
         except OSError as exc:
@@ -308,6 +339,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "devices": sum(t["device_count"] for t in tj), "online": sum(t["online_count"] for t in tj),
             "rx": sum(t["rx"] for t in tj), "tx": sum(t["tx"] for t in tj),
             "top": sorted(tj, key=lambda t: t["rx"] + t["tx"], reverse=True)[:5],
+            "dns": {
+                "enabled": settings.dns_enabled, "running": dns.running, "error": dns.error,
+                "blocked_24h": sum(dns.tenant_stats(t["id"])["blocked_24h"] for t in tj),
+                "queries_24h": sum(dns.tenant_stats(t["id"])["queries_24h"] for t in tj),
+                "filtering_tenants": sum(any(t["filters"].values()) for t in tj),
+            },
             "server": {
                 "endpoint": f"{settings.endpoint}:{settings.wg_port}", "interface": settings.wg_interface,
                 "interface_up": wgm.interface_up(), "subnet": str(settings.wg_subnet),
@@ -420,6 +457,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             c.execute("UPDATE devices SET enabled = ? WHERE id = ?", (int(body.enabled), device_id))
         if body.full_tunnel is not None:
             c.execute("UPDATE devices SET full_tunnel = ? WHERE id = ?", (int(body.full_tunnel), device_id))
+        if body.dns_filter is not None:
+            c.execute("UPDATE devices SET dns_filter = ? WHERE id = ?", (int(body.dns_filter), device_id))
         c.commit()
         apply_wg()
         d = c.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
@@ -452,6 +491,57 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         buf = io.BytesIO()
         segno.make(conf, error="m").save(buf, kind="svg", scale=5, border=2, dark="#000", light="#fff")
         return Response(buf.getvalue(), media_type="image/svg+xml")
+
+    # ------------------------------------------------------------------ filtros DNS
+    def filters_tenant(p: Principal, tenant_id: int | None) -> int:
+        if p.is_admin:
+            if tenant_id is None:
+                raise HTTPException(400, "tenant_id es obligatorio")
+            return tenant_id
+        return p.id
+
+    def filters_json(c: sqlite3.Connection, tenant_id: int) -> dict:
+        t = tenant_or_404(c, tenant_id)
+        return {
+            "tenant_id": t["id"],
+            "filters": dnsfilter.parse_filters(t["dns_filters"]),
+            "allowlist": dnsfilter.split_domains(t["dns_allow"]),
+            "denylist": dnsfilter.split_domains(t["dns_deny"]),
+            "stats": dns.tenant_stats(t["id"]),
+            "resolver": {"enabled": settings.dns_enabled, "running": dns.running, "error": dns.error},
+        }
+
+    @app.get("/api/filters/catalog")
+    def filters_catalog(_: User):
+        lists = dns.lists.stats()
+        return {
+            "categories": [
+                {"key": cat.key, "name": cat.name, "description": cat.description,
+                 "sources": [src.name for src in cat.sources],
+                 "domains": lists[cat.key]["domains"], "updated": lists[cat.key]["updated"]}
+                for cat in dnsfilter.CATEGORIES
+            ],
+            "enabled": settings.dns_enabled, "running": dns.running,
+        }
+
+    @app.get("/api/filters")
+    def get_filters(p: User, c: Conn, tenant_id: int | None = None):
+        return filters_json(c, filters_tenant(p, tenant_id))
+
+    @app.put("/api/filters")
+    def put_filters(body: FiltersIn, p: User, c: Conn, tenant_id: int | None = None):
+        if not settings.dns_enabled:
+            raise HTTPException(409, "El filtrado DNS está desactivado en este servidor")
+        tid = filters_tenant(p, tenant_id)
+        tenant_or_404(c, tid)
+        flags = {k: getattr(body, k) for k in dnsfilter.FILTER_KEYS}
+        c.execute(
+            "UPDATE tenants SET dns_filters = ?, dns_allow = ?, dns_deny = ? WHERE id = ?",
+            (json.dumps(flags), "\n".join(body.allowlist), "\n".join(body.denylist), tid),
+        )
+        c.commit()
+        apply_wg()
+        return filters_json(c, tid)
 
     # ------------------------------------------------------------------ SPA
     @app.get("/healthz", include_in_schema=False)

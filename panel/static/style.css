@@ -397,3 +397,40 @@ body { overflow-x: clip; } /* clip: no crea un contenedor de scroll (hidden sí)
   body { user-select: none; -webkit-user-select: none; }
   input, textarea, pre, .mono, .kv dd { user-select: text; -webkit-user-select: text; }
 }
+
+/* ==========================================================================
+   Filtros de navegación
+   ========================================================================== */
+.presets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.preset {
+  display: grid; gap: 2px; text-align: left; padding: 12px 14px; cursor: pointer;
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2);
+  transition: border-color .15s, background .15s;
+}
+.preset span { color: var(--muted); font-size: 12.5px; }
+.preset.on { border-color: var(--accent); background: var(--accent-soft); }
+.filter-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; margin: 18px 0; }
+.grid > .card + .card, .filter-grid > .card { margin-top: 0; }
+.filter-card { display: flex; align-items: flex-start; gap: 14px; cursor: pointer; transition: border-color .15s; }
+.filter-card.on { border-color: var(--accent); }
+.filter-card .grow { flex: 1; min-width: 0; }
+.filter-card .name { font-weight: 650; }
+.filter-card .note { margin-top: 2px; }
+.filter-card .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.filter-icon {
+  width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; flex: none;
+  background: var(--surface-2); color: var(--muted);
+}
+.filter-card.on .filter-icon { background: var(--accent-soft); color: var(--accent); }
+.filter-icon svg { width: 19px; height: 19px; }
+.blocked-list { display: grid; }
+.blocked-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); }
+.blocked-row:first-child { border-top: 0; padding-top: 0; }
+.blocked-row .grow { flex: 1; min-width: 0; }
+.blocked-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.blocked-row .meta { color: var(--muted); font-size: 12.5px; }
+@media (max-width: 1000px) { .presets { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) {
+  .filter-grid { grid-template-columns: 1fr; }
+  .presets { gap: 8px; }
+}
