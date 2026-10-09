@@ -40,6 +40,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; }
 body {
   background: var(--bg);
@@ -612,3 +613,4 @@ button.rank:hover .name { color: var(--accent); }
 .plan-option em { font-style: normal; font-weight: 700; }
 .plan-option input:checked + span { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .plan-option input:focus-visible + span { box-shadow: 0 0 0 3px var(--accent-soft); }
+.badge.tiny { font-size: 10.5px; padding: 1px 7px; margin-left: 6px; vertical-align: 1px; }

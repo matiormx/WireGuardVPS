@@ -298,3 +298,42 @@ def test_manual_plan_and_signup(admin):
     # Borrar un cliente cancela su suscripción en Stripe
     assert admin.delete(f"/api/admin/tenants/{new_id}", headers=H).status_code == 200
     assert ("DELETE", "subscriptions/sub_9", {}) in FakeStripe.calls
+
+
+def test_free_tenants(admin):
+    setup_stripe(admin)
+    plan = admin.post("/api/admin/plans", json={"name": "Pro", "price_cents": 1500, "max_devices": 20, "max_forwards": 5},
+                      headers=H).json()
+    # Alta directa como gratuito
+    f = admin.post("/api/admin/tenants", json={"name": "Mi casa", "username": "micasa", "password": "Temporal1", "free": True},
+                   headers=H).json()
+    assert f["billing_status"] == "free"
+    boss = TestClient(admin.app)
+    boss.post("/api/auth/login", json={"username": "micasa", "password": "Temporal1"}, headers=H)
+    boss.post("/api/me/password", json={"current": "Temporal1", "new": "MiCasa2222"}, headers=H)
+    info = boss.get("/api/billing").json()
+    assert info["status"] == "free" and info["plans"] == []
+    assert boss.post("/api/billing/checkout", json={"plan_id": plan["id"]}, headers=H).status_code == 409
+    # Gratuito con los límites de un plan
+    r = admin.put(f"/api/admin/tenants/{f['id']}/plan", json={"plan_id": plan["id"], "free": True}, headers=H).json()
+    assert r["status"] == "free" and r["plan"]["name"] == "Pro" and r["limits"]["devices"] == 20
+
+    # Un cliente que pagaba pasa a gratuito: se cancela su suscripción y no vuelve a suspenderse
+    t = admin.post("/api/admin/tenants", json={"name": "Proyecto", "username": "proyecto", "password": "Temporal1"}, headers=H).json()
+    subscription("sub_p", t["id"], plan["stripe_price_id"], status="past_due", customer="cus_p")
+    webhook(boss, "customer.subscription.updated", FakeStripe.db["subscriptions"]["sub_p"])
+    admin.app.state.billing.check_all(now=time.time() + 30 * 86400)
+    assert admin.get(f"/api/admin/tenants/{t['id']}").json()["enabled"] is False
+    r = admin.put(f"/api/admin/tenants/{t['id']}/plan", json={"plan_id": plan["id"], "free": True}, headers=H).json()
+    assert r["status"] == "free" and not r["suspended"]
+    assert ("DELETE", "subscriptions/sub_p", {}) in FakeStripe.calls
+    assert admin.get(f"/api/admin/tenants/{t['id']}").json()["enabled"] is True
+    admin.app.state.billing.check_all(now=time.time() + 400 * 86400)
+    assert admin.get(f"/api/admin/tenants/{t['id']}").json()["enabled"] is True
+    stats = admin.get("/api/admin/billing").json()["stats"]
+    assert stats["free"] == 2 and stats["mrr_cents"] == 0
+    # Quitar la marca de gratuito
+    r = admin.put(f"/api/admin/tenants/{t['id']}/plan", json={"plan_id": plan["id"]}, headers=H).json()
+    assert r["status"] == "manual"
+    r = admin.put(f"/api/admin/tenants/{t['id']}/plan", json={"plan_id": None}, headers=H).json()
+    assert r["status"] == "none" and len(r["plans"]) == 1

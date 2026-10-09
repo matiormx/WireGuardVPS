@@ -127,9 +127,13 @@ Para instalar un dispositivo sin dar una cuenta, usa el botón **Enlace de insta
 
 ## Salidas por país
 
-Tus clientes pueden navegar con la IP de otro país sin cambiar nada en sus dispositivos: siguen conectados a este servidor (red privada, DNS y filtros incluidos) y sólo su tráfico de Internet sale por el servidor elegido.
+Tus clientes pueden navegar con la IP de otro país sin cambiar nada en sus dispositivos: siguen conectados a este servidor (red privada, DNS y filtros incluidos) y sólo su tráfico de Internet sale por la salida elegida. Hay dos tipos:
 
-1. **Ajustes → Salidas por país → Añadir salida**: nombre, país e IP del VPS de ese país.
+**IP adicional (lo más sencillo).** Una IP extra de este mismo VPS geolocalizada en otro país, por ejemplo las IPs adicionales de OVH (Bare Metal Cloud › IP › Contratar IP adicional, eliges el país y la asignas a tu VPS). En **Ajustes → Salidas por país → Añadir salida → IP adicional** pones su nombre, país e IP: el panel la configura en el servidor y los dispositivos que la elijan salen con ella. Sin otro servidor y sin latencia extra. Las webs ven el país según las bases de datos de geolocalización; los servicios que miden latencia (algunas plataformas de vídeo) pueden notar que el servidor no está allí.
+
+**Servidor en otro país.** Presencia real en el país (latencia local):
+
+1. **Ajustes → Salidas por país → Añadir salida → Servidor en otro país**: nombre, país e IP del VPS de ese país.
 2. En ese VPS (Debian/Ubuntu, el más pequeño vale) ejecuta el comando que muestra el panel:
 
    ```bash
@@ -150,7 +154,8 @@ En **Facturación**:
 3. Cada cliente ve su plan, su uso y sus facturas en **Plan**, contrata o cambia de plan (con prorrateo) y gestiona su tarjeta en el portal de Stripe.
 4. **Impagos:** periodo de gracia configurable (7 días por defecto) y después suspensión automática; al pagar se reactiva solo. El cliente suspendido sólo puede entrar a pagar. Tus suspensiones manuales nunca se levantan solas.
 5. **Registro público** (opcional): cualquiera elige un plan en `https://tu-dominio/#/signup`, paga y su red se crea al momento.
-6. Clientes que te pagan por otros medios: en su ficha, **Plan → Asignar plan manual** (límites del plan, sin cobro ni suspensión automática).
+6. Clientes que te pagan por otros medios: en su ficha, **Plan → Plan manual o gratuito** (límites del plan, sin cobro ni suspensión automática).
+7. **Clientes gratuitos** para tus proyectos: marca «Cliente gratuito» al crearlo (o en **Plan → Plan manual o gratuito**). Nunca se les cobra ni se suspenden, no ven planes que contratar y no cuentan en los ingresos. Si tenía una suscripción, se cancela en Stripe.
 
 Opcional: IVA automático con Stripe Tax. Recibes avisos de nuevas suscripciones, cancelaciones y cobros fallidos, y el cliente de sus problemas de pago.
 

@@ -31,6 +31,8 @@ DNS_LIST=/etc/wireguard/wgp/dns.list
 FWD_LIST=/etc/wireguard/wgp/forwards.list
 EXITS=/etc/wireguard/wgp/exits.list
 EXIT_ROUTES=/etc/wireguard/wgp/exit_routes.list
+IPS=/etc/wireguard/wgp/ips.list
+IP_ROUTES=/etc/wireguard/wgp/ip_routes.list
 PIDS=()
 
 for n in "${NS[@]}"; do ip netns add "$n"; ip -n "$n" link set lo up; done
@@ -76,6 +78,10 @@ ip -n inet addr add 203.0.113.2/24 dev eth1 && ip -n inet link set eth1 up
 ip -n x1 route add default via 203.0.113.2
 ip netns exec x1 iptables -t nat -A POSTROUTING -s 10.252.0.0/16 -o eth1 -j MASQUERADE
 printf 'wgx1 201\n' >"$EXITS"
+# IP adicional del propio servidor (p. ej. una IP de otro país de OVH): 198.51.100.50
+rm -f /var/lib/wgp-firewall/ips.added
+printf '198.51.100.50\n300.1.1.1\n' >"$IPS"
+printf '10.252.1.3 198.51.100.50\n10.252.2.2 198.51.100.77\n' >"$IP_ROUTES"
 printf '10.252.1.2 wgx1\n10.252.1.5 wgx1\n999.1.1.1 wgx1\n10.252.2.2 wgx9\n' >"$EXIT_ROUTES"
 
 printf '10.252.1.0/24 192.168.88.0/24\n10.252.2.0/24\n; iptables -F\n' >"$LIST"
@@ -178,8 +184,10 @@ except Exception: print('sin-conexion')")
     if [[ "$got" == "$2" ]]; then echo "ok    $1 sale a Internet como $got  ($3)"; else echo "FALLO $1 sale como $got  ($3, esperado $2)"; fail=1; fi
 }
 exit_check a1 203.0.113.1  "dispositivo con salida por otro país"
-exit_check a2 198.51.100.1 "dispositivo sin salida asignada: servidor principal"
-exit_check b1 198.51.100.1 "salida inexistente ignorada"
+exit_check a2 198.51.100.50 "dispositivo con IP adicional"
+[[ $(ip netns exec srv ip -4 -o addr show dev eth0 | grep -c '198.51.100.50/32') -eq 1 ]] || { echo "FALLO la IP adicional no se configuró"; fail=1; }
+exit_check b1 198.51.100.1 "salida inexistente / IP no configurada: servidor principal"
+fwd_check udp 7000 "udp-b1 10.252.0.1" "puertos abiertos siguen funcionando con IPs adicionales"
 check a1 10.252.1.3 pass  "con salida, la red privada sigue funcionando"
 check a1 192.168.88.10 pass "con salida, la LAN del router sigue funcionando"
 check a1 10.252.2.2 block "con salida, el aislamiento entre clientes se mantiene"
@@ -187,8 +195,11 @@ fwd_check tcp 8080 "web-a1 10.252.0.1" "puerto abierto hacia un dispositivo con 
 dns_check a1 8.8.8.8 resolver "con salida, los filtros DNS se mantienen"
 dot_check a1 block "con salida, DoT sigue bloqueado"
 : >"$EXIT_ROUTES"
+: >"$IPS"; : >"$IP_ROUTES"
 ip netns exec srv /usr/local/sbin/wgp-firewall sync
 exit_check a1 198.51.100.1 "salida retirada: vuelve al servidor principal"
+exit_check a2 198.51.100.1 "IP adicional retirada: vuelve a la IP principal"
+[[ $(ip netns exec srv ip -4 -o addr show dev eth0 | grep -c '198.51.100.50') -eq 0 ]] || { echo "FALLO la IP adicional no se retiró"; fail=1; }
 printf '10.252.1.2 wgx1\n' >"$EXIT_ROUTES"
 ip netns exec srv /usr/local/sbin/wgp-firewall sync
 exit_check a1 203.0.113.1 "salida reasignada"
@@ -213,6 +224,6 @@ fwd_check udp 7000 "udp-b1 10.252.0.1" "los demás puertos siguen"
 ip netns exec srv /usr/local/sbin/wgp-firewall down wg0
 [[ $(ip netns exec srv iptables-save | grep -c wg-manager) -eq 0 ]] || { echo "FALLO down no limpió"; fail=1; }
 [[ $(ip netns exec srv ip rule show | grep -c -E '^(1000|1100):') -eq 0 ]] || { echo "FALLO down no retiró las reglas de salida"; fail=1; }
-rm -f "$EXITS" "$EXIT_ROUTES"
+rm -f "$EXITS" "$EXIT_ROUTES" "$IPS" "$IP_ROUTES" /var/lib/wgp-firewall/ips.added
 
 exit $fail

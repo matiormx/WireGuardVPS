@@ -14,6 +14,12 @@ de ese país.
   * El nodo de salida se instala con un comando y un token que genera el panel
     (contiene su clave privada: se muestra sólo al administrador).
 
+Dos tipos de salida:
+  * «server»: otro VPS en ese país, unido por un túnel WireGuard (arriba).
+  * «ip»: una IP adicional del propio servidor geolocalizada en otro país (p. ej.
+    las IPs adicionales de OVH). El host la añade a su interfaz y hace SNAT con
+    ella para los dispositivos que la elijan (wgp/ips.list e ip_routes.list).
+
 Sin `from __future__ import annotations`: FastAPI evalúa las dependencias de `deps`.
 """
 import base64
@@ -109,6 +115,22 @@ def tunnel_stats(idx: int) -> dict:
     return out
 
 
+def ip_present(address: str) -> bool:
+    """¿Está la IP adicional configurada en el servidor? (el panel usa la red del host)."""
+    try:
+        res = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return any(f" {address}/" in line for line in res.stdout.splitlines())
+
+
+def exit_status(e) -> dict:
+    if e["kind"] == "ip":
+        ok = ip_present(e["address"])
+        return {"up": ok, "handshake": None, "rx": 0, "tx": 0, "healthy": ok}
+    return tunnel_stats(e["idx"])
+
+
 def effective_exits(c: sqlite3.Connection) -> list[tuple[str, int]]:
     """(IP del dispositivo, id de salida) para los dispositivos que salen por otro país."""
     rows = c.execute(
@@ -121,7 +143,9 @@ def effective_exits(c: sqlite3.Connection) -> list[tuple[str, int]]:
 
 def write_files(c: sqlite3.Connection, settings, write) -> set[int]:
     """Escribe los túneles y las listas para el host. Devuelve las salidas sanas usadas."""
-    exits = c.execute("SELECT * FROM exits WHERE enabled = 1 ORDER BY idx").fetchall()
+    rows = c.execute("SELECT * FROM exits WHERE enabled = 1 ORDER BY idx").fetchall()
+    exits = [e for e in rows if e["kind"] == "server"]
+    ips = [e for e in rows if e["kind"] == "ip"]
     conf_dir: Path = settings.wg_conf_dir
     wanted = set()
     for e in exits:
@@ -137,19 +161,26 @@ def write_files(c: sqlite3.Connection, settings, write) -> set[int]:
                 pass
     by_id = {e["id"]: e for e in exits}
     usable = {e["id"] for e in exits if not e["failover"] or tunnel_stats(e["idx"])["healthy"]}
-    routes = [f"{ip} {iface(by_id[x]['idx'])}" for ip, x in effective_exits(c) if x in usable]
+    ip_by_id = {e["id"]: e["address"] for e in ips}
+    mapping = effective_exits(c)
+    routes = [f"{ip} {iface(by_id[x]['idx'])}" for ip, x in mapping if x in usable]
+    ip_routes = [f"{ip} {ip_by_id[x]}" for ip, x in mapping if x in ip_by_id]
     fw = conf_dir / "wgp"
     write(fw / "exits.list", "".join(f"{iface(e['idx'])} {TABLE_BASE + e['idx']}\n" for e in exits), 0o644)
     write(fw / "exit_routes.list", "".join(f"{r}\n" for r in routes), 0o644)
-    return usable
+    write(fw / "ips.list", "".join(f"{e['address']}\n" for e in ips), 0o644)
+    write(fw / "ip_routes.list", "".join(f"{r}\n" for r in ip_routes), 0o644)
+    return usable | set(ip_by_id)
 
 
 # --------------------------------------------------------------------------- API
 class ExitIn(BaseModel):
     name: str = Field(min_length=1, max_length=40)
     country: str = Field(pattern=r"^[A-Za-z]{2}$")
-    host: str = Field(min_length=3, max_length=253)
+    kind: str = Field(default="server", pattern="^(server|ip)$")
+    host: str | None = Field(default=None, min_length=3, max_length=253)   # server
     port: int = Field(default=EXIT_PORT, ge=1024, le=65535)
+    address: str | None = Field(default=None, max_length=15)                # ip
 
 
 class ExitUpdate(BaseModel):
@@ -188,14 +219,27 @@ def register(app: FastAPI, d) -> None:
         return {"name": get_setting(c, "main_exit_name") or "Servidor principal",
                 "country": get_setting(c, "main_exit_country") or ""}
 
+    def clean_address(c: sqlite3.Connection, raw: str | None, exclude: int | None = None) -> str:
+        try:
+            ip = ipaddress.IPv4Address((raw or "").strip())
+        except ValueError:
+            raise HTTPException(422, "Indica la IP adicional (IPv4), p. ej. 51.210.10.20") from None
+        if not ip.is_global or ip in settings.wg_subnet:
+            raise HTTPException(422, f"{ip} no es una IP pública")
+        row = c.execute("SELECT id FROM exits WHERE kind = 'ip' AND address = ?", (str(ip),)).fetchone()
+        if row and row["id"] != exclude:
+            raise HTTPException(409, f"{ip} ya está dada de alta")
+        return str(ip)
+
     def exit_json(c: sqlite3.Connection, e: sqlite3.Row, admin: bool) -> dict:
-        st = tunnel_stats(e["idx"])
+        st = exit_status(e)
         out = {"id": e["id"], "name": e["name"], "country": e["country"], "enabled": bool(e["enabled"]),
                "online": st["healthy"]}
         if admin:
             used = c.execute("""SELECT COUNT(*) FROM devices d JOIN tenants t ON t.id = d.tenant_id
                                 WHERE COALESCE(d.exit_id, t.exit_id, 0) = ?""", (e["id"],)).fetchone()[0]
-            out.update(host=e["host"], port=e["port"], failover=bool(e["failover"]), created_at=e["created_at"],
+            out.update(kind=e["kind"], address=e["address"],
+                       host=e["host"], port=e["port"], failover=bool(e["failover"]), created_at=e["created_at"],
                        iface=iface(e["idx"]), handshake=st["handshake"], rx=st["rx"], tx=st["tx"], up=st["up"],
                        devices=used)
         return out
@@ -217,6 +261,17 @@ def register(app: FastAPI, d) -> None:
         idx = next((i for i in range(1, MAX_EXITS + 1) if i not in used), None)
         if idx is None:
             raise HTTPException(409, f"Máximo {MAX_EXITS} salidas")
+        if body.kind == "ip":
+            address = clean_address(c, body.address)
+            cur = c.execute(
+                """INSERT INTO exits (name, country, kind, address, host, port, idx, hub_private, hub_public, exit_private,
+                                      exit_public, created_at) VALUES (?, ?, 'ip', ?, ?, 0, ?, '', '', '', '', ?)""",
+                (body.name.strip(), body.country.upper(), address, address, idx, int(time.time())))
+            c.commit()
+            d.apply_wg()
+            return exit_json(c, exit_or_404(c, cur.lastrowid), True)
+        if not body.host:
+            raise HTTPException(422, "Indica la IP pública o el nombre del servidor de salida")
         hub_private, hub_public = d.keypair()
         exit_private, exit_public = d.keypair()
         cur = c.execute(
@@ -235,11 +290,18 @@ def register(app: FastAPI, d) -> None:
 
     @app.get("/api/admin/exits/{exit_id}/install")
     def exit_install(exit_id: int, _: d.Admin, c: d.Conn):
-        return install_info(exit_or_404(c, exit_id))
+        row = exit_or_404(c, exit_id)
+        if row["kind"] != "server":
+            raise HTTPException(422, "Las IPs adicionales no necesitan instalación")
+        return install_info(row)
 
     @app.patch("/api/admin/exits/{exit_id}")
     def update_exit(exit_id: int, body: ExitUpdate, _: d.Admin, c: d.Conn):
-        exit_or_404(c, exit_id)
+        row = exit_or_404(c, exit_id)
+        if row["kind"] == "ip" and body.host is not None:
+            address = clean_address(c, body.host, exclude=exit_id)
+            c.execute("UPDATE exits SET address = ?, host = ? WHERE id = ?", (address, address, exit_id))
+            body.host = None
         if body.name is not None:
             c.execute("UPDATE exits SET name = ? WHERE id = ?", (body.name.strip(), exit_id))
         if body.country is not None:

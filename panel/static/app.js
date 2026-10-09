@@ -865,7 +865,8 @@ async function clientsView(main) {
           h("th", { class: "hide-sm", text: "En línea" }), h("th", { class: "hide-sm", text: "Tráfico" }), h("th", { text: "Estado" }))),
         h("tbody", null, rows.map((t) => h("tr", { class: "link", onClick: () => go(`#/clients/${t.id}`) },
           h("td", { class: "primary" }, h("div", { class: "cell-flex" }, h("div", { class: "avatar", text: initials(t.name) }),
-            h("div", null, h("div", { class: "name", text: t.name }), h("div", { class: "meta", text: t.username })))),
+            h("div", null, h("div", { class: "name" }, t.name, t.billing_status === "free" ? h("span", { class: "badge ok tiny", text: "Gratis" }) : null),
+              h("div", { class: "meta", text: t.username })))),
           h("td", { class: "mono", "data-label": "Red", text: t.network }),
           h("td", { "data-label": "Dispositivos" }, h("div", { class: "meta", text: `${t.device_count} / ${t.max_devices}` }),
             h("div", { class: "progress" }, h("span", { style: { width: `${Math.min(100, (100 * t.device_count) / t.max_devices)}%` } }))),
@@ -898,12 +899,14 @@ function newTenantModal(onDone) {
       field("Usuario de acceso", userInp, "3-32 caracteres: letras, números . _ -"),
       field("Máx. dispositivos", input({ name: "max_devices", type: "number", min: "1", max: "253", value: "10", required: true })),
       passwordField("password", "Contraseña inicial", "El cliente deberá cambiarla en su primer acceso."),
+      h("div", { class: "full field" }, switchEl("free", false, "Cliente gratuito (proyecto propio)"),
+        h("div", { class: "help", text: "Nunca se le cobra ni se suspende por pagos, y no ve planes que contratar." })),
       h("div", { class: "full" }, field("Notas", h("textarea", { class: "input", name: "notes", maxlength: "500", placeholder: "Plan, contacto, referencia…" }))),
     ],
     onSubmit: async (fd) => {
       const t = await api("POST", "/api/admin/tenants", {
         name: fd.get("name"), username: fd.get("username"), password: fd.get("password"),
-        max_devices: Number(fd.get("max_devices")), notes: fd.get("notes") || "",
+        max_devices: Number(fd.get("max_devices")), notes: fd.get("notes") || "", free: fd.get("free") === "on",
       });
       toast(`Cliente creado con la red ${t.network}`);
       credentialsModal(t.name, t.username, fd.get("password"), t.network);
@@ -928,7 +931,8 @@ async function clientDetailView(main, id) {
     const reload = () => load();
     fill(main, 
       pageHead(t.name, h("span", { class: "cell-flex" },
-        h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : "Suspendido" }),
+        h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : t.suspended_reason === "billing" ? "Suspendido por impago" : "Suspendido" }),
+        t.billing_status && t.billing_status !== "none" ? statusBadge(t.billing_status) : null,
         h("span", { class: "mono", text: t.network }),
         t.must_change ? h("span", { class: "badge warn", text: "Pendiente de primer acceso" }) : null,
         filterBadges(t.filters)),
@@ -2119,23 +2123,45 @@ function exitsCard() {
   let data = null;
   const reload = async () => { data = await api("GET", "/api/admin/exits"); draw(); };
   const run = async (fn, msg) => { try { await fn(); toast(msg); await reload(); } catch (e) { toast(e.message, "err"); } };
-  const exitModal = (e) => formModal({
-    title: e ? `Editar ${e.name}` : "Añadir salida",
-    submitLabel: e ? "Guardar" : "Añadir",
-    fields: [
-      field("Nombre", input({ name: "name", required: true, maxlength: "40", value: e ? e.name : "", placeholder: "Alemania, Nueva York…" })),
-      field("País", countrySelect("country", e ? e.country : "")),
-      field("IP pública o nombre del VPS", input({ name: "host", required: true, value: e ? e.host : "", class: "input mono", autocapitalize: "off", spellcheck: "false", placeholder: "203.0.113.50" })),
-      field("Puerto UDP", input({ name: "port", type: "number", min: "1024", max: "65535", required: true, value: String(e ? e.port : 51821) })),
-    ],
-    onSubmit: async (fd) => {
-      const body = { name: fd.get("name"), country: fd.get("country"), host: fd.get("host"), port: Number(fd.get("port")) };
-      if (e) { await api("PATCH", `/api/admin/exits/${e.id}`, body); toast("Salida actualizada"); reload(); return; }
-      const r = await api("POST", "/api/admin/exits", body);
-      reload();
-      setTimeout(() => exitInstallModal(r.name, r), 50);
-    },
-  });
+  const exitModal = (e) => {
+    let kind = e ? e.kind : "ip";
+    const serverFields = [
+      field("IP pública o nombre del VPS", input({ name: "host", value: e ? e.host : "", class: "input mono", autocapitalize: "off", spellcheck: "false", placeholder: "203.0.113.50" })),
+      field("Puerto UDP", input({ name: "port", type: "number", min: "1024", max: "65535", value: String(e && e.port ? e.port : 51821) })),
+    ];
+    const ipFields = [
+      h("div", { class: "full" }, field("IP adicional", input({ name: "address", value: e ? e.address || "" : "", class: "input mono", inputmode: "decimal", placeholder: "51.210.10.20" }),
+        "En OVH: Bare Metal Cloud › IP › Contratar IP adicional, elige el país y asígnala a este VPS. El panel la configura sola en el servidor.")),
+    ];
+    const toggle = () => {
+      serverFields.forEach((f) => { f.hidden = kind !== "server"; });
+      ipFields.forEach((f) => { f.hidden = kind !== "ip"; });
+    };
+    const kindSel = e ? null : h("div", { class: "full" }, h("div", { class: "segmented" }, [["ip", "IP adicional (OVH…)"], ["server", "Servidor en otro país"]].map(([k, l]) =>
+      h("label", null, h("input", { type: "radio", name: "kind", value: k, checked: k === kind, onChange: () => { kind = k; toggle(); } }), h("span", { text: l })))),
+      h("div", { class: "help", text: "IP adicional: sin otro servidor; las webs ven ese país según su geolocalización. Servidor: presencia real en el país (latencia local)." }));
+    formModal({
+      title: e ? `Editar ${e.name}` : "Añadir salida",
+      submitLabel: e ? "Guardar" : "Añadir",
+      fields: [
+        kindSel,
+        field("Nombre", input({ name: "name", required: true, maxlength: "40", value: e ? e.name : "", placeholder: "Francia, Nueva York…" })),
+        field("País", countrySelect("country", e ? e.country : "")),
+        ...ipFields, ...serverFields,
+      ],
+      onSubmit: async (fd) => {
+        const body = { name: fd.get("name"), country: fd.get("country") };
+        if (kind === "ip") Object.assign(body, e ? { host: fd.get("address").trim() } : { kind: "ip", address: fd.get("address").trim() });
+        else Object.assign(body, { host: fd.get("host").trim(), port: Number(fd.get("port")) });
+        if (e) { await api("PATCH", `/api/admin/exits/${e.id}`, body); toast("Salida actualizada"); reload(); return; }
+        const r = await api("POST", "/api/admin/exits", body);
+        reload();
+        if (kind === "server") setTimeout(() => exitInstallModal(r.name, r), 50);
+        else toast(`IP ${r.address} añadida`);
+      },
+    });
+    toggle();
+  };
   const mainModal = () => formModal({
     title: "Servidor principal",
     fields: [field("Nombre", input({ name: "name", required: true, maxlength: "40", value: data.main.name })), field("País", countrySelect("country", data.main.country))],
@@ -2144,7 +2170,7 @@ function exitsCard() {
   const draw = () => {
     fill(card,
       h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Salidas por país" }),
-        h("div", { class: "note", text: "Servidores en otros países por los que tus clientes pueden navegar. Los dispositivos siguen conectados a este servidor: no hay que reconfigurar nada." })),
+        h("div", { class: "note", text: "IPs de otros países (p. ej. IPs adicionales de OVH) o servidores en otros países por los que tus clientes pueden navegar. Los dispositivos siguen conectados a este servidor: no hay que reconfigurar nada." })),
         h("button", { class: "btn primary", onClick: () => exitModal(null) }, icon("plus"), "Añadir salida")),
       h("div", { class: "blocked-list" },
         h("div", { class: "blocked-row" }, h("span", { class: "flag", text: flag(data.main.country) }),
@@ -2153,12 +2179,14 @@ function exitsCard() {
         data.exits.map((e) => h("div", { class: "blocked-row" }, h("span", { class: "flag", text: flag(e.country) }),
           h("div", { class: "grow" },
             h("div", { class: "name" }, e.name, " ", h("span", { class: `badge ${!e.enabled ? "off" : e.online ? "ok" : "warn"}`,
-              text: !e.enabled ? "Desactivada" : e.online ? "Conectada" : e.up ? "Sin respuesta" : "Pendiente de instalar" })),
-            h("div", { class: "meta mono", text: [`${e.host}:${e.port}`, `${e.devices} disp.`, e.handshake ? `último contacto ${ago(e.handshake)}` : null,
-              e.rx + e.tx ? `${fmtBytes(e.rx + e.tx)}` : null, e.failover ? null : "sin respaldo"].filter(Boolean).join(" · ") })),
-          h("button", { class: "btn sm", onClick: async () => { try { exitInstallModal(e.name, await api("GET", `/api/admin/exits/${e.id}/install`)); } catch (err) { toast(err.message, "err"); } } }, "Instalar"),
+              text: !e.enabled ? "Desactivada" : e.kind === "ip" ? (e.online ? "Activa" : "Pendiente de aplicar")
+                : e.online ? "Conectada" : e.up ? "Sin respuesta" : "Pendiente de instalar" })),
+            h("div", { class: "meta mono", text: e.kind === "ip" ? [`IP adicional ${e.address}`, `${e.devices} disp.`].join(" · ")
+              : [`${e.host}:${e.port}`, `${e.devices} disp.`, e.handshake ? `último contacto ${ago(e.handshake)}` : null,
+                e.rx + e.tx ? `${fmtBytes(e.rx + e.tx)}` : null, e.failover ? null : "sin respaldo"].filter(Boolean).join(" · ") })),
+          e.kind === "server" ? h("button", { class: "btn sm", onClick: async () => { try { exitInstallModal(e.name, await api("GET", `/api/admin/exits/${e.id}/install`)); } catch (err) { toast(err.message, "err"); } } }, "Instalar") : null,
           h("button", { class: "btn ghost icon", title: "Editar", onClick: () => exitModal(e) }, icon("edit")),
-          h("button", { class: "btn ghost icon", title: e.failover ? "Respaldo activado: si cae, sus dispositivos salen por el principal (pulsa para desactivarlo)" : "Sin respaldo: si cae, sus dispositivos se quedan sin Internet (pulsa para activarlo)",
+          e.kind === "ip" ? null : h("button", { class: "btn ghost icon", title: e.failover ? "Respaldo activado: si cae, sus dispositivos salen por el principal (pulsa para desactivarlo)" : "Sin respaldo: si cae, sus dispositivos se quedan sin Internet (pulsa para activarlo)",
             onClick: () => run(() => api("PATCH", `/api/admin/exits/${e.id}`, { failover: !e.failover }), e.failover ? "Respaldo desactivado (modo «sin fugas»)" : "Respaldo activado") }, icon("shield")),
           h("button", { class: "btn ghost icon", title: e.enabled ? "Desactivar" : "Activar", onClick: () =>
             run(() => api("PATCH", `/api/admin/exits/${e.id}`, { enabled: !e.enabled }), e.enabled ? "Salida desactivada" : "Salida activada") }, icon("power")),
@@ -2167,7 +2195,7 @@ function exitsCard() {
               run(() => api("DELETE", `/api/admin/exits/${e.id}`), "Salida eliminada");
             }
           } }, icon("trash"))))),
-      data.exits.length ? null : h("p", { class: "help", text: "Añade una salida y ejecuta en ese VPS el comando que te daremos. Es un servidor muy sencillo: no lleva panel ni Docker." }));
+      data.exits.length ? null : h("p", { class: "help", text: "Lo más sencillo: contrata IPs adicionales de otros países para este VPS y añádelas aquí." }));
   };
   reload().catch((e) => fill(card, h("p", { class: "note", text: e.message })));
   return card;
@@ -2441,7 +2469,7 @@ async function sharedConfigView(token) {
 /* ------------------------------------------------------------------ facturación */
 const STATUS_LABEL = { active: ["ok", "Activa"], trialing: ["accent", "En prueba"], past_due: ["warn", "Pago pendiente"],
   unpaid: ["off", "Impagada"], incomplete: ["warn", "Pago incompleto"], canceled: ["off", "Cancelada"], pending: ["warn", "Pendiente de pago"],
-  manual: ["accent", "Manual"], none: ["", "Sin plan"], incomplete_expired: ["off", "Caducada"] };
+  manual: ["accent", "Manual"], free: ["ok", "Gratuita"], none: ["", "Sin plan"], incomplete_expired: ["off", "Caducada"] };
 function statusBadge(st) {
   const [cls, label] = STATUS_LABEL[st] || ["", st];
   return h("span", { class: `badge ${cls}`, text: label });
@@ -2526,7 +2554,8 @@ async function planView(main, tenantId) {
           b.period_end && b.status !== "manual" ? h("p", { class: "note", text: b.cancel_at_period_end ? `Termina el ${fmtDay(b.period_end)}.`
             : b.status === "trialing" ? `Prueba gratis hasta el ${fmtDay(b.period_end)}.` : `Próxima renovación: ${fmtDay(b.period_end)}.` }) : null,
           b.status === "manual" ? h("p", { class: "note", text: "Plan asignado por tu proveedor (sin cobro automático)." }) : null,
-          !b.plan ? h("p", { class: "note", text: b.stripe && b.plans.length ? "Elige un plan abajo para empezar. Pagas con tarjeta de forma segura con Stripe y puedes cancelar cuando quieras."
+          b.status === "free" ? h("p", { class: "note", text: "Cuenta gratuita: sin cobros." }) : null,
+          !b.plan && b.status !== "free" ? h("p", { class: "note", text: b.stripe && b.plans.length ? "Elige un plan abajo para empezar. Pagas con tarjeta de forma segura con Stripe y puedes cancelar cuando quieras."
             : "Tus límites los fija tu proveedor." }) : null,
           h("div", { class: "cell-flex", style: { flexWrap: "wrap", marginTop: "12px" } },
             b.has_customer && b.stripe ? h("button", { class: "btn primary", onClick: async (e) => {
@@ -2534,7 +2563,7 @@ async function planView(main, tenantId) {
               try { await openStripe(`/api/billing/portal${qs}`); } catch (err) { toast(err.message, "err"); e.currentTarget.disabled = false; }
             } }, icon("card"), "Gestionar pago y facturas") : null,
             isAdmin && b.customer_url ? h("a", { class: "btn", href: b.customer_url, target: "_blank", rel: "noopener" }, "Ver en Stripe") : null,
-            isAdmin ? h("button", { class: "btn", onClick: () => assignPlanModal(tenantId, b, async () => { b = await api("GET", `/api/billing${qs}`); draw(); }) }, icon("edit"), "Asignar plan manual") : null)),
+            isAdmin ? h("button", { class: "btn", onClick: () => assignPlanModal(tenantId, b, async () => { b = await api("GET", `/api/billing${qs}`); draw(); }) }, icon("edit"), "Plan manual o gratuito") : null)),
         h("div", { class: "card" }, h("h3", { text: "Uso" }),
           h("div", { class: "grid", style: { gap: "12px", marginTop: "12px" } },
             usage("Dispositivos", b.usage.devices, b.limits.devices),
@@ -2565,16 +2594,21 @@ async function planView(main, tenantId) {
 async function assignPlanModal(tenantId, b, onDone) {
   const data = await api("GET", "/api/admin/billing");
   formModal({
-    title: "Asignar plan manual",
+    title: "Plan del cliente",
     fields: [
       h("p", { class: "note full", style: { margin: 0 }, text: "Para clientes que te pagan por otros medios (transferencia, efectivo…): se aplican los límites del plan y nunca se suspende automáticamente. Si el cliente tiene suscripción en Stripe, gestiónala desde allí." }),
       h("div", { class: "full" }, field("Plan", h("select", { class: "input", name: "plan_id" },
         h("option", { value: "", text: "Sin plan (límites manuales)", selected: !b.plan }),
-        data.plans.filter((p) => p.active).map((p) => h("option", { value: String(p.id), selected: b.plan && b.plan.id === p.id, text: `${p.name} · ${p.price}` }))))),
+        data.plans.filter((p) => p.active).map((p) => h("option", { value: String(p.id), selected: b.plan && b.plan.id === p.id, text: `${p.name} · ${p.price}` }))),
+        "Con plan se aplican sus límites; sin plan, los que pongas en «Editar cliente».")),
+      h("div", { class: "full field" }, switchEl("free", b.status === "free", "Gratuito (proyecto propio)"),
+        h("div", { class: "help", text: ["active", "trialing", "past_due", "unpaid"].includes(b.status)
+          ? "Si lo marcas, se cancelará su suscripción de Stripe y no se le volverá a cobrar."
+          : "Nunca se le cobra ni se suspende por pagos, y no ve planes que contratar." })),
     ],
     onSubmit: async (fd) => {
-      await api("PUT", `/api/admin/tenants/${tenantId}/plan`, { plan_id: fd.get("plan_id") ? Number(fd.get("plan_id")) : null });
-      toast("Plan asignado");
+      await api("PUT", `/api/admin/tenants/${tenantId}/plan`, { plan_id: fd.get("plan_id") ? Number(fd.get("plan_id")) : null, free: fd.get("free") === "on" });
+      toast(fd.get("free") === "on" ? "Cliente marcado como gratuito" : "Plan asignado");
       onDone();
     },
   });
@@ -2625,7 +2659,7 @@ async function billingAdminView(main) {
     fill(body,
       h("div", { class: "grid stats" },
         statCard("card", "Ingresos mensuales", data.stats.mrr, "suscripciones activas", true),
-        statCard("users", "Activas", String(data.stats.active), `${data.stats.trialing} en prueba · ${data.stats.manual} manuales`),
+        statCard("users", "Activas", String(data.stats.active), `${data.stats.trialing} en prueba · ${data.stats.manual} manuales · ${data.stats.free} gratis`),
         statCard("alert", "Pago pendiente", String(data.stats.past_due), "en periodo de gracia"),
         statCard("power", "Suspendidos", String(data.stats.suspended), "por impago")),
       data.attention.length ? h("div", { class: "card" }, h("h3", { text: "Requieren atención" }),

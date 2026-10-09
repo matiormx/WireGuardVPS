@@ -75,6 +75,7 @@ class TenantCreate(BaseModel):
     password: str = Field(min_length=8, max_length=256)
     max_devices: int = Field(default=10, ge=1, le=16384)
     notes: str = Field(default="", max_length=500)
+    free: bool = False   # cliente gratuito (proyectos propios)
 
     @field_validator("name")
     @classmethod
@@ -659,10 +660,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "No quedan redes libres para nuevos clientes")
         max_devices = min(body.max_devices, wg.device_capacity(settings))
         cur = c.execute(
-            """INSERT INTO tenants (name, username, password_hash, must_change, net_index, max_devices, notes, created_at)
-               VALUES (?, ?, ?, 1, ?, ?, ?, ?)""",
+            """INSERT INTO tenants (name, username, password_hash, must_change, net_index, max_devices, notes, created_at,
+                                    billing_status)
+               VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)""",
             (body.name, body.username, security.hash_password(body.password), idx, max_devices,
-             body.notes, int(time.time())),
+             body.notes, int(time.time()), "free" if body.free else "none"),
         )
         c.commit()
         apply_wg()

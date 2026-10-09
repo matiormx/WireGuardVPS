@@ -317,6 +317,8 @@ def _migrate(c: sqlite3.Connection) -> None:
     _ensure_column(c, "devices", "kind", "TEXT NOT NULL DEFAULT 'device'")
     _ensure_column(c, "devices", "lan_networks", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(c, "tenants", "max_forwards", "INTEGER NOT NULL DEFAULT 5")
+    _ensure_column(c, "exits", "kind", "TEXT NOT NULL DEFAULT 'server'")
+    _ensure_column(c, "exits", "address", "TEXT")
     _ensure_column(c, "devices", "exit_id", "INTEGER")          # NULL = la del cliente, 0 = principal
     _ensure_column(c, "tenants", "exit_id", "INTEGER")
     _ensure_column(c, "tenants", "allow_exits", "INTEGER NOT NULL DEFAULT 1")

@@ -31,7 +31,7 @@ set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 # -----------------------------------------------------------------------------
 # VERSIÓN DEL SCRIPT (se compara con la publicada en GitHub). SemVer.
 # -----------------------------------------------------------------------------
-readonly VERSION="2.8.0"
+readonly VERSION="2.9.0"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
@@ -102,6 +102,7 @@ readonly DNS_CHAIN="WGP-DNS"
 readonly PFWD_CHAIN="WGP-PFWD"                     # reenvío de puertos: FORWARD
 readonly PDNAT_CHAIN="WGP-PDNAT"                   # reenvío de puertos: DNAT (PREROUTING)
 readonly PSNAT_CHAIN="WGP-PSNAT"                   # reenvío de puertos: SNAT hacia wg0
+readonly ISNAT_CHAIN="WGP-ISNAT"                   # IPs adicionales: SNAT por dispositivo
 readonly RULE_TAG="wg-manager"
 readonly SYSTEMD_DIR="/etc/systemd/system"
 readonly LOCK_FILE="/var/lock/wg-manager.lock"
@@ -483,6 +484,9 @@ DNS_LIST="${WGP_DIR}/dns.list"
 FWD_LIST="${WGP_DIR}/forwards.list"
 EXITS_LIST="${WGP_DIR}/exits.list"
 EXIT_ROUTES="${WGP_DIR}/exit_routes.list"
+IPS_LIST="${WGP_DIR}/ips.list"
+IP_ROUTES="${WGP_DIR}/ip_routes.list"
+IPS_STATE="/var/lib/wgp-firewall/ips.added"
 RESERVED=" ${reserved} "
 CHAIN="${TENANT_CHAIN}"
 EGRESS="${EGRESS_CHAIN}"
@@ -490,6 +494,7 @@ DNSCHAIN="${DNS_CHAIN}"
 PFWD="${PFWD_CHAIN}"
 PDNAT="${PDNAT_CHAIN}"
 PSNAT="${PSNAT_CHAIN}"
+ISNAT="${ISNAT_CHAIN}"
 TAG="${RULE_TAG}"
 EOF
     cat >>"${FIREWALL_BIN}" <<'EOF'
@@ -513,8 +518,9 @@ rule_specs() {
         "filter|FORWARD|9|-i wgx+ -o ${i} -d ${SUBNET} -m conntrack --ctstate RELATED,ESTABLISHED ${c} -j ACCEPT" \
         "nat|PREROUTING|1|-i ${i} ${c} -j ${DNSCHAIN}" \
         "nat|PREROUTING|2|-i ${WAN} -m addrtype --dst-type LOCAL ${c} -j ${PDNAT}" \
-        "nat|POSTROUTING|1|-s ${SUBNET} -o ${WAN} ${c} -j MASQUERADE" \
-        "nat|POSTROUTING|2|-o ${i} ${c} -j ${PSNAT}"
+        "nat|POSTROUTING|1|-o ${WAN} ${c} -j ${ISNAT}" \
+        "nat|POSTROUTING|2|-s ${SUBNET} -o ${WAN} ${c} -j MASQUERADE" \
+        "nat|POSTROUTING|3|-o ${i} ${c} -j ${PSNAT}"
 }
 
 valid_cidr() {
@@ -572,6 +578,44 @@ ensure_chains() {
     ipt -t nat -N "${DNSCHAIN}" 2>/dev/null || true
     ipt -t nat -N "${PDNAT}" 2>/dev/null || true
     ipt -t nat -N "${PSNAT}" 2>/dev/null || true
+    ipt -t nat -N "${ISNAT}" 2>/dev/null || true
+}
+
+# --- IPs adicionales (p. ej. IPs de otros países de OVH) ----------------------
+# ips.list: una IP por línea; se añade como /32 a la interfaz WAN (y se quita
+# cuando el panel la da de baja, sólo si la añadió este script).
+# ip_routes.list: "IP_dispositivo IP_adicional" -> SNAT con esa IP de origen.
+ip_on_host() { ip -4 -o addr show 2>/dev/null | awk '{print $4}' | grep -qx "$1/[0-9]*"; }
+
+sync_ips() {
+    local addr state=() wanted=() kept=()
+    install -d -m 0755 "$(dirname "${IPS_STATE}")"
+    [[ -f "${IPS_STATE}" ]] && mapfile -t state <"${IPS_STATE}"
+    if [[ -f "${IPS_LIST}" ]]; then
+        while read -r addr _ || [[ -n "${addr}" ]]; do
+            [[ -z "${addr}" ]] && continue
+            if ! valid_ip "${addr}"; then
+                logger -t wgp-firewall "IP adicional ignorada: ${addr}" || true
+                continue
+            fi
+            wanted+=("${addr}")
+            if ! ip_on_host "${addr}"; then
+                if ip addr add "${addr}/32" dev "${WAN}" 2>/dev/null; then
+                    kept+=("${addr}")
+                else
+                    logger -t wgp-firewall "No se pudo añadir ${addr} a ${WAN}" || true
+                fi
+            elif printf '%s\n' "${state[@]}" | grep -qx "${addr}"; then
+                kept+=("${addr}")   # ya la habíamos añadido nosotros
+            fi
+        done <"${IPS_LIST}"
+    fi
+    for addr in "${state[@]}"; do
+        [[ -n "${addr}" ]] || continue
+        printf '%s\n' "${wanted[@]}" | grep -qx "${addr}" && continue
+        ip addr del "${addr}/32" dev "${WAN}" 2>/dev/null || true
+    done
+    printf '%s\n' "${kept[@]}" >"${IPS_STATE}"
 }
 
 # read_groups FICHERO -> un grupo por línea (red del cliente + LAN de sus routers),
@@ -596,7 +640,18 @@ read_groups() {
 
 sync_tenants() {
     ensure_chains
-    local net src dst group c="-m comment --comment ${TAG}" groups dns fwds proto pport dest dport
+    local net src dst group c="-m comment --comment ${TAG}" groups dns fwds proto pport dest dport dev_ip extra_ip isnat=""
+    sync_ips
+    if [[ -f "${IP_ROUTES}" ]]; then
+        while read -r dev_ip extra_ip _ || [[ -n "${dev_ip}" ]]; do
+            [[ -z "${dev_ip}" ]] && continue
+            if valid_ip "${dev_ip}" && valid_ip "${extra_ip}" && ip_on_host "${extra_ip}"; then
+                isnat+="-A ${ISNAT} -s ${dev_ip}/32 ${c} -j SNAT --to-source ${extra_ip}"$'\n'
+            else
+                logger -t wgp-firewall "Salida por IP ignorada: ${dev_ip} ${extra_ip}" || true
+            fi
+        done <"${IP_ROUTES}"
+    fi
     groups="$(read_groups "${LIST}")"
     dns="$(read_nets "${DNS_LIST}")"
     fwds="$(read_forwards "${FWD_LIST}")"
@@ -628,6 +683,8 @@ sync_tenants() {
         echo ":${DNSCHAIN} - [0:0]"
         echo ":${PDNAT} - [0:0]"
         echo ":${PSNAT} - [0:0]"
+        echo ":${ISNAT} - [0:0]"
+        printf '%s' "${isnat}"
         # SNAT a la IP del servidor: la respuesta vuelve siempre por el túnel,
         # aunque el dispositivo sólo enrute la red privada por WireGuard.
         while read -r proto pport dest dport; do
@@ -726,7 +783,7 @@ down() {
     ipt -F "${PFWD}" 2>/dev/null || true
     ipt -X "${PFWD}" 2>/dev/null || true
     local t
-    for t in "${DNSCHAIN}" "${PDNAT}" "${PSNAT}"; do
+    for t in "${DNSCHAIN}" "${PDNAT}" "${PSNAT}" "${ISNAT}"; do
         ipt -t nat -F "${t}" 2>/dev/null || true
         ipt -t nat -X "${t}" 2>/dev/null || true
     done

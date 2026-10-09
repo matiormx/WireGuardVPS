@@ -127,3 +127,36 @@ def test_exit_health_changes_are_reported(admin):
     n.deliver = lambda to, title, body, url="/": sent.append((to, title, body))
     n.on_exit_change({de["id"]}, set())
     assert sent and "Alemania" in sent[0][1] and "servidor principal" in sent[0][2]
+
+
+def test_additional_ip_exits(admin, monkeypatch):
+    present = {"ok": set()}
+    monkeypatch.setattr(exits, "ip_present", lambda addr: addr in present["ok"])
+    assert admin.post("/api/admin/exits", json={"name": "Francia", "country": "FR", "kind": "ip", "address": "10.0.0.5"},
+                      headers=H).status_code == 422                                          # privada
+    assert admin.post("/api/admin/exits", json={"name": "Francia", "country": "FR", "kind": "ip"}, headers=H).status_code == 422
+    fr = admin.post("/api/admin/exits", json={"name": "Francia", "country": "fr", "kind": "ip", "address": "51.210.10.20"},
+                    headers=H).json()
+    assert fr["kind"] == "ip" and fr["address"] == "51.210.10.20" and fr["online"] is False
+    assert admin.post("/api/admin/exits", json={"name": "Otra", "country": "FR", "kind": "ip", "address": "51.210.10.20"},
+                      headers=H).status_code == 409
+    assert admin.get(f"/api/admin/exits/{fr['id']}/install").status_code == 422
+    assert not list(admin.wg.glob("wgx*.conf"))                     # sin túnel
+    assert (admin.wg / "wgp" / "ips.list").read_text() == "51.210.10.20\n"
+
+    t = admin.post("/api/admin/tenants", json={"name": "Acme", "username": "acme", "password": "Password1"}, headers=H).json()
+    dev = admin.post("/api/devices", json={"name": "Portátil", "tenant_id": t["id"], "exit_id": fr["id"]}, headers=H).json()
+    other = admin.post("/api/devices", json={"name": "Móvil", "tenant_id": t["id"]}, headers=H).json()
+    assert (admin.wg / "wgp" / "ip_routes.list").read_text() == f"{dev['ip']} 51.210.10.20\n"
+    assert routes(admin) == []                                       # no usa túneles
+    admin.put("/api/exits/default", json={"exit_id": fr["id"], "tenant_id": t["id"]}, headers=H)
+    assert sorted((admin.wg / "wgp" / "ip_routes.list").read_text().splitlines()) == \
+        sorted([f"{dev['ip']} 51.210.10.20", f"{other['ip']} 51.210.10.20"])
+    present["ok"] = {"51.210.10.20"}
+    lst = admin.get("/api/admin/exits").json()["exits"]
+    assert lst[0]["online"] is True and lst[0]["devices"] == 2
+    # Cambiar la IP y desactivar
+    assert admin.patch(f"/api/admin/exits/{fr['id']}", json={"host": "51.210.10.21"}, headers=H).json()["address"] == "51.210.10.21"
+    assert (admin.wg / "wgp" / "ips.list").read_text() == "51.210.10.21\n"
+    admin.patch(f"/api/admin/exits/{fr['id']}", json={"enabled": False}, headers=H)
+    assert (admin.wg / "wgp" / "ips.list").read_text() == "" and (admin.wg / "wgp" / "ip_routes.list").read_text() == ""

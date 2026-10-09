@@ -328,13 +328,15 @@ class WireGuardManager:
         Devuelve (caídas, recuperadas) o None si no hubo cambios."""
         from . import exits
         with self.db.conn() as c:
-            rows = c.execute("SELECT id, idx, failover FROM exits WHERE enabled = 1").fetchall()
-        health = {r["id"]: exits.tunnel_stats(r["idx"])["healthy"] for r in rows}
+            rows = c.execute("SELECT * FROM exits WHERE enabled = 1").fetchall()
+        health = {r["id"]: exits.exit_status(r)["healthy"] for r in rows}
         prev = getattr(self, "exit_health", None)
         self.exit_health = health
-        usable = {r["id"] for r in rows if not r["failover"] or health[r["id"]]}
-        if usable != getattr(self, "exit_usable", None):
-            log.info("Cambio en las salidas disponibles: %s", sorted(usable))
+        usable = {r["id"] for r in rows if r["kind"] == "ip" or not r["failover"] or health[r["id"]]}
+        missing_ip = any(r["kind"] == "ip" and not health[r["id"]] for r in rows)
+        if usable != getattr(self, "exit_usable", None) or missing_ip:
+            # Una IP adicional que no está en el servidor (p. ej. tras reiniciar la red): el host la vuelve a poner.
+            log.info("Reaplicando salidas: %s", sorted(usable))
             self.apply()
         if prev is None:
             return None

@@ -175,6 +175,7 @@ class PlanUpdate(BaseModel):
 
 class AssignIn(BaseModel):
     plan_id: int | None = None        # None = sin plan (límites manuales)
+    free: bool = False                # cliente gratuito (proyectos propios): nunca se cobra ni se suspende
 
 
 class CheckoutIn(BaseModel):
@@ -300,7 +301,7 @@ class Billing:
         now = time.time() if now is None else now
         t = c.execute("SELECT * FROM tenants WHERE id = ?", (tenant_id,)).fetchone()
         status = t["billing_status"] or "none"
-        if status in ("none", "manual"):
+        if status in ("none", "manual", "free"):
             return None
         grace = int(get_setting(c, "billing_grace_days") or 7) * 86400
         change = None
@@ -395,7 +396,7 @@ def register(app: FastAPI, d) -> None:
         plans = c.execute("SELECT * FROM plans ORDER BY active DESC, sort, price_cents").fetchall()
         key = get_setting(c, "stripe_secret_key") or ""
         mrr = 0
-        counts = {"active": 0, "trialing": 0, "past_due": 0, "suspended": 0, "manual": 0}
+        counts = {"active": 0, "trialing": 0, "past_due": 0, "suspended": 0, "manual": 0, "free": 0}
         attention = []
         for t in c.execute("""SELECT t.*, COALESCE(t.subscription_cents, p.price_cents) AS paid,
                                      COALESCE(t.subscription_interval, p.interval) AS paid_interval, p.name AS plan_name
@@ -405,8 +406,8 @@ def register(app: FastAPI, d) -> None:
                 counts[st] += 1
                 if st == "active" and t["paid"]:
                     mrr += t["paid"] if t["paid_interval"] == "month" else round(t["paid"] / 12)
-            elif st == "manual":
-                counts["manual"] += 1
+            elif st in ("manual", "free"):
+                counts[st] += 1
             if st in DUE_STATUSES:
                 counts["past_due"] += 1
             if t["suspended_reason"] == "billing" and st != "pending":
@@ -543,12 +544,21 @@ def register(app: FastAPI, d) -> None:
 
     @app.put("/api/admin/tenants/{tenant_id}/plan")
     def assign_plan(tenant_id: int, body: AssignIn, _: d.Admin, c: d.Conn):
-        """Asignación manual (sin cobro por Stripe): p. ej. clientes que pagan por transferencia."""
+        """Asignación manual (sin cobro por Stripe): clientes que pagan por transferencia o gratuitos."""
         t = d.tenant_or_404(c, tenant_id)
         if body.plan_id is not None:
             plan_or_404(c, body.plan_id)
+        if body.free:
+            # Gratuito: si pagaba con Stripe, se cancela la suscripción para no cobrarle más.
+            b.cancel_subscription(c, t)
+            c.execute("""UPDATE tenants SET billing_status = 'free', past_due_since = NULL, stripe_subscription_id = NULL,
+                         cancel_at_period_end = 0, subscription_cents = NULL WHERE id = ?""", (tenant_id,))
+            t = d.tenant_or_404(c, tenant_id)
         b.apply_plan(c, tenant_id, body.plan_id)
-        if not t["stripe_subscription_id"] or t["billing_status"] in ("canceled", "none", "pending"):
+        if body.free:
+            if not t["enabled"] and t["suspended_reason"] == "billing":
+                c.execute("UPDATE tenants SET enabled = 1, suspended_reason = '' WHERE id = ?", (tenant_id,))
+        elif (not t["stripe_subscription_id"] or t["billing_status"] in ("canceled", "none", "pending", "free")):
             c.execute("UPDATE tenants SET billing_status = ?, past_due_since = NULL WHERE id = ?",
                       ("manual" if body.plan_id else "none", tenant_id))
             if not t["enabled"] and t["suspended_reason"] == "billing":
@@ -574,7 +584,7 @@ def register(app: FastAPI, d) -> None:
                        "members": t["max_members"], "exits": bool(t["allow_exits"])},
             "usage": {"devices": count("devices"), "forwards": count("forwards"), "services": count("services"),
                       "members": count("members")},
-            "plans": [plan_json(p) for p in c.execute(
+            "plans": [] if t["billing_status"] == "free" else [plan_json(p) for p in c.execute(
                 "SELECT * FROM plans WHERE active = 1 AND public = 1 AND price_cents > 0 ORDER BY sort, price_cents")],
             "customer_url": f"https://dashboard.stripe.com/{'' if '_live_' in (get_setting(c, 'stripe_secret_key') or '') else 'test/'}customers/{t['stripe_customer_id']}"
             if t["stripe_customer_id"] else None,
@@ -615,6 +625,8 @@ def register(app: FastAPI, d) -> None:
     def checkout(body: CheckoutIn, p: d.BillingUser, c: d.Conn, tenant_id: int | None = None):
         tid = d.scope_tenant(p, tenant_id)
         t = d.tenant_or_404(c, tid)
+        if t["billing_status"] == "free":
+            raise HTTPException(409, "Esta cuenta es gratuita: no necesita contratar un plan")
         plan = plan_or_404(c, body.plan_id, active_only=True)
         if plan["price_cents"] <= 0 or (not plan["public"] and not p.is_admin):
             raise HTTPException(422, "Ese plan no se puede contratar desde aquí")
