@@ -222,8 +222,13 @@ function confirmDialog({ title, message, confirmLabel = "Confirmar", danger = tr
   });
 }
 
+let fieldSeq = 0;
 function field(label, input, help) {
-  return h("div", { class: "field" }, h("label", { text: label }), input, help ? h("div", { class: "help", text: help }) : null);
+  // Etiqueta asociada al campo (for/id): el autorrelleno de iOS/Android y los
+  // lectores de pantalla la usan para entender qué es cada campo.
+  if (!input.id) input.id = `f${++fieldSeq}-${input.name || "campo"}`;
+  return h("div", { class: "field" }, h("label", { text: label, for: input.id }), input,
+    help ? h("div", { class: "help", text: help }) : null);
 }
 function input(props) { return h("input", { class: "input", ...props }); }
 function switchEl(name, checked, label) {
@@ -263,6 +268,7 @@ function every(fn) {
 
 async function render() {
   stopTimer();
+  if (state.me) stopConditionalPasskey();
   if (!state.me) return loginView();
   if (state.me.must_change) return forcePasswordView();
   const [section, id, sub] = route();
@@ -345,8 +351,11 @@ function loginView() {
   $app.className = "";
   const err = h("div", { class: "help", style: { color: "var(--danger)", minHeight: "18px" } });
   const btn = h("button", { class: "btn primary block", type: "submit" }, "Entrar");
-  const form = h("form", { onSubmit: async (e) => {
+  // Formulario de inicio de sesión «de libro» para que iOS no lo tome por un alta:
+  // method/action, ids, etiquetas asociadas, autocomplete username/current-password.
+  const form = h("form", { id: "login-form", method: "post", action: "/", autocomplete: "on", onSubmit: async (e) => {
     e.preventDefault();
+    stopConditionalPasskey();
     err.textContent = "";
     btn.disabled = true;
     const fd = new FormData(form);
@@ -360,14 +369,17 @@ function loginView() {
       btn.disabled = false;
     }
   } },
-    field("Usuario", input({ name: "username", required: true, autocomplete: "username", autofocus: true })),
-    field("Contraseña", input({ name: "password", type: "password", required: true, autocomplete: "current-password" })),
+    field("Usuario", input({ id: "username", name: "username", type: "text", required: true, autofocus: true,
+      autocomplete: "username webauthn", autocapitalize: "none", autocorrect: "off", spellcheck: "false" })),
+    field("Contraseña", input({ id: "password", name: "password", type: "password", required: true,
+      autocomplete: "current-password" })),
     err, btn,
     h("div", { class: "or-sep" }, h("span", { text: "o" })),
     h("button", { class: "btn block", type: "button", onClick: async (e) => {
       err.textContent = "";
       const b = e.currentTarget;
       b.disabled = true;
+      stopConditionalPasskey();
       try {
         await loginWithPasskey();
       } catch (ex) {
@@ -381,6 +393,7 @@ function loginView() {
       isStandalone() ? null : h("div", { style: { textAlign: "center", marginTop: "16px" } },
         h("button", { class: "btn ghost sm", type: "button", onClick: installApp }, icon("download"), "Instalar app")))));
   setTimeout(() => form.querySelector("input").focus(), 30);
+  startConditionalPasskey(err);
 }
 
 function passwordForm(onDone) {
@@ -401,6 +414,9 @@ function passwordForm(onDone) {
       btn.disabled = false;
     }
   } },
+    // Usuario oculto: el Llavero de iOS / gestores de contraseñas saben así qué entrada actualizar.
+    h("input", { type: "text", name: "username", autocomplete: "username", value: state.me ? state.me.username : "",
+      readOnly: true, hidden: true, tabIndex: -1, "aria-hidden": "true" }),
     h("div", { class: "full" }, field("Contraseña actual", input({ name: "current", type: "password", required: true, autocomplete: "current-password" }))),
     field("Nueva contraseña", input({ name: "new", type: "password", required: true, minlength: "8", autocomplete: "new-password" }), "Mínimo 8 caracteres"),
     field("Repetir", input({ name: "repeat", type: "password", required: true, minlength: "8", autocomplete: "new-password" })),
@@ -1219,6 +1235,50 @@ function noPasskeyHelp() {
   });
 }
 
+function credentialToJSON(cred) {
+  return {
+    id: cred.id, rawId: bufToB64u(cred.rawId), type: cred.type,
+    authenticatorAttachment: cred.authenticatorAttachment || undefined,
+    clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+    response: {
+      clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+      authenticatorData: bufToB64u(cred.response.authenticatorData),
+      signature: bufToB64u(cred.response.signature),
+      userHandle: cred.response.userHandle ? bufToB64u(cred.response.userHandle) : undefined,
+    },
+  };
+}
+
+/* Autorrelleno de passkeys: al tocar «Usuario», iOS/Android ofrecen «Iniciar
+   sesión con passkey» encima del teclado (WebAuthn conditional mediation). */
+function stopConditionalPasskey() {
+  if (state.passkeyAbort) { state.passkeyAbort.abort(); state.passkeyAbort = null; }
+}
+async function startConditionalPasskey(errEl) {
+  stopConditionalPasskey();
+  if (!passkeySupported() || !PublicKeyCredential.isConditionalMediationAvailable) return;
+  try {
+    if (!(await PublicKeyCredential.isConditionalMediationAvailable())) return;
+    const ctrl = new AbortController();
+    state.passkeyAbort = ctrl;
+    const { state: st, options } = await api("POST", "/api/passkeys/login/options");
+    if (ctrl.signal.aborted) return;
+    const cred = await navigator.credentials.get({
+      mediation: "conditional",
+      signal: ctrl.signal,
+      publicKey: { ...options, challenge: b64uToBuf(options.challenge), allowCredentials: [] },
+    });
+    if (state.passkeyAbort === ctrl) state.passkeyAbort = null;
+    await api("POST", "/api/passkeys/login/verify", { state: st, credential: credentialToJSON(cred) });
+    state.me = await api("GET", "/api/me");
+    state.passkeyChecked = true;
+    render();
+  } catch (ex) {
+    // Abortado (el usuario usó la contraseña o el botón) o sin passkeys: nada que hacer.
+    if (ex.name !== "AbortError" && ex.name !== "NotAllowedError" && errEl && ex.status) errEl.textContent = ex.message;
+  }
+}
+
 async function loginWithPasskey() {
   if (!passkeySupported()) return noPasskeyHelp();
   const { state: st, options } = await api("POST", "/api/passkeys/login/options");
@@ -1229,20 +1289,7 @@ async function loginWithPasskey() {
       allowCredentials: (options.allowCredentials || []).map((c) => ({ ...c, id: b64uToBuf(c.id) })),
     },
   });
-  await api("POST", "/api/passkeys/login/verify", {
-    state: st,
-    credential: {
-      id: cred.id, rawId: bufToB64u(cred.rawId), type: cred.type,
-      authenticatorAttachment: cred.authenticatorAttachment || undefined,
-      clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
-      response: {
-        clientDataJSON: bufToB64u(cred.response.clientDataJSON),
-        authenticatorData: bufToB64u(cred.response.authenticatorData),
-        signature: bufToB64u(cred.response.signature),
-        userHandle: cred.response.userHandle ? bufToB64u(cred.response.userHandle) : undefined,
-      },
-    },
-  });
+  await api("POST", "/api/passkeys/login/verify", { state: st, credential: credentialToJSON(cred) });
   state.me = await api("GET", "/api/me");
   state.passkeyChecked = true; // acaba de usar una llave: no sugerir
   render();
