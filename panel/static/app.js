@@ -925,6 +925,116 @@ function backupCard() {
   return card;
 }
 
+/* Actualizaciones: el panel pide «wg-manager update» al host (wgp-update.path). */
+function updatesCard() {
+  const card = h("div", { class: "card" }, spinnerBlock());
+  const DAYS = [["daily", "Todos los días"], ["0", "Los lunes"], ["1", "Los martes"], ["2", "Los miércoles"],
+    ["3", "Los jueves"], ["4", "Los viernes"], ["5", "Los sábados"], ["6", "Los domingos"]];
+  const STATES = {
+    queued: "Actualización solicitada; el servidor la empezará en unos segundos…",
+    running: "Actualizando el servidor… El panel se reiniciará unos segundos; los túneles VPN no se cortan.",
+  };
+  let st = null, startVersion = null, polling = false, showLog = false;
+  const busy = () => ["queued", "running"].includes(st.status.state);
+
+  const poll = async () => {
+    if (polling) return;
+    polling = true;
+    while (card.isConnected) {
+      await new Promise((r) => setTimeout(r, 3000));
+      try { st = await api("GET", "/api/admin/update"); } catch { continue; }   // el panel se está reiniciando
+      if (!busy()) break;
+      draw();
+    }
+    polling = false;
+    if (!card.isConnected) return;
+    if (st.status.state === "done") {
+      toast(st.current && st.current !== startVersion ? `Servidor actualizado a v${st.current}` : "Actualización terminada");
+      if (st.current !== startVersion) { setTimeout(() => location.reload(), 1500); return; }
+    } else if (st.status.state === "failed") toast("La actualización ha fallado: revisa el registro", "err");
+    draw();
+  };
+  const run = async () => {
+    const msg = st.available ? `Se instalará la v${st.latest}.` : "Se reinstalará la versión actual con la última configuración.";
+    if (!(await confirmDialog({ title: "Actualizar el servidor",
+      message: `${msg} El panel se reiniciará y estará unos segundos sin responder; los túneles VPN no se cortan.`,
+      confirmLabel: "Actualizar", danger: false }))) return;
+    try {
+      startVersion = st.current;
+      st = await api("POST", "/api/admin/update/run");
+      draw();
+      poll();
+    } catch (e) { toast(e.message, "err"); }
+  };
+  const saveAuto = async (patch) => {
+    try {
+      st.auto = { ...st.auto, ...patch };   // cambios seguidos (día y hora) no se pisan
+      st = await api("PUT", "/api/admin/update/auto", st.auto);
+      toast(st.auto.enabled ? "Actualización automática guardada" : "Actualización automática desactivada");
+    } catch (e) { toast(e.message, "err"); }
+    draw();
+  };
+
+  const draw = () => {
+    const s = st.status;
+    const checkBtn = h("button", { class: "btn", disabled: busy(), onClick: async () => {
+      checkBtn.disabled = true;
+      checkBtn.lastChild.textContent = "Buscando…";
+      try {
+        st = await api("POST", "/api/admin/update/check");
+        if (st.check_error) toast(st.check_error, "err");
+        else toast(st.available ? `Hay una versión nueva: v${st.latest}` : "Ya tienes la última versión");
+      } catch (e) { toast(e.message, "err"); }
+      draw();
+    } }, icon("refresh"), "Buscar actualizaciones");
+    const runBtn = h("button", { class: `btn ${st.available ? "primary" : ""}`, disabled: !st.ready || busy(), onClick: run },
+      icon("download"), busy() ? "Actualizando…" : st.available ? `Actualizar a v${st.latest}` : "Reinstalar");
+    const hours = Array.from({ length: 24 }, (_, i) => h("option", { value: String(i), selected: i === st.auto.hour, text: `${String(i).padStart(2, "0")}:00` }));
+    const days = DAYS.map(([v, t]) => h("option", { value: v, selected: v === st.auto.day, text: t }));
+    const finished = s.finished_at ? new Date(s.finished_at * 1000).toLocaleString() : "";
+    fill(card,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Actualizaciones" }),
+        h("div", { class: "note", text: "Actualiza el servidor (panel, firewall y script) a la última versión publicada. El panel se reinicia unos segundos; las conexiones VPN siguen activas." }))),
+      h("div", { class: "grid", style: { gap: "14px" } },
+        st.ready ? null : h("div", { class: "banner" }, icon("alert"),
+          h("span", null, "Para actualizar desde aquí, ejecuta una vez en el servidor ", h("code", { text: "sudo wg-manager update" }), ".")),
+        h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+          h("span", { class: "badge accent" }, `Instalada: ${st.current ? `v${st.current}` : "desconocida"}`),
+          st.latest ? h("span", { class: `badge ${st.available ? "warn" : "ok"}` }, st.available ? `Disponible: v${st.latest}` : "Al día") : null,
+          st.commit ? h("span", { class: "note mono", text: st.commit }) : null,
+          st.checked_at ? h("span", { class: "note", text: `Comprobado ${ago(st.checked_at)}` }) : null),
+        st.check_error ? checkLine(false, "", st.check_error) : null,
+        h("div", { class: "cell-flex", style: { flexWrap: "wrap" } }, runBtn, checkBtn),
+        STATES[s.state] ? h("div", { class: "banner" }, h("div", { class: "spinner sm" }), STATES[s.state]) : null,
+        s.state === "stuck" ? checkLine(false, "", "El servidor no ha recogido la petición. Comprueba en el servidor: systemctl status wgp-update.path") : null,
+        s.state === "lost" ? checkLine(false, "", "La última actualización no terminó. Revisa el registro o ejecuta «sudo wg-manager update» en el servidor.") : null,
+        s.state === "done" ? checkLine(true, `Última actualización: ${finished}${s.version ? ` · v${s.version}` : ""}${s.reason === "automática" ? " · automática" : ""}`, "") : null,
+        s.state === "failed" ? checkLine(false, "", `La última actualización falló (${finished}, código ${s.exit_code}).`) : null,
+        h("div", { class: "backup-opts" },
+          h("label", { class: "switch" },
+            h("input", { type: "checkbox", checked: st.auto.enabled, disabled: !st.ready, onChange: (e) => saveAuto({ enabled: e.target.checked }) }),
+            h("span", { class: "track" }), h("span", { text: "Actualizar automáticamente" })),
+          h("label", { class: "inline-field" }, h("select", { class: "input", onChange: (e) => saveAuto({ day: e.target.value }) }, days)),
+          h("label", { class: "inline-field" }, "a las", h("select", { class: "input", onChange: (e) => saveAuto({ hour: Number(e.target.value) }) }, hours),
+            h("span", { class: "note", text: st.timezone }))),
+        h("div", { class: "help", text: st.auto.enabled
+          ? "Sólo se actualiza si hay una versión nueva. Recibirás un aviso con el resultado (Avisos, como las copias fallidas)."
+          : "Elige un momento con poco uso: durante la actualización el panel no responde unos segundos." }),
+        st.log ? h("div", null,
+          h("button", { class: "btn ghost", onClick: () => { showLog = !showLog; draw(); } }, icon("server"), showLog ? "Ocultar registro" : "Ver registro de la última actualización"),
+          showLog ? h("pre", { class: "conf", style: { marginTop: "10px", maxHeight: "360px" }, text: st.log }) : null) : null),
+    );
+    if (showLog) { const pre = card.querySelector("pre"); if (pre) pre.scrollTop = pre.scrollHeight; }
+  };
+  api("GET", "/api/admin/update").then((d) => {
+    st = d;
+    startVersion = d.current;
+    draw();
+    if (busy()) poll();
+  }).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
+  return card;
+}
+
 /* Página pública: presentación del servicio y planes en un dominio propio. */
 function siteCard() {
   const card = h("div", { class: "card" }, spinnerBlock());
@@ -1084,6 +1194,7 @@ async function settingsView(main) {
       exitsCard(),
       alertsConfigCard(),
       backupCard(),
+      updatesCard(),
       dnsSettingsCard(),
       h("div", { class: "card" },
         h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dominios de clientes" }),
@@ -2389,7 +2500,7 @@ async function alertsView(main) {
             h("label", { class: "switch" }, h("input", { type: "checkbox", checked: prefs.devices_all, onChange: (e) => savePrefs({ devices_all: e.target.checked }) }),
               h("span", { class: "track" }), h("span", { text: "Dispositivos vigilados de todos los clientes" })),
             h("label", { class: "switch" }, h("input", { type: "checkbox", checked: prefs.backup, onChange: (e) => savePrefs({ backup: e.target.checked }) }),
-              h("span", { class: "track" }), h("span", { text: "Copias de seguridad fallidas y salidas por país caídas" })),
+              h("span", { class: "track" }), h("span", { text: "Copias fallidas, salidas por país caídas y actualizaciones del servidor" })),
             h("label", { class: "switch" }, h("input", { type: "checkbox", checked: prefs.billing, onChange: (e) => savePrefs({ billing: e.target.checked }) }),
               h("span", { class: "track" }), h("span", { text: "Pagos: nuevas suscripciones, cancelaciones y cobros fallidos" })),
           ] : h("label", { class: "switch" }, h("input", { type: "checkbox", checked: prefs.devices, onChange: (e) => savePrefs({ devices: e.target.checked }) }),

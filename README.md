@@ -180,6 +180,14 @@ En ese dominio, el panel queda en `/app`: «Entrar» lleva al login y «Contrata
 
   Se recuperan clientes, dispositivos y sus claves, la clave del servidor, dominios, DNS, servicios y ajustes. Después apunta el DNS del endpoint (y de los dominios) al nuevo servidor: los dispositivos se reconectan solos.
 
+## Actualizaciones
+
+En **Ajustes › Actualizaciones** ves la versión instalada y la publicada, y puedes pulsar **Actualizar** para que el servidor ejecute `wg-manager update` por su cuenta (panel, firewall y script). El panel se reinicia unos segundos; los túneles VPN no se cortan. Al terminar se recarga solo y queda el registro de la actualización.
+
+Activa **Actualizar automáticamente** y elige el día (todos o uno de la semana) y la hora: a esa hora, si hay una versión nueva, se instala. Los administradores reciben un aviso con el resultado (Telegram, email o push, como los fallos de copia).
+
+Las instalaciones anteriores a la 2.11.0 necesitan actualizar una vez por consola (`sudo wg-manager update`) para instalar el actualizador; desde entonces, todo desde el panel.
+
 ## Cómo funciona
 
 | | Admin | Cliente |

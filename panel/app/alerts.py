@@ -345,6 +345,12 @@ class Notifier:
             to = {("admin", r["id"]) for r in c.execute("SELECT id FROM admins") if prefs(c, "admin", r["id"]).get("billing")}
         self.deliver(to, title, body, "/#/billing")
 
+    def notify_system(self, title: str, body: str) -> None:
+        """Avisos del servidor (actualizaciones) a los administradores con «backup» activado."""
+        with self.db.conn() as c:
+            to = {("admin", r["id"]) for r in c.execute("SELECT id FROM admins") if prefs(c, "admin", r["id"]).get("backup")}
+        self.deliver(to, title, body, "/#/settings")
+
     def on_backup_failed(self, error: str) -> None:
         with self.db.conn() as c:
             to = {("admin", r["id"]) for r in c.execute("SELECT id FROM admins") if prefs(c, "admin", r["id"]).get("backup")}

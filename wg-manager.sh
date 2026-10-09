@@ -31,7 +31,7 @@ set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 # -----------------------------------------------------------------------------
 # VERSIÓN DEL SCRIPT (se compara con la publicada en GitHub). SemVer.
 # -----------------------------------------------------------------------------
-readonly VERSION="2.10.0"
+readonly VERSION="2.11.0"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
@@ -96,6 +96,7 @@ readonly WG_CONF_DIR="/etc/wireguard"
 readonly WG_CONF_FILE="${WG_CONF_DIR}/${WG_INTERFACE}.conf"
 readonly WGP_DIR="${WG_CONF_DIR}/wgp"            # ficheros que el panel comparte con el host
 readonly FIREWALL_BIN="/usr/local/sbin/wgp-firewall"
+readonly UPDATE_BIN="/usr/local/sbin/wgp-update-run"   # actualizaciones pedidas desde el panel
 readonly TENANT_CHAIN="WGP-TENANTS"
 readonly EGRESS_CHAIN="WGP-EGRESS"
 readonly DNS_CHAIN="WGP-DNS"
@@ -840,9 +841,82 @@ EOF
         info "Unidades de wireguard-ui (v1) eliminadas."
     fi
 
+    install_update_runner
+
     systemctl daemon-reload
     systemctl enable --now wgp-apply.path >/dev/null 2>&1
+    systemctl enable --now wgp-update.path >/dev/null 2>&1
     success "wgp-firewall instalado (WAN=${WAN_IFACE}, subred ${WG_SUBNET})."
+}
+
+# Actualizaciones desde el panel: el panel (contenedor) sólo puede escribir
+# wgp/update.request; el host lo detecta (unidad .path) y ejecuta siempre el
+# mismo comando, «wg-manager update», guardando el estado y el registro en wgp/.
+install_update_runner() {
+    # Se escribe aparte y se sustituye con mv: este mismo script se regenera
+    # durante la actualización que está ejecutando (bash lee el fichero sobre la marcha).
+    local tmp="${UPDATE_BIN}.new"
+    cat >"${tmp}" <<EOF
+#!/usr/bin/env bash
+# Generado por wg-manager ${VERSION}. No editar: se regenera en cada install/update.
+set -uo pipefail
+DIR="${WGP_DIR}"
+WGM="\${WGM_BIN:-${INSTALL_BIN}}"
+EOF
+    cat >>"${tmp}" <<'EOF'
+STATUS="${DIR}/update.status"
+LOG="${DIR}/update.log"
+exec 8>/run/wgp-update.lock
+flock -n 8 || exit 0            # ya hay una actualización en marcha
+write_status() { printf '%s\n' "$1" >"${STATUS}.tmp" && chmod 0644 "${STATUS}.tmp" && mv -f "${STATUS}.tmp" "${STATUS}"; }
+started=$(date +%s)
+write_status "{\"state\": \"running\", \"started_at\": ${started}}"
+{
+    echo "== $(date '+%Y-%m-%d %H:%M:%S') Actualización solicitada desde el panel"
+    "${WGM}" update
+} >"${LOG}" 2>&1 </dev/null
+rc=$?
+chmod 0640 "${LOG}" 2>/dev/null || true
+version=$("${WGM}" version 2>/dev/null | awk '{print $2}')
+state="done"
+[[ ${rc} -eq 0 ]] || state="failed"
+write_status "{\"state\": \"${state}\", \"started_at\": ${started}, \"finished_at\": $(date +%s), \"exit_code\": ${rc}, \"version\": \"${version#v}\"}"
+logger -t wgp-update "Actualización desde el panel: ${state} (código ${rc})" || true
+exit 0
+EOF
+    chmod 0755 "${tmp}"
+    bash -n "${tmp}"
+    mv -f "${tmp}" "${UPDATE_BIN}"
+    cat >"${SYSTEMD_DIR}/wgp-update.service" <<EOF
+[Unit]
+Description=Actualiza la plataforma WireGuard a petición del panel
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=${UPDATE_BIN}
+TimeoutStartSec=45min
+EOF
+    cat >"${SYSTEMD_DIR}/wgp-update.path" <<EOF
+[Unit]
+Description=Vigila las peticiones de actualización del panel
+
+[Path]
+PathChanged=${WGP_DIR}/update.request
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# version.json: lo que el panel muestra en Ajustes › Actualizaciones.
+write_version_info() {
+    local commit=""
+    [[ -d "${SRC_DIR}/.git" ]] && commit="$(git -C "${SRC_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+    install -d -m 0755 "${WGP_DIR}"
+    printf '{"version": "%s", "commit": "%s", "updated_at": %s, "updater": 1, "branch": "%s"}\n' \
+        "${VERSION}" "${commit}" "$(date +%s)" "${BRANCH}" >"${WGP_DIR}/version.json"
+    chmod 0644 "${WGP_DIR}/version.json"
 }
 
 # =============================================================================
@@ -893,6 +967,7 @@ FIREWALL_HOOK='${FIREWALL_BIN}'
 DNS_ENABLED='${DNS_ENABLED}'
 CADDY_ADMIN='$([[ "${ENABLE_HTTPS}" == "true" ]] && echo "http://127.0.0.1:2019")'
 RESERVED_PORTS='$(reserved_ports)'
+WGP_SCRIPT_URL='$(raw_script_url)'
 ACME_EMAIL='${ACME_EMAIL}'
 COOKIE_SECURE='false'
 LOG_LEVEL='INFO'
@@ -1116,6 +1191,7 @@ EOF
         install -m 0755 "${SCRIPT_PATH}" "${INSTALL_BIN}"
         info "Script instalado en ${INSTALL_BIN}."
     fi
+    write_version_info
 }
 
 # =============================================================================

@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import bcrypt
 
-from . import alerts, backup, billing, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, wg
+from . import alerts, backup, billing, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, updates, wg
 from .config import Settings, load_settings
 from .db import (LABEL_RE, Database, get_setting, make_hostname, name_in_use, set_setting,
                  unique_hostname, username_taken)
@@ -302,6 +302,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     mon.listeners.append(notifier.on_monitor_events)
     mon.exit_listeners.append(notifier.on_exit_change)
     backups.on_failure = notifier.on_backup_failed
+    upd = updates.Updates(settings, database, notifier.notify_system)
     doms.seed_from_env(settings.panel_domain)
 
     @asynccontextmanager
@@ -316,9 +317,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         backups.start()
         mon.start()
         bill.start()
+        upd.start()
         await asyncio.to_thread(notifier.start_telegram)
         yield
         notifier.stop_telegram()
+        await upd.stop()
         await bill.stop()
         await mon.stop()
         await backups.stop()
@@ -332,6 +335,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.backups = backups
     app.state.monitor = mon
     app.state.notifier = notifier
+    app.state.updates = upd
 
     # ------------------------------------------------------------------ middleware
     @app.middleware("http")
@@ -1507,6 +1511,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     deps.clean_host = _clean_host
     deps.host_of = domains.host_of
     site.register(app, deps)
+    deps.updates = upd
+    updates.register(app, deps)
 
     # ------------------------------------------------------------------ SPA
     @app.get("/healthz", include_in_schema=False)

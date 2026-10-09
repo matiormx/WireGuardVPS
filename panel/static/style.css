@@ -64,6 +64,7 @@ h3 { font-size: 14px; font-weight: 600; color: var(--muted); text-transform: upp
   animation: spin .8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+.spinner.sm { width: 16px; height: 16px; border-width: 2px; flex: none; }
 
 /* ---------- login ---------- */
 .auth {
