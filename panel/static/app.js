@@ -293,7 +293,36 @@ function route() {
   return parts;
 }
 function hashParam(name) { return new URLSearchParams(location.hash.split("?")[1] || "").get(name); }
-function go(hash) { if (location.hash !== hash) location.hash = hash; else render(); }
+/* Navegación.
+   En iPhone/iPad, deslizar desde el borde izquierdo es el «volver» del sistema y
+   chocaría con el gesto del menú. Allí las pantallas no se apilan en el historial
+   del navegador (se reemplazan) y la app lleva su propia pila para el botón «Atrás»;
+   así ese borde queda sólo para el menú. En el resto se usa el historial normal
+   (botón atrás de Android y del navegador). */
+const IOS_NAV = isIOS();
+let navStack = [];
+let navBacking = false;
+if (IOS_NAV) {
+  try { navStack = JSON.parse(sessionStorage.getItem("wgpStack") || "[]"); } catch { navStack = []; }
+  if (navStack[navStack.length - 1] !== (location.hash || "#/")) navStack.push(location.hash || "#/");
+}
+function saveStack() { try { sessionStorage.setItem("wgpStack", JSON.stringify(navStack.slice(-50))); } catch { /* ignorado */ } }
+function navigate(hash) {
+  if (IOS_NAV) location.replace(hash.startsWith("#") ? hash : `#${hash}`);
+  else location.hash = hash;
+}
+function go(hash) { if (location.hash !== hash) navigate(hash); else render(); }
+if (IOS_NAV) {
+  // Los enlaces internos (#/...) también reemplazan en lugar de apilar.
+  document.addEventListener("click", (e) => {
+    const a = e.target.closest && e.target.closest('a[href^="#"]');
+    if (!a || a.target || a.hasAttribute("download") || e.defaultPrevented || e.metaKey || e.ctrlKey) return;
+    const href = a.getAttribute("href");
+    if (href === "#") return;
+    e.preventDefault();
+    go(href);
+  });
+}
 
 /* «Atrás»: se numera cada pantalla en history.state para saber si hay una anterior
    dentro de la app (también con los botones atrás/adelante del navegador). */
@@ -315,9 +344,22 @@ function parentRoute() {
   return null;
 }
 function canGoBack() {
+  if (IOS_NAV) return navStack.length > 1 || Boolean(parentRoute());
   return Boolean(parentRoute()) || ((history.state && history.state.wgpNav) || navBase) > navBase;
 }
 function goBack() {
+  if (IOS_NAV) {
+    if (navStack.length > 1) {
+      navStack.pop();
+      navBacking = true;
+      saveStack();
+      go(navStack[navStack.length - 1]);
+    } else if (parentRoute()) {
+      navStack = [];
+      go(parentRoute());
+    }
+    return;
+  }
   if (((history.state && history.state.wgpNav) || navBase) > navBase) history.back();
   else if (parentRoute()) go(parentRoute());
 }
@@ -328,6 +370,12 @@ function backButton(extra = "") {
 
 window.addEventListener("hashchange", () => {
   try { markNav(); } catch { /* ignorado */ }
+  if (IOS_NAV) {
+    const here = location.hash || "#/";
+    if (navBacking) navBacking = false;
+    else if (navStack[navStack.length - 1] !== here) navStack.push(here);
+    saveStack();
+  }
   document.querySelectorAll(".overlay").forEach((o) => (o.closeModal ? o.closeModal() : o.remove()));
   render();
 });
@@ -509,8 +557,8 @@ function pageHead(title, sub, actions, crumbs) {
 async function logout() {
   try { await api("POST", "/api/auth/logout"); } catch { /* ignorar */ }
   state.me = null;
-  location.hash = "#/";
-  render();
+  navStack = [];
+  go("#/");
 }
 
 /* ------------------------------------------------------------------ login */
@@ -753,7 +801,7 @@ function restoreModal() {
               r.warnings.length ? h("ul", { class: "steps" }, r.warnings.map((w) => h("li", { text: w }))) : null,
               h("p", { class: "note", style: { margin: 0 }, text: "Entra ahora con el usuario y la contraseña que usabas en el servidor anterior." }),
             ],
-            actions: [h("button", { class: "btn primary", onClick: () => { done.close(); state.me = null; location.hash = "#/"; render(); } }, "Iniciar sesión")],
+            actions: [h("button", { class: "btn primary", onClick: () => { done.close(); state.me = null; navStack = []; go("#/"); } }, "Iniciar sesión")],
           });
         } catch (ex) { err.textContent = ex.message; b.disabled = false; b.textContent = "Restaurar ahora"; }
       } }, "Restaurar ahora") : null);

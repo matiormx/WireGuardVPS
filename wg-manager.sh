@@ -31,7 +31,7 @@ set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 # -----------------------------------------------------------------------------
 # VERSIÓN DEL SCRIPT (se compara con la publicada en GitHub). SemVer.
 # -----------------------------------------------------------------------------
-readonly VERSION="2.9.2"
+readonly VERSION="2.9.3"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
