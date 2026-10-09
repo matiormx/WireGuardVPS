@@ -49,6 +49,7 @@ const ICONS = {
   send: '<path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/>',
   mail: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>',
   card: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20M6 15h4"/>',
+  back: '<path d="m15 18-6-6 6-6"/>',
   share: '<path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><path d="M16 6l-4-4-4 4"/><path d="M12 2v13"/>',
   fingerprint: '<path d="M2 12C2 6.5 6.5 2 12 2a10 10 0 0 1 8 4"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M9 6.8a6 6 0 0 1 9 5.2c0 .47 0 1.17-.02 2"/>',
 };
@@ -169,10 +170,41 @@ async function api(method, path, body) {
 }
 
 /* ------------------------------------------------------------------ toasts y modales */
+/* Avisos emergentes: se cierran solos (los errores tardan más), con la ✕, o deslizándolos. */
 function toast(msg, kind = "ok") {
-  const el = h("div", { class: `toast ${kind}`, role: "status" }, msg);
-  document.getElementById("toasts").append(el);
-  setTimeout(() => el.remove(), 3800);
+  const box = document.getElementById("toasts");
+  const close = () => {
+    if (el.dataset.closing) return;
+    el.dataset.closing = "1";
+    el.classList.add("leaving");
+    setTimeout(() => el.remove(), 180);
+  };
+  const el = h("div", { class: `toast ${kind}`, role: kind === "err" ? "alert" : "status" },
+    h("span", { class: "toast-msg" }, msg),
+    h("button", { class: "toast-close", type: "button", "aria-label": "Cerrar aviso", onClick: close }, icon("x")));
+  let timer = null;
+  const arm = () => { clearTimeout(timer); timer = setTimeout(close, kind === "err" ? 9000 : 4500); };
+  // Pasar el ratón o tocarlo lo deja quieto mientras lo lees.
+  el.addEventListener("mouseenter", () => clearTimeout(timer));
+  el.addEventListener("mouseleave", arm);
+  let x0 = null;
+  let dx = 0;
+  el.addEventListener("touchstart", (e) => { x0 = e.touches[0].clientX; dx = 0; clearTimeout(timer); el.style.transition = "none"; }, { passive: true });
+  el.addEventListener("touchmove", (e) => {
+    if (x0 === null) return;
+    dx = e.touches[0].clientX - x0;
+    el.style.transform = `translateX(${dx}px)`;
+    el.style.opacity = String(Math.max(0.2, 1 - Math.abs(dx) / 220));
+  }, { passive: true });
+  el.addEventListener("touchend", () => {
+    el.style.transition = "";
+    if (Math.abs(dx) > 70) { el.style.transform = `translateX(${dx > 0 ? 120 : -120}%)`; el.style.opacity = "0"; setTimeout(() => el.remove(), 180); }
+    else { el.style.transform = ""; el.style.opacity = ""; arm(); }
+    x0 = null;
+  });
+  box.append(el);
+  while (box.children.length > 4) box.firstChild.remove();
+  arm();
 }
 
 function modal({ title, body, actions = [], wide = false, onClose }) {
@@ -262,7 +294,40 @@ function route() {
 }
 function hashParam(name) { return new URLSearchParams(location.hash.split("?")[1] || "").get(name); }
 function go(hash) { if (location.hash !== hash) location.hash = hash; else render(); }
+
+/* «Atrás»: se numera cada pantalla en history.state para saber si hay una anterior
+   dentro de la app (también con los botones atrás/adelante del navegador). */
+const navBase = (history.state && history.state.wgpNav) || 1;
+function markNav() {
+  if (!history.state || !history.state.wgpNav) {
+    const prev = Number(sessionStorage.getItem("wgpNavLast") || navBase - 1);
+    history.replaceState({ ...(history.state || {}), wgpNav: prev + 1 }, "");
+  }
+  sessionStorage.setItem("wgpNavLast", String(history.state.wgpNav));
+}
+try { markNav(); } catch { /* sin sessionStorage: «Atrás» usará la pantalla superior */ }
+function parentRoute() {
+  const [section, id, sub] = route();
+  if (!section || ["invite", "get", "signup"].includes(section)) return null;
+  if (section === "clients" && id && sub) return `#/clients/${id}`;
+  if (section === "clients" && id) return "#/clients";
+  if (section === "plan" && id && state.me && state.me.role === "admin") return `#/clients/${id}`;
+  return null;
+}
+function canGoBack() {
+  return Boolean(parentRoute()) || ((history.state && history.state.wgpNav) || navBase) > navBase;
+}
+function goBack() {
+  if (((history.state && history.state.wgpNav) || navBase) > navBase) history.back();
+  else if (parentRoute()) go(parentRoute());
+}
+function backButton(extra = "") {
+  return canGoBack() ? h("button", { class: `btn ghost back-btn ${extra}`, type: "button", title: "Volver", "aria-label": "Volver", onClick: goBack },
+    icon("back"), h("span", { text: "Atrás" })) : null;
+}
+
 window.addEventListener("hashchange", () => {
+  try { markNav(); } catch { /* ignorado */ }
   document.querySelectorAll(".overlay").forEach((o) => (o.closeModal ? o.closeModal() : o.remove()));
   render();
 });
@@ -362,18 +427,80 @@ function shell(active) {
       h("button", { class: "btn ghost icon", title: "Cerrar sesión", onClick: logout }, icon("logout"))),
   );
   const main = h("main", { class: "main" }, spinnerBlock());
-  const topbar = h("div", { class: "topbar" }, brand(),
-    h("button", { class: "btn ghost icon", "aria-label": "Menú", onClick: () => sidebar.classList.toggle("open") }, icon("menu")));
+  const backdrop = h("div", { class: "nav-backdrop", onClick: () => setMenu(false) });
+  const topbar = h("div", { class: "topbar" },
+    h("button", { class: "btn ghost icon", "aria-label": "Menú", onClick: () => setMenu(!sidebar.classList.contains("open")) }, icon("menu")),
+    brand(),
+    h("span", { class: "grow" }),
+    backButton());
+  sidebar.querySelectorAll(".nav a").forEach((a) => a.addEventListener("click", () => setMenu(false)));
   clear($app);
   $app.className = "";
-  $app.append(h("div", { class: "layout" }, sidebar, h("div", null, topbar, main)));
+  $app.append(h("div", { class: "layout" }, sidebar, backdrop, h("div", null, topbar, main)));
   return main;
 }
 
+/* Menú lateral en móvil: botón, toque fuera, o deslizar el dedo desde el borde izquierdo
+   (y hacia la izquierda para cerrarlo). */
+function setMenu(open) {
+  const sb = document.querySelector(".sidebar");
+  if (!sb) return;
+  sb.style.transform = "";
+  sb.classList.toggle("open", open);
+  document.body.classList.toggle("menu-open", open);
+}
+(function menuGestures() {
+  const EDGE = 28;
+  let start = null;
+  let dragging = false;
+  const width = () => (document.querySelector(".sidebar") || {}).offsetWidth || 260;
+  const mobile = () => window.matchMedia("(max-width: 760px)").matches;
+  document.addEventListener("touchstart", (e) => {
+    const sb = document.querySelector(".sidebar");
+    if (!sb || !mobile() || e.touches.length !== 1 || document.querySelector(".overlay")) return;
+    const t = e.touches[0];
+    const open = sb.classList.contains("open");
+    if ((!open && t.clientX <= EDGE) || (open && t.clientX <= width() + 40)) {
+      start = { x: t.clientX, y: t.clientY, open, time: Date.now() };
+      dragging = false;
+    }
+  }, { passive: true });
+  document.addEventListener("touchmove", (e) => {
+    if (!start) return;
+    const t = e.touches[0];
+    const dx = t.clientX - start.x;
+    const dy = t.clientY - start.y;
+    if (!dragging) {
+      if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 8) { start = null; return; } // desplazamiento vertical
+      if (Math.abs(dx) < 8) return;
+      dragging = true;
+      document.querySelector(".sidebar").style.transition = "none";
+    }
+    const w = width();
+    const offset = start.open ? Math.min(0, dx) : Math.min(0, -w + dx);
+    document.querySelector(".sidebar").style.transform = `translateX(${Math.max(-w, offset)}px)`;
+    document.body.classList.add("menu-dragging");
+  }, { passive: true });
+  document.addEventListener("touchend", (e) => {
+    if (!start) return;
+    const sb = document.querySelector(".sidebar");
+    document.body.classList.remove("menu-dragging");
+    if (dragging && sb) {
+      sb.style.transition = "";
+      const dx = e.changedTouches[0].clientX - start.x;
+      const fast = Math.abs(dx) / Math.max(1, Date.now() - start.time) > 0.4;
+      setMenu(start.open ? !(dx < -width() / 3 || (fast && dx < 0)) : (dx > width() / 3 || (fast && dx > 0)));
+    }
+    start = null;
+    dragging = false;
+  });
+})();
+
 function pageHead(title, sub, actions, crumbs) {
+  const back = backButton("hide-mobile");
   return h("div", { class: "page-head" },
     h("div", null,
-      crumbs ? h("div", { class: "crumbs" }, crumbs) : null,
+      back || crumbs ? h("div", { class: "crumbs" }, back, crumbs) : null,
       h("h1", { text: title }),
       sub ? h("div", { class: "sub" }, sub) : null),
     actions ? h("div", { class: "cell-flex" }, actions) : null);
