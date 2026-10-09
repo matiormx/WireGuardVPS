@@ -53,7 +53,7 @@ EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 TOKEN_RE = re.compile(r"^\d{5,15}:[A-Za-z0-9_-]{30,64}$")
 PUSH_HOSTS = (".googleapis.com", ".push.services.mozilla.com", ".push.apple.com", ".notify.windows.com")
 DEFAULT_PREFS = {
-    "admin": {"devices_all": True, "backup": True, "billing": True},
+    "admin": {"devices_all": True, "backup": True, "billing": True, "server": True},
     "tenant": {"devices": True},
     "member": {"devices": True},
 }
@@ -136,6 +136,7 @@ class PrefsIn(BaseModel):
     devices_all: bool | None = None
     backup: bool | None = None
     billing: bool | None = None
+    server: bool | None = None
 
 
 class EmailIn(BaseModel):
@@ -350,6 +351,12 @@ class Notifier:
         with self.db.conn() as c:
             to = {("admin", r["id"]) for r in c.execute("SELECT id FROM admins") if prefs(c, "admin", r["id"]).get("backup")}
         self.deliver(to, title, body, "/#/settings")
+
+    def notify_server(self, title: str, body: str) -> None:
+        """Estado del servidor (disco, memoria, CPU) a los administradores con «server» activado."""
+        with self.db.conn() as c:
+            to = {("admin", r["id"]) for r in c.execute("SELECT id FROM admins") if prefs(c, "admin", r["id"]).get("server")}
+        self.deliver(to, title, body, "/#/server")
 
     def on_backup_failed(self, error: str) -> None:
         with self.db.conn() as c:

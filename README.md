@@ -180,6 +180,12 @@ En ese dominio, el panel queda en `/app`: «Entrar» lleva al login y «Contrata
 
   Se recuperan clientes, dispositivos y sus claves, la clave del servidor, dominios, DNS, servicios y ajustes. Después apunta el DNS del endpoint (y de los dominios) al nuevo servidor: los dispositivos se reconectan solos.
 
+## Monitor del servidor
+
+En **Servidor** (menú del administrador) ves el uso del VPS en tiempo real: CPU, memoria, disco, red (interfaz pública), carga y tiempo encendido, con gráficos de la última hora, 24 h, 7 días y 30 días (media y máximo). El Panel muestra un resumen de CPU, memoria y disco. Se mide cada 10 segundos y el historial ocupa muy poco (un punto por minuto durante 48 h y uno por hora durante 400 días).
+
+Avisos a los administradores (Avisos › «Servidor»): disco al 90 % o más, memoria por encima del 90 % durante 10 minutos o CPU por encima del 90 % durante 15 minutos, y otro aviso cuando vuelve a la normalidad.
+
 ## Actualizaciones
 
 En **Ajustes › Actualizaciones** ves la versión instalada y la publicada, y puedes pulsar **Actualizar** para que el servidor ejecute `wg-manager update` por su cuenta (panel, firewall y script). El panel se reinicia unos segundos; los túneles VPN no se cortan. Al terminar se recarga solo y queda el registro de la actualización.

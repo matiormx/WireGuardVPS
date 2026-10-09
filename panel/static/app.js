@@ -412,6 +412,7 @@ async function render() {
     if (state.me.suspended || section === "plan") return await planView(main, state.me.role === "admin" ? Number(id) : state.me.id);
     if (section === "alerts") return await alertsView(main);
     if (section === "settings" && isAdmin) return await settingsView(main);
+    if (section === "server" && isAdmin) return await serverView(main);
     if (section === "billing" && isAdmin) return await billingAdminView(main);
     if (isAdmin) {
       if (section === "clients" && id && sub === "filters") return await filtersView(main, Number(id));
@@ -454,7 +455,7 @@ function shell(active) {
       ["alerts", "#/alerts", "bell", "Avisos"], ["account", "#/account", "key", "Cuenta"]]
     : isAdmin
     ? [["home", "#/", "dashboard", "Panel"], ["clients", "#/clients", "users", "Clientes"], ["activity", "#/activity", "activity", "Actividad"],
-      ["billing", "#/billing", "card", "Facturación"], ["alerts", "#/alerts", "bell", "Avisos"], ["settings", "#/settings", "globe", "Ajustes"],
+      ["server", "#/server", "server", "Servidor"], ["billing", "#/billing", "card", "Facturación"], ["alerts", "#/alerts", "bell", "Avisos"], ["settings", "#/settings", "globe", "Ajustes"],
       ["account", "#/account", "key", "Cuenta"]]
     : [["home", "#/", "network", "Mi red"], ["activity", "#/activity", "activity", "Actividad"], ["dns", "#/dns", "server", "DNS"], ["services", "#/services", "globe", "Servicios"],
       ["ports", "#/ports", "plug", "Puertos"], ["users", "#/users", "users", "Usuarios"], ["alerts", "#/alerts", "bell", "Avisos"],
@@ -1255,6 +1256,9 @@ async function dashboardView(main) {
         h("div", { class: "card" },
           h("div", { class: "card-head" }, h("h2", { text: "Servidor" }),
             h("span", { class: `badge ${o.server.interface_up ? "ok" : "off"}` }, h("span", { class: `dot ${o.server.interface_up ? "on" : "dis"}` }), o.server.interface_up ? "Activo" : "Inactivo")),
+          o.system && o.system.ready ? h("a", { class: "sys-mini", href: "#/server", title: "Ver el monitor del servidor" },
+            [["CPU", o.system.cpu], ["Memoria", o.system.memory.pct], ["Disco", o.system.disk.pct]].map(([label, pct]) =>
+              h("div", { class: "sys-row" }, h("span", { text: label }), meter(pct), h("b", { text: fmtPct(pct) })))) : null,
           h("dl", { class: "kv" },
             h("dt", { text: "Endpoint" }), h("dd", { class: "mono", text: o.server.endpoint }),
             h("dt", { text: "Interfaz" }), h("dd", { class: "mono", text: `${o.server.interface} · ${o.server.address}` }),
@@ -2269,9 +2273,9 @@ function barChart({ unit, buckets, series, fmt, axis = fmt, max: maxFn = niceMax
 const TRAFFIC_SERIES = [{ key: "tx", label: "Descarga", cls: "s1" }, { key: "rx", label: "Subida", cls: "s2" }];
 const DNS_SERIES = [{ key: "allowed", label: "Permitidas", cls: "s1" }, { key: "blocked", label: "Bloqueadas", cls: "s2" }];
 
-function rangePicker(value, onChange) {
+function rangePicker(value, onChange, labels = RANGE_LABEL) {
   const name = `range-${Math.random().toString(36).slice(2)}`;
-  return h("div", { class: "segmented compact" }, Object.entries(RANGE_LABEL).map(([k, label]) => h("label", null,
+  return h("div", { class: "segmented compact" }, Object.entries(labels).map(([k, label]) => h("label", null,
     h("input", { type: "radio", name, checked: k === value, onChange: () => onChange(k) }),
     h("span", { text: label }))));
 }
@@ -2291,6 +2295,162 @@ function rankList(items, total, onClick) {
   return h("div", { class: "rank-list" }, items.map((x) => h(onClick ? "button" : "div", { class: "rank", type: onClick ? "button" : null, onClick: onClick ? () => onClick(x) : null },
     h("div", { class: "rank-head" }, h("span", { class: "name", text: x.name }), h("span", { class: "mono", text: fmtBytes(x.rx + x.tx) })),
     h("div", { class: "rank-bar" }, h("span", { style: { width: `${total ? Math.max(2, (100 * (x.rx + x.tx)) / total) : 0}%` } })))));
+}
+
+/* ------------------------------------------------------------------ admin: servidor */
+const SERVER_RANGES = { "1h": "1 h", "24h": "24 h", "7d": "7 días", "30d": "30 días" };
+function fmtBits(bytesPerSec) {
+  const b = (bytesPerSec || 0) * 8;
+  const u = ["bit/s", "kbit/s", "Mbit/s", "Gbit/s"];
+  const i = b < 1 ? 0 : Math.min(Math.floor(Math.log(b) / Math.log(1000)), u.length - 1);
+  return `${(b / 1000 ** i).toFixed(i && b / 1000 ** i < 10 ? 1 : 0)} ${u[i]}`;
+}
+function fmtUptime(s) {
+  if (s == null) return "—";
+  const d = Math.floor(s / 86400), hh = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  return d ? `${d} d ${hh} h` : hh ? `${hh} h ${m} min` : `${m} min`;
+}
+function fmtPct(v) { return v == null ? "—" : `${Number(v).toFixed(v < 10 ? 1 : 0)} %`; }
+function level(pct) { return pct >= 90 ? "danger" : pct >= 75 ? "warn" : ""; }
+function meter(pct) {
+  return h("div", { class: `progress meter ${level(pct)}` }, h("span", { style: { width: `${Math.min(100, Math.max(0, pct || 0))}%` } }));
+}
+
+/* Líneas en SVG (series temporales con huecos). series: [{key, label, cls, dash}] */
+function lineChart({ points, series, fmt, axis = fmt, max = null, range, empty = "Aún no hay datos: el servidor se mide cada 10 segundos." }) {
+  const vals = points.flatMap((p) => series.map((s) => p[s.key])).filter((v) => v != null);
+  const top = max != null ? max : niceMax(Math.max(...vals, 0) * 1.05 || 1);
+  const n = points.length;
+  const W = 1000, H = 100;
+  const x = (i) => (n > 1 ? (i * W) / (n - 1) : W / 2);
+  const y = (v) => H - Math.min(H, (H * v) / top);
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("class", "line-svg");
+  series.forEach((s, si) => {
+    let line = "", area = "", run = [];
+    const close = () => {
+      if (!run.length) return;
+      const d = run.map(([i, v], j) => `${j ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(2)}`).join("");
+      line += d;
+      if (si === 0 && !s.dash) area += `${d}L${x(run[run.length - 1][0]).toFixed(1)},${H}L${x(run[0][0]).toFixed(1)},${H}Z`;
+      run = [];
+    };
+    points.forEach((p, i) => { if (p[s.key] == null) close(); else run.push([i, p[s.key]]); });
+    close();
+    if (area) {
+      const a = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      a.setAttribute("d", area); a.setAttribute("class", `area ${s.cls}`);
+      svg.append(a);
+    }
+    const l = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    l.setAttribute("d", line || "M0,0"); l.setAttribute("class", `line ${s.cls}${s.dash ? " dash" : ""}`);
+    l.setAttribute("vector-effect", "non-scaling-stroke");
+    svg.append(l);
+  });
+  const timeLabel = (t, full) => {
+    const d = new Date(t * 1000);
+    const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const day = `${d.getDate()} ${MONTHS[d.getMonth()]}`;
+    if (full) return range === "1h" || range === "24h" ? `${day}, ${hm}` : `${WEEKDAYS[d.getDay()]} ${day}, ${hm}`;
+    return range === "1h" || range === "24h" ? hm : day;
+  };
+  const plot = h("div", { class: "chart-plot line-plot" });
+  [1, 0.5, 0].forEach((f) => plot.append(h("div", { class: "chart-grid", style: { bottom: `${f * 100}%` } },
+    h("span", { text: f ? axis(top * f) : "0" }))));
+  const cursor = h("div", { class: "chart-cursor", hidden: true });
+  const tip = h("div", { class: "chart-tip", hidden: true });
+  plot.append(svg, cursor, tip);
+  const show = (clientX) => {
+    const box = plot.getBoundingClientRect();
+    const i = Math.max(0, Math.min(n - 1, Math.round(((clientX - box.left) / box.width) * (n - 1))));
+    const p = points[i];
+    const px = (box.width * x(i)) / W;
+    cursor.hidden = false;
+    cursor.style.left = `${px}px`;
+    fill(tip, h("b", { text: timeLabel(p.t, true) }),
+      ...series.map((s) => h("div", { class: "tip-row" }, h("i", { class: `sw ${s.cls}` }), h("span", { text: s.label }),
+        h("em", { text: p[s.key] == null ? "sin datos" : fmt(p[s.key]) }))));
+    tip.hidden = false;
+    tip.style.left = `${Math.min(Math.max(px, 80), box.width - 80)}px`;
+  };
+  const hide = () => { cursor.hidden = tip.hidden = true; };
+  plot.addEventListener("mousemove", (e) => show(e.clientX));
+  plot.addEventListener("mouseleave", hide);
+  plot.addEventListener("touchstart", (e) => show(e.touches[0].clientX), { passive: true });
+  plot.addEventListener("touchmove", (e) => show(e.touches[0].clientX), { passive: true });
+  plot.addEventListener("touchend", () => setTimeout(hide, 1500));
+  const xs = h("div", { class: "chart-x line-x" });
+  const ticks = 5;
+  for (let k = 0; k <= ticks; k++) {
+    const i = Math.round((k * (n - 1)) / ticks);
+    xs.append(h("span", { style: { left: `${(100 * x(i)) / W}%` }, text: n ? timeLabel(points[i].t) : "" }));
+  }
+  const legend = h("div", { class: "chart-legend" }, series.map((s) => h("span", null, h("i", { class: `sw ${s.cls}${s.dash ? " dash" : ""}` }), s.label)));
+  if (!vals.length) plot.append(h("div", { class: "chart-empty", text: empty }));
+  return h("div", { class: "chart" }, legend, plot, xs);
+}
+
+async function serverView(main) {
+  let range = "24h", live = null, hist = null, tick = 0;
+  const head = h("div");
+  const tiles = h("div", { class: "grid stats sys-tiles" });
+  const charts = h("div", { class: "grid sys-charts" });
+  const box = (title, sub, chart, wide = false) => h("div", { class: `card${wide ? " span-all" : ""}` },
+    h("div", { class: "card-head" }, h("div", null, h("h2", { text: title }), sub ? h("div", { class: "note", text: sub }) : null)), chart);
+
+  const drawLive = () => {
+    const l = live;
+    fill(head, pageHead("Servidor", [l.hostname, l.os].filter(Boolean).join(" · ") || "Uso de recursos del VPS",
+      rangePicker(range, (r) => { range = r; loadHist().catch((e) => toast(e.message, "err")); }, SERVER_RANGES)),
+      Object.keys(l.alerts || {}).length ? h("div", { class: "banner danger" }, icon("alert"),
+        `Uso alto: ${Object.keys(l.alerts).map((k) => ({ disk: "disco", mem: "memoria", cpu: "CPU" })[k]).join(", ")}. Los administradores han recibido un aviso.`) : null);
+    if (!l.ready) { fill(tiles, h("div", { class: "card stat wide" }, h("p", { class: "note", style: { margin: 0 }, text: "Midiendo el servidor… los datos aparecen en unos segundos." }))); return; }
+    const tile = (ic, label, value, hint, pct) => h("div", { class: "card stat" },
+      h("div", { class: "label" }, icon(ic), label), h("div", { class: "value", text: value }),
+      pct != null ? meter(pct) : null, hint ? h("div", { class: "hint", text: hint }) : null);
+    fill(tiles,
+      tile("activity", "CPU", fmtPct(l.cpu), `${l.cores} núcleo${l.cores > 1 ? "s" : ""}${l.model ? ` · ${l.model}` : ""}`, l.cpu),
+      tile("server", "Memoria", fmtPct(l.memory.pct), `${fmtBytes(l.memory.used)} de ${fmtBytes(l.memory.total)}${l.memory.swap_total ? ` · swap ${fmtPct(l.memory.swap_pct)}` : ""}`, l.memory.pct),
+      tile("download", "Disco", fmtPct(l.disk.pct), `${fmtBytes(l.disk.used)} de ${fmtBytes(l.disk.total)} · libres ${fmtBytes(l.disk.free)}`, l.disk.pct),
+      tile("arrows", "Red", `↓ ${fmtBits(l.net.rx)}`, `↑ ${fmtBits(l.net.tx)}${l.net.iface ? ` · ${l.net.iface}` : ""}`),
+      tile("dashboard", "Carga", l.load[0].toFixed(2), `5 min ${l.load[1].toFixed(2)} · 15 min ${l.load[2].toFixed(2)} · ${l.cores} núcleos`, (100 * l.load[0]) / l.cores),
+      tile("refresh", "Encendido", fmtUptime(l.uptime), `Kernel ${l.kernel}`));
+  };
+  const drawHist = () => {
+    const p = hist.points;
+    const long = range === "7d" || range === "30d";
+    const avg = long ? "Media por periodo; la línea discontinua es el máximo." : null;
+    const cores = live ? live.cores : 1;
+    fill(charts,
+      box("CPU", avg, lineChart({ points: p, range, max: 100, fmt: fmtPct, axis: (v) => `${Math.round(v)} %`,
+        series: [{ key: "cpu", label: "CPU", cls: "s1" }, ...(long ? [{ key: "cpu_max", label: "Máximo", cls: "s1", dash: true }] : [])] })),
+      box("Memoria", avg, lineChart({ points: p, range, max: 100, fmt: fmtPct, axis: (v) => `${Math.round(v)} %`,
+        series: [{ key: "mem", label: "RAM", cls: "s1" }, ...(long ? [{ key: "mem_max", label: "Máximo", cls: "s1", dash: true }] : []),
+          ...(live && live.memory && live.memory.swap_total ? [{ key: "swap", label: "Swap", cls: "s2" }] : [])] })),
+      box("Red", live && live.net && live.net.iface ? `Interfaz ${live.net.iface} (todo el tráfico del VPS)` : null,
+        lineChart({ points: p, range, fmt: fmtBits, axis: (v) => fmtBits(v).replace(".0 ", " "),
+          series: [{ key: "rx", label: "Entrada", cls: "s1" }, { key: "tx", label: "Salida", cls: "s2" }] })),
+      box("Carga", `Procesos esperando CPU; por encima de ${cores} (núcleos) el servidor va saturado.`,
+        lineChart({ points: p, range, fmt: (v) => v.toFixed(2), axis: (v) => (v < 10 ? v.toFixed(1) : String(Math.round(v))),
+          series: [{ key: "load1", label: "Carga (1 min)", cls: "s2" }] })),
+      box("Disco", null, lineChart({ points: p, range, max: 100, fmt: fmtPct, axis: (v) => `${Math.round(v)} %`,
+        series: [{ key: "disk", label: "Disco usado", cls: "s2" }] }), true));
+  };
+  const loadLive = async () => { live = await api("GET", "/api/admin/server/live"); drawLive(); };
+  const loadHist = async () => { hist = await api("GET", `/api/admin/server/history?range=${range}`); drawHist(); };
+
+  fill(main, head, tiles, charts);
+  fill(tiles, spinnerBlock());
+  await loadLive();
+  await loadHist();
+  every(async () => {
+    try {
+      await loadLive();
+      if (++tick % 6 === 0) await loadHist();   // los gráficos, cada minuto
+    } catch { /* reintenta en el siguiente ciclo */ }
+  });
 }
 
 /* ------------------------------------------------------------------ actividad */
@@ -2501,6 +2661,8 @@ async function alertsView(main) {
               h("span", { class: "track" }), h("span", { text: "Dispositivos vigilados de todos los clientes" })),
             h("label", { class: "switch" }, h("input", { type: "checkbox", checked: prefs.backup, onChange: (e) => savePrefs({ backup: e.target.checked }) }),
               h("span", { class: "track" }), h("span", { text: "Copias fallidas, salidas por país caídas y actualizaciones del servidor" })),
+            h("label", { class: "switch" }, h("input", { type: "checkbox", checked: prefs.server, onChange: (e) => savePrefs({ server: e.target.checked }) }),
+              h("span", { class: "track" }), h("span", { text: "Servidor: disco casi lleno, memoria o CPU altas" })),
             h("label", { class: "switch" }, h("input", { type: "checkbox", checked: prefs.billing, onChange: (e) => savePrefs({ billing: e.target.checked }) }),
               h("span", { class: "track" }), h("span", { text: "Pagos: nuevas suscripciones, cancelaciones y cobros fallidos" })),
           ] : h("label", { class: "switch" }, h("input", { type: "checkbox", checked: prefs.devices, onChange: (e) => savePrefs({ devices: e.target.checked }) }),

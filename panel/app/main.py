@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import bcrypt
 
-from . import alerts, backup, billing, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, updates, wg
+from . import alerts, backup, billing, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, sysmon, updates, wg
 from .config import Settings, load_settings
 from .db import (LABEL_RE, Database, get_setting, make_hostname, name_in_use, set_setting,
                  unique_hostname, username_taken)
@@ -303,6 +303,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     mon.exit_listeners.append(notifier.on_exit_change)
     backups.on_failure = notifier.on_backup_failed
     upd = updates.Updates(settings, database, notifier.notify_system)
+    sysm = sysmon.Sysmon(database, settings.wg_conf_dir, notifier.notify_server)
     doms.seed_from_env(settings.panel_domain)
 
     @asynccontextmanager
@@ -318,10 +319,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         mon.start()
         bill.start()
         upd.start()
+        sysm.start()
         await asyncio.to_thread(notifier.start_telegram)
         yield
         notifier.stop_telegram()
         await upd.stop()
+        await sysm.stop()
         await bill.stop()
         await mon.stop()
         await backups.stop()
@@ -336,6 +339,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.monitor = mon
     app.state.notifier = notifier
     app.state.updates = upd
+    app.state.sysmon = sysm
 
     # ------------------------------------------------------------------ middleware
     @app.middleware("http")
@@ -651,6 +655,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "address": str(settings.server_address), "public_key": get_setting(c, "server_public_key"),
                 "tenant_prefix": settings.tenant_prefix,
             },
+            "system": sysm.live(),
         }
 
     @app.get("/api/admin/tenants")
@@ -1513,6 +1518,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     site.register(app, deps)
     deps.updates = upd
     updates.register(app, deps)
+    deps.sysmon = sysm
+    deps.host_info = lambda: upd.installed() or {}
+    sysmon.register(app, deps)
 
     # ------------------------------------------------------------------ SPA
     @app.get("/healthz", include_in_schema=False)

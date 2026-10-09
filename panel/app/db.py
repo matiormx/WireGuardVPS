@@ -245,6 +245,14 @@ CREATE TABLE IF NOT EXISTS dns_top (
     count     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant_id, day, domain)
 );
+CREATE TABLE IF NOT EXISTS sys_minute (
+    ts    INTEGER PRIMARY KEY,
+    cpu   REAL, mem REAL, swap REAL, disk REAL, load1 REAL, rx REAL, tx REAL
+);
+CREATE TABLE IF NOT EXISTS sys_hourly (
+    hour  INTEGER PRIMARY KEY,
+    cpu   REAL, cpu_max REAL, mem REAL, mem_max REAL, swap REAL, disk REAL, load1 REAL, rx REAL, tx REAL
+);
 CREATE TABLE IF NOT EXISTS dns_records (
     id         INTEGER PRIMARY KEY,
     tenant_id  INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,

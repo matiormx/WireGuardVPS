@@ -639,3 +639,32 @@ button.rank:hover .name { color: var(--accent); }
 .plan-option input:checked + span { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .plan-option input:focus-visible + span { box-shadow: 0 0 0 3px var(--accent-soft); }
 .badge.tiny { font-size: 10.5px; padding: 1px 7px; margin-left: 6px; vertical-align: 1px; }
+
+/* ---------- monitor del servidor ---------- */
+.line-plot { cursor: crosshair; touch-action: pan-y; }
+.line-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.line-svg .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.line-svg .line.s1 { stroke: var(--series-1); }
+.line-svg .line.s2 { stroke: var(--series-2); }
+.line-svg .line.dash { stroke-width: 1.25; stroke-dasharray: 4 4; opacity: .7; }
+.line-svg .area.s1 { fill: var(--series-1); opacity: .14; }
+.line-svg .area.s2 { fill: var(--series-2); opacity: .14; }
+.sw.dash { background: none !important; border-top: 2px dashed var(--series-1); height: 0; align-self: center; }
+.chart-cursor { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--muted); opacity: .5; pointer-events: none; }
+.line-x { position: relative; height: 16px; display: block; }
+.line-x span { position: absolute; transform: translateX(-50%); flex: none; }
+.line-x span:first-child { transform: none; }
+.line-x span:last-child { transform: translateX(-100%); }
+.progress.meter { margin: 10px 0 8px; }
+.progress.meter.warn > span { background: var(--warning); }
+.progress.meter.danger > span { background: var(--danger); }
+.sys-mini { display: grid; gap: 8px; margin-bottom: 16px; padding: 12px 14px; border-radius: var(--radius-sm); background: var(--surface-2); color: inherit; text-decoration: none; }
+.sys-mini:hover { outline: 1px solid var(--accent); }
+.sys-row { display: grid; grid-template-columns: 70px 1fr 52px; align-items: center; gap: 10px; font-size: 13px; }
+.sys-row .progress.meter { margin: 0; }
+.sys-row b { text-align: right; font-variant-numeric: tabular-nums; }
+.sys-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.sys-charts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.sys-charts .span-all { grid-column: 1 / -1; }
+@media (max-width: 900px) { .sys-charts { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .sys-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

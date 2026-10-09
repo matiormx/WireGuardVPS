@@ -31,7 +31,7 @@ set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 # -----------------------------------------------------------------------------
 # VERSIÓN DEL SCRIPT (se compara con la publicada en GitHub). SemVer.
 # -----------------------------------------------------------------------------
-readonly VERSION="2.11.0"
+readonly VERSION="2.12.0"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
@@ -913,9 +913,12 @@ EOF
 write_version_info() {
     local commit=""
     [[ -d "${SRC_DIR}/.git" ]] && commit="$(git -C "${SRC_DIR}" rev-parse --short HEAD 2>/dev/null || true)"
+    local os_name hostname_
+    os_name="$(os_release_field PRETTY_NAME 2>/dev/null || true)"
+    hostname_="$(hostname -f 2>/dev/null || hostname)"
     install -d -m 0755 "${WGP_DIR}"
-    printf '{"version": "%s", "commit": "%s", "updated_at": %s, "updater": 1, "branch": "%s"}\n' \
-        "${VERSION}" "${commit}" "$(date +%s)" "${BRANCH}" >"${WGP_DIR}/version.json"
+    printf '{"version": "%s", "commit": "%s", "updated_at": %s, "updater": 1, "branch": "%s", "os": "%s", "hostname": "%s"}\n' \
+        "${VERSION}" "${commit}" "$(date +%s)" "${BRANCH}" "${os_name//\"/}" "${hostname_//\"/}" >"${WGP_DIR}/version.json"
     chmod 0644 "${WGP_DIR}/version.json"
 }
 
