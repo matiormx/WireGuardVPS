@@ -9,6 +9,7 @@ import logging
 import re
 import sqlite3
 import time
+import unicodedata
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -572,7 +573,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         t = tenant_or_404(c, d["tenant_id"])
         conf = wg.render_client_conf(settings, get_setting(c, "server_public_key") or "", t, d,
                                      search=dnsfilter.parse_suffixes(get_setting(c, "dns_suffixes")))
-        slug = re.sub(r"[^A-Za-z0-9_-]+", "-", d["name"]).strip("-")[:15] or f"wg{d['id']}"
+        plain = unicodedata.normalize("NFKD", d["name"]).encode("ascii", "ignore").decode()  # «Matías» -> «Matias»
+        slug = re.sub(r"[^A-Za-z0-9_-]+", "-", plain).strip("-")[:15] or f"wg{d['id']}"
         return conf, slug
 
     @app.get("/api/devices/{device_id}/config")

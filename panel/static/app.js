@@ -43,6 +43,7 @@ const ICONS = {
   heart: '<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8z"/>',
   dice: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.2"/><circle cx="16" cy="16" r="1.2"/><circle cx="12" cy="12" r="1.2"/>',
   check: '<path d="M20 6L9 17l-5-5"/>',
+  share: '<path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><path d="M16 6l-4-4-4 4"/><path d="M12 2v13"/>',
   fingerprint: '<path d="M2 12C2 6.5 6.5 2 12 2a10 10 0 0 1 8 4"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M9 6.8a6 6 0 0 1 9 5.2c0 .47 0 1.17-.02 2"/>',
 };
 
@@ -884,6 +885,29 @@ function editDeviceModal(d, onDone) {
   });
 }
 
+/* Guarda el .conf sin abandonar la app. En iOS (sobre todo instalada como PWA)
+   un enlace de descarga sustituye la app por una vista previa sin botón de
+   volver; por eso allí se usa la hoja de compartir del sistema, que ofrece
+   «WireGuard» directamente. En el resto, descarga generada en memoria. */
+async function saveConfig(d, conf) {
+  const name = `${d.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 15) || `wg${d.id}`}.conf`;
+  const file = new File([conf], name, { type: "text/plain" });
+  if ((isIOS() || isStandalone()) && navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: name }); // llamada directa desde el clic (gesto del usuario)
+      return;
+    } catch (ex) {
+      if (ex.name === "AbortError") return; // el usuario cerró la hoja de compartir
+    }
+  }
+  const url = URL.createObjectURL(file);
+  const a = h("a", { href: url, download: name, style: { display: "none" } });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
 async function deviceConfigModal(d, fresh = false) {
   let conf = "";
   try { conf = await api("GET", `/api/devices/${d.id}/config`); } catch (e) { return toast(e.message, "err"); }
@@ -902,9 +926,10 @@ async function deviceConfigModal(d, fresh = false) {
           h("ol", { class: "note", style: { margin: 0, paddingLeft: "18px" } },
             h("li", { text: "Instala la app oficial de WireGuard." }),
             h("li", { text: "Móvil: «Añadir túnel» → «Escanear QR»." }),
-            h("li", { text: "Ordenador: descarga el .conf e impórtalo." })),
+            h("li", { text: isIOS() ? "En este iPhone/iPad: «Abrir en WireGuard» y elige WireGuard." : "Ordenador: descarga el .conf e impórtalo." })),
           h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
-            h("a", { class: "btn primary", href: `/api/devices/${d.id}/config`, download: "" }, icon("download"), "Descargar .conf"),
+            h("button", { class: "btn primary", onClick: () => saveConfig(d, conf) },
+              icon(isIOS() ? "share" : "download"), isIOS() ? "Abrir en WireGuard" : "Descargar .conf"),
             h("button", { class: "btn", onClick: () => copyText(conf) }, icon("copy"), "Copiar"),
             h("button", { class: "btn ghost", onClick: () => { pre.hidden = !pre.hidden; } }, icon("eye"), "Ver")))),
       pre,
