@@ -60,7 +60,7 @@ class SessionManager:
             data = self._serializer.loads(token, max_age=self.max_age)
         except BadSignature:
             return None
-        if not isinstance(data, dict) or data.get("role") not in {"admin", "tenant"}:
+        if not isinstance(data, dict) or data.get("role") not in {"admin", "tenant", "member"}:
             return None
         return data
 

@@ -44,6 +44,10 @@ const ICONS = {
   dice: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.2"/><circle cx="16" cy="16" r="1.2"/><circle cx="12" cy="12" r="1.2"/>',
   check: '<path d="M20 6L9 17l-5-5"/>',
   router: '<rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 17h.01M10 17h.01M15 13V7M12 4.5a4.5 4.5 0 0 1 6 0M10 2.5a7.5 7.5 0 0 1 10 0"/>',
+  plug: '<path d="M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0z"/><path d="M12 18v4"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  send: '<path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/>',
+  mail: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 6L2 7"/>',
   share: '<path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><path d="M16 6l-4-4-4 4"/><path d="M12 2v13"/>',
   fingerprint: '<path d="M2 12C2 6.5 6.5 2 12 2a10 10 0 0 1 8 4"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M9 6.8a6 6 0 0 1 9 5.2c0 .47 0 1.17-.02 2"/>',
 };
@@ -182,6 +186,7 @@ function modal({ title, body, actions = [], wide = false, onClose }) {
   );
   const overlay = h("div", { class: "overlay", onMousedown: (e) => { if (e.target === overlay) close(); } }, box);
   document.addEventListener("keydown", onKey);
+  overlay.closeModal = close; // al cambiar de página se cierran los diálogos abiertos
   document.body.append(overlay);
   const first = box.querySelector("input, select, textarea");
   if (first) setTimeout(() => first.focus(), 30);
@@ -255,7 +260,10 @@ function route() {
   return parts;
 }
 function go(hash) { if (location.hash !== hash) location.hash = hash; else render(); }
-window.addEventListener("hashchange", () => render());
+window.addEventListener("hashchange", () => {
+  document.querySelectorAll(".overlay").forEach((o) => (o.closeModal ? o.closeModal() : o.remove()));
+  render();
+});
 
 function stopTimer() { if (state.timer) { clearInterval(state.timer); state.timer = null; } }
 function isEditing() {
@@ -269,6 +277,10 @@ function every(fn) {
 
 async function render() {
   stopTimer();
+  // Páginas públicas: invitación de un usuario y enlace de instalación de un dispositivo.
+  const [pub, token] = route();
+  if (pub === "invite" && token) return inviteView(token);
+  if (pub === "get" && token) return sharedConfigView(token);
   if (state.me) stopConditionalPasskey();
   if (!state.me) return loginView();
   if (state.me.must_change) return forcePasswordView();
@@ -281,18 +293,27 @@ async function render() {
   }
   try {
     if (section === "account") return accountView(main);
+    if (section === "alerts") return await alertsView(main);
     if (section === "settings" && isAdmin) return await settingsView(main);
     if (isAdmin) {
       if (section === "clients" && id && sub === "filters") return await filtersView(main, Number(id));
       if (section === "clients" && id && sub === "dns") return await zoneView(main, Number(id));
       if (section === "clients" && id && sub === "services") return await servicesView(main, Number(id));
+      if (section === "clients" && id && sub === "ports") return await portsView(main, Number(id));
+      if (section === "clients" && id && sub === "activity") return await activityView(main, Number(id));
+      if (section === "clients" && id && sub === "users") return await usersView(main, Number(id));
+      if (section === "activity") return await activityView(main, null);
       if (section === "clients" && id) return await clientDetailView(main, Number(id));
       if (section === "clients") return await clientsView(main);
       return await dashboardView(main);
     }
+    if (section === "activity") return await activityView(main, state.me.tenant_id);
+    if (state.me.role === "member") return await memberHomeView(main);
     if (section === "filters") return await filtersView(main, state.me.id);
     if (section === "dns") return await zoneView(main, state.me.id);
     if (section === "services") return await servicesView(main, state.me.id);
+    if (section === "ports") return await portsView(main, state.me.id);
+    if (section === "users") return await usersView(main, state.me.id);
     return await tenantHomeView(main);
   } catch (err) {
     if (err.status !== 401) {
@@ -308,9 +329,14 @@ function brand() {
 
 function shell(active) {
   const isAdmin = state.me.role === "admin";
-  const links = isAdmin
-    ? [["home", "#/", "dashboard", "Panel"], ["clients", "#/clients", "users", "Clientes"], ["settings", "#/settings", "globe", "Ajustes"], ["account", "#/account", "key", "Cuenta"]]
-    : [["home", "#/", "network", "Mi red"], ["dns", "#/dns", "server", "DNS"], ["services", "#/services", "globe", "Servicios"],
+  const links = state.me.role === "member"
+    ? [["home", "#/", "devices", "Mis dispositivos"], ["activity", "#/activity", "activity", "Actividad"],
+      ["alerts", "#/alerts", "bell", "Avisos"], ["account", "#/account", "key", "Cuenta"]]
+    : isAdmin
+    ? [["home", "#/", "dashboard", "Panel"], ["clients", "#/clients", "users", "Clientes"], ["activity", "#/activity", "activity", "Actividad"],
+      ["alerts", "#/alerts", "bell", "Avisos"], ["settings", "#/settings", "globe", "Ajustes"], ["account", "#/account", "key", "Cuenta"]]
+    : [["home", "#/", "network", "Mi red"], ["activity", "#/activity", "activity", "Actividad"], ["dns", "#/dns", "server", "DNS"], ["services", "#/services", "globe", "Servicios"],
+      ["ports", "#/ports", "plug", "Puertos"], ["users", "#/users", "users", "Usuarios"], ["alerts", "#/alerts", "bell", "Avisos"],
       ["filters", "#/filters", "shield", "Filtros"],
       ["account", "#/account", "key", "Cuenta"]];
   const sidebar = h("aside", { class: "sidebar" },
@@ -322,7 +348,8 @@ function shell(active) {
     h("div", { class: "spacer" }),
     h("div", { class: "userbox" },
       h("div", { class: "avatar", text: initials(state.me.name || state.me.username) }),
-      h("div", { class: "who" }, h("b", { text: state.me.name || state.me.username }), h("span", { text: isAdmin ? "Administrador" : "Cliente" })),
+      h("div", { class: "who" }, h("b", { text: state.me.name || state.me.username }),
+        h("span", { text: isAdmin ? "Administrador" : state.me.role === "member" ? state.me.tenant_name : "Cliente" })),
       h("button", { class: "btn ghost icon", title: "Cerrar sesión", onClick: logout }, icon("logout"))),
   );
   const main = h("main", { class: "main" }, spinnerBlock());
@@ -730,6 +757,7 @@ async function settingsView(main) {
             h("li", { text: "Escríbelo arriba y pulsa Guardar." }),
             h("li", { text: "Pulsa Comprobar. Cuando HTTPS esté activo, abre el panel con el dominio y activa «Forzar HTTPS»." })))),
       endpointCard(),
+      alertsConfigCard(),
       backupCard(),
       dnsSettingsCard(),
       h("div", { class: "card" },
@@ -890,9 +918,12 @@ async function clientDetailView(main, id) {
         t.must_change ? h("span", { class: "badge warn", text: "Pendiente de primer acceso" }) : null,
         filterBadges(t.filters)),
       [
+        h("a", { class: "btn", href: `#/clients/${t.id}/activity` }, icon("activity"), "Actividad"),
+        h("a", { class: "btn", href: `#/clients/${t.id}/users` }, icon("users"), "Usuarios"),
         h("a", { class: "btn", href: `#/clients/${t.id}/filters` }, icon("shield"), "Filtros"),
         h("a", { class: "btn", href: `#/clients/${t.id}/dns` }, icon("server"), "DNS"),
         h("a", { class: "btn", href: `#/clients/${t.id}/services` }, icon("globe"), "Servicios"),
+        h("a", { class: "btn", href: `#/clients/${t.id}/ports` }, icon("plug"), "Puertos"),
         h("button", { class: "btn", onClick: () => {
           const m = modal({ title: `Dominio de ${t.name}`, wide: true,
             body: domainEditor({
@@ -935,11 +966,14 @@ function editTenantModal(t, onDone) {
     fields: [
       h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "64", value: t.name }))),
       field("Máx. dispositivos", input({ name: "max_devices", type: "number", min: String(Math.max(1, t.device_count)), max: "253", value: String(t.max_devices), required: true })),
+      field("Máx. puertos abiertos", input({ name: "max_forwards", type: "number", min: "0", max: "100", value: String(t.max_forwards), required: true }),
+        "0 = no puede abrir puertos."),
       field("Red", input({ value: t.network, disabled: true })),
       h("div", { class: "full" }, field("Notas", h("textarea", { class: "input", name: "notes", maxlength: "500", value: t.notes }))),
     ],
     onSubmit: async (fd) => {
-      await api("PATCH", `/api/admin/tenants/${t.id}`, { name: fd.get("name"), max_devices: Number(fd.get("max_devices")), notes: fd.get("notes") || "" });
+      await api("PATCH", `/api/admin/tenants/${t.id}`, { name: fd.get("name"), max_devices: Number(fd.get("max_devices")),
+        max_forwards: Number(fd.get("max_forwards")), notes: fd.get("notes") || "" });
       toast("Cliente actualizado");
       onDone();
     },
@@ -961,19 +995,23 @@ function resetTenantPassword(t, onDone) {
 
 /* ------------------------------------------------------------------ dispositivos (común) */
 function devicesCard(devices, { tenantId, max, onChange }) {
-  const full = devices.length >= max;
+  const member = state.me.role === "member";
+  const full = !member && devices.length >= max;
+  const canAdd = !member || state.me.can_create;
   return h("div", { class: "card" },
     h("div", { class: "card-head" },
-      h("div", null, h("h2", { text: "Dispositivos" }), h("div", { class: "note", text: `${devices.length} de ${max} usados` })),
-      h("button", { class: "btn primary", disabled: full, title: full ? "Límite alcanzado" : null, onClick: () => newDeviceModal(tenantId, onChange) },
-        icon("plus"), "Añadir dispositivo")),
+      h("div", null, h("h2", { text: member ? "Mis dispositivos" : "Dispositivos" }),
+        h("div", { class: "note", text: member ? `${devices.length} a tu nombre` : `${devices.length} de ${max} usados` })),
+      canAdd ? h("button", { class: "btn primary", disabled: full, title: full ? "Límite alcanzado" : null, onClick: () => newDeviceModal(tenantId, onChange) },
+        icon("plus"), "Añadir dispositivo") : null),
     devices.length
       ? h("div", { class: "table-wrap" }, h("table", { class: "cards" },
         h("thead", null, h("tr", null, h("th", { text: "Dispositivo" }), h("th", { text: "IP" }), h("th", { class: "hide-sm", text: "Último contacto" }),
           h("th", { class: "hide-sm", text: "Tráfico" }), h("th", { class: "hide-sm", text: "Modo" }), h("th"))),
         h("tbody", null, devices.map((d) => deviceRow(d, onChange)))))
       : h("div", { class: "empty" }, icon("devices"), h("h2", { text: "Sin dispositivos" }),
-        h("p", { text: "Añade un portátil, móvil o servidor y escanea el QR con la app de WireGuard." })));
+        h("p", { text: canAdd ? "Añade un portátil, móvil o servidor y escanea el QR con la app de WireGuard."
+          : "Pide al responsable de tu empresa que te asigne un dispositivo." })));
 }
 
 function deviceRow(d, onChange) {
@@ -981,7 +1019,8 @@ function deviceRow(d, onChange) {
   return h("tr", null,
     h("td", { class: "primary" }, h("div", { class: "cell-flex" }, h("span", { class: `dot ${status[0]}`, title: status[1] }),
       h("div", null, h("div", { class: "name", text: d.name }),
-        h("div", { class: "meta", text: [d.endpoint ? `${status[1]} · ${d.endpoint}` : status[1], d.dns_filter ? null : "sin filtros"].filter(Boolean).join(" · ") })))),
+        h("div", { class: "meta", text: [d.endpoint ? `${status[1]} · ${d.endpoint}` : status[1], d.member_name,
+          d.monitor ? "vigilado" : null, d.dns_filter ? null : "sin filtros"].filter(Boolean).join(" · ") })))),
     h("td", { class: "mono", "data-label": "IP", text: d.ip }),
     h("td", { class: "hide-sm", "data-label": "Último contacto", text: ago(d.last_handshake) }),
     h("td", { class: "hide-sm", "data-label": "Tráfico", text: `↓ ${fmtBytes(d.tx)} · ↑ ${fmtBytes(d.rx)}` }),
@@ -989,7 +1028,9 @@ function deviceRow(d, onChange) {
       ? h("span", { class: "badge accent", title: d.lan_networks.join(", ") }, icon("router"), `Router · ${d.lan_networks.join(", ")}`)
       : h("span", { class: `badge ${d.full_tunnel ? "accent" : ""}` }, icon(d.full_tunnel ? "globe" : "network"), d.full_tunnel ? "Todo el tráfico" : "Solo red privada")),
     h("td", { class: "actions aside" },
+      h("button", { class: "btn ghost icon", title: "Actividad", onClick: () => deviceActivityModal(d) }, icon("activity")),
       h("button", { class: "btn ghost icon", title: "Configuración y QR", onClick: () => deviceConfigModal(d) }, icon("qr")),
+      d.kind === "router" ? null : h("button", { class: "btn ghost icon", title: "Enlace de instalación", onClick: () => installLinkModal(d) }, icon("share")),
       h("button", { class: "btn ghost icon", title: "Editar", onClick: () => editDeviceModal(d, onChange) }, icon("edit")),
       h("button", { class: "btn ghost icon", title: d.enabled ? "Deshabilitar" : "Habilitar", onClick: async () => {
         try { await api("PATCH", `/api/devices/${d.id}`, { enabled: !d.enabled }); toast(d.enabled ? "Dispositivo deshabilitado" : "Dispositivo habilitado"); onChange(); } catch (e) { toast(e.message, "err"); }
@@ -1014,7 +1055,9 @@ function lanField(value) {
 }
 function splitList(text) { return String(text || "").split(/[\s,;]+/).filter(Boolean); }
 
-function newDeviceModal(tenantId, onDone) {
+async function newDeviceModal(tenantId, onDone) {
+  const member = state.me.role === "member";
+  const members = await memberOptions(tenantId);
   const tunnel = tunnelField(true);
   const lan = lanField("");
   lan.hidden = true;
@@ -1032,17 +1075,20 @@ function newDeviceModal(tenantId, onDone) {
     title: "Añadir dispositivo",
     submitLabel: "Crear",
     fields: [
-      kindSel,
-      h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "48", placeholder: "Portátil de Ana, iPhone, MikroTik oficina…" }))),
+      member ? null : kindSel,
+      h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "48", placeholder: member ? "Mi portátil, mi iPhone…" : "Portátil de Ana, iPhone, MikroTik oficina…" }))),
       tunnel,
       lan,
+      memberField(members, null),
     ],
     onSubmit: async (fd) => {
       const router = fd.get("kind") === "router";
+      const memberId = fd.get("member_id") ? Number(fd.get("member_id")) : 0;
       const body = router
         ? { name: fd.get("name"), kind: "router", lan_networks: splitList(fd.get("lan_networks")), full_tunnel: false }
         : { name: fd.get("name"), full_tunnel: fd.get("full_tunnel") === "on" };
       if (state.me.role === "admin") body.tenant_id = tenantId;
+      if (memberId) body.member_id = memberId;
       const d = await api("POST", "/api/devices", body);
       onDone();
       deviceConfigModal(d, true);
@@ -1050,26 +1096,52 @@ function newDeviceModal(tenantId, onDone) {
   });
 }
 
-function editDeviceModal(d, onDone) {
+async function memberOptions(tenantId) {
+  if (state.me.role === "member") return null;
+  try {
+    const qs = state.me.role === "admin" ? `?tenant_id=${tenantId}` : "";
+    return (await api("GET", `/api/members${qs}`)).members;
+  } catch { return null; }
+}
+function memberField(members, current) {
+  if (!members || !members.length) return null;
+  return h("div", { class: "full" }, field("Usuario",
+    h("select", { class: "input", name: "member_id" },
+      h("option", { value: "0", text: "Sin asignar (sólo el responsable)", selected: !current }),
+      members.map((m) => h("option", { value: String(m.id), text: m.name, selected: m.id === current }))),
+    "El usuario asignado lo ve en su cuenta y puede descargar su configuración."));
+}
+function monitorField(checked) {
+  return h("div", { class: "full field" },
+    switchEl("monitor", checked, "Avisar si se desconecta"),
+    h("div", { class: "help", text: "Envía un aviso (Telegram, email o notificación) si deja de conectar unos minutos, y otro cuando vuelve." }));
+}
+
+async function editDeviceModal(d, onDone) {
+  const isMember = state.me.role === "member";
+  const members = await memberOptions(d.tenant_id);
   formModal({
     title: "Editar dispositivo",
     fields: [
       h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "48", value: d.name }))),
-      h("div", { class: "full" }, field("Nombre de red (DNS)",
+      isMember ? null : h("div", { class: "full" }, field("Nombre de red (DNS)",
         input({ name: "hostname", required: true, maxlength: "63", value: d.hostname || "", pattern: "[a-zA-Z0-9]([a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?",
           autocapitalize: "off", spellcheck: false, class: "input mono" }),
         "Los demás dispositivos del cliente lo encuentran por este nombre (p. ej. portatil-ana o portatil-ana.vpn).")),
       d.kind === "router" ? lanField(d.lan_networks.join(", ")) : tunnelField(d.full_tunnel),
-      h("div", { class: "full field" },
+      memberField(members, d.member_id),
+      monitorField(d.monitor),
+      isMember ? null : h("div", { class: "full field" },
         switchEl("dns_filter", d.dns_filter, "Aplicar los filtros de navegación"),
         h("div", { class: "help", text: "Desactívalo para que este dispositivo (p. ej. el de un adulto) navegue sin los filtros del cliente." })),
       h("p", { class: "note full", style: { margin: 0 }, text: "Si cambias el modo de túnel, vuelve a importar la configuración en el dispositivo." }),
     ],
     onSubmit: async (fd) => {
-      await api("PATCH", `/api/devices/${d.id}`, {
-        name: fd.get("name"), dns_filter: fd.get("dns_filter") === "on", hostname: fd.get("hostname"),
-        ...(d.kind === "router" ? { lan_networks: splitList(fd.get("lan_networks")) } : { full_tunnel: fd.get("full_tunnel") === "on" }),
-      });
+      const body = { name: fd.get("name"), monitor: fd.get("monitor") === "on",
+        ...(d.kind === "router" ? { lan_networks: splitList(fd.get("lan_networks")) } : { full_tunnel: fd.get("full_tunnel") === "on" }) };
+      if (!isMember) Object.assign(body, { dns_filter: fd.get("dns_filter") === "on", hostname: fd.get("hostname") });
+      if (fd.get("member_id") !== null) body.member_id = Number(fd.get("member_id"));
+      await api("PATCH", `/api/devices/${d.id}`, body);
       toast("Dispositivo actualizado");
       onDone();
     },
@@ -1504,6 +1576,728 @@ async function servicesView(main, tenantId) {
   const addBtn = data.enabled ? h("button", { class: "btn primary", onClick: () => serviceModal(ctx(), null, (svc) => { reload().then(() => check(svc)); }) }, icon("plus"), "Publicar servicio") : null;
   fill(main, pageHead("Servicios publicados", `Equipos de la red de ${tenant.name} accesibles con HTTPS desde Internet`, addBtn, crumbs), body);
   draw();
+}
+
+/* ------------------------------------------------------------------ reenvío de puertos */
+const PROTO_LABEL = { tcp: "TCP", udp: "UDP", both: "TCP + UDP" };
+
+function portModal(ctx, fw, onDone) {
+  const isNew = !fw;
+  const listId = "port-targets";
+  const pub = input({ name: "public_port", required: true, type: "number", min: String(ctx.minPort), max: "65535",
+    value: fw ? fw.public_port : (ctx.suggested || ""), disabled: !isNew, inputmode: "numeric" });
+  const fields = [
+    h("div", { class: "full" }, field("Protocolo",
+      h("div", { class: "segmented" }, ["tcp", "udp", "both"].map((k) => h("label", null,
+        h("input", { type: "radio", name: "proto", value: k, disabled: !isNew, checked: (fw ? fw.proto : "tcp") === k }),
+        h("span", { text: PROTO_LABEL[k] })))))),
+    field("Puerto público", pub, isNew ? `El que se abre en el servidor (${ctx.minPort}–65535).` : "No se puede cambiar: crea otro si lo necesitas."),
+    field("Descripción", input({ name: "description", maxlength: "60", value: fw ? fw.description : "", placeholder: "Escritorio remoto, cámara…" })),
+    field("IP del equipo", input({ name: "target_ip", required: true, maxlength: "15", value: fw ? fw.target_ip : "", list: listId,
+      placeholder: ctx.networks[0].replace(/0\/\d+$/, "50"), class: "input mono", inputmode: "decimal" }), `De tu red (${ctx.networks.join(", ")}).`),
+    field("Puerto del equipo", input({ name: "target_port", required: true, type: "number", min: "1", max: "65535", value: fw ? fw.target_port : "", placeholder: "3389", inputmode: "numeric" })),
+    h("datalist", { id: listId }, ctx.devices.filter((d) => d.kind !== "router").map((d) => h("option", { value: d.ip, text: d.name }))),
+  ];
+  formModal({
+    title: isNew ? "Abrir puerto" : `Puerto ${fw.public_port}`,
+    submitLabel: isNew ? "Abrir puerto" : "Guardar",
+    fields,
+    onSubmit: async (fd) => {
+      const body = { target_ip: fd.get("target_ip").trim(), target_port: Number(fd.get("target_port")), description: fd.get("description") || "" };
+      if (isNew) {
+        Object.assign(body, { proto: fd.get("proto"), public_port: Number(fd.get("public_port")) });
+        if (ctx.isAdmin) body.tenant_id = ctx.tenantId;
+        await api("POST", "/api/forwards", body);
+        toast("Puerto abierto");
+      } else {
+        await api("PATCH", `/api/forwards/${fw.id}`, body);
+        toast("Puerto actualizado");
+      }
+      onDone();
+    },
+  });
+}
+
+async function portsView(main, tenantId) {
+  const isAdmin = state.me.role === "admin";
+  const qs = isAdmin ? `?tenant_id=${tenantId}` : "";
+  const [tenant, devices] = await Promise.all([
+    isAdmin ? api("GET", `/api/admin/tenants/${tenantId}`) : Promise.resolve({ name: state.me.name }),
+    api("GET", `/api/devices${qs}`)]);
+  let data = await api("GET", `/api/forwards${qs}`);
+  const status = {};
+  const body = h("div");
+  const ctx = () => ({ isAdmin, tenantId, devices, networks: data.networks, minPort: data.min_port, suggested: data.suggested_port });
+  const reload = async () => { data = await api("GET", `/api/forwards${qs}`); draw(); };
+  const run = async (fn, msg) => { try { await fn(); toast(msg); await reload(); } catch (e) { toast(e.message, "err"); } };
+  const check = async (fw) => {
+    status[fw.id] = "loading";
+    draw();
+    try { status[fw.id] = (await api("GET", `/api/forwards/${fw.id}/status`)).target; } catch (e) { delete status[fw.id]; toast(e.message, "err"); }
+    draw();
+  };
+  const add = () => portModal(ctx(), null, reload);
+  let addBtn = null;
+
+  const row = (fw) => {
+    const st = status[fw.id];
+    return h("div", { class: "card service" },
+      h("div", { class: "card-head" },
+        h("div", { class: "grow" },
+          h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+            h("span", { class: "mono svc-name", text: `${data.public_host}:${fw.public_port}` }),
+            h("span", { class: "badge accent", text: PROTO_LABEL[fw.proto] }),
+            h("span", { class: `badge ${fw.enabled ? "ok" : "off"}`, text: fw.enabled ? "Abierto" : "Cerrado" }),
+            fw.description ? h("span", { class: "note", text: fw.description }) : null),
+          h("div", { class: "meta mono", text: `→ ${fw.target_ip}:${fw.target_port}${fw.target_name ? `  (${fw.target_name})` : ""}` })),
+        h("div", { class: "cell-flex" },
+          fw.proto !== "udp" ? h("button", { class: "btn sm", disabled: st === "loading", onClick: () => check(fw) }, icon("refresh"), st === "loading" ? "Comprobando…" : "Comprobar") : null,
+          h("button", { class: "btn ghost icon", title: "Editar", onClick: () => portModal(ctx(), fw, () => { delete status[fw.id]; reload(); }) }, icon("edit")),
+          h("button", { class: "btn ghost icon", title: fw.enabled ? "Cerrar" : "Abrir", onClick: () =>
+            run(() => api("PATCH", `/api/forwards/${fw.id}`, { enabled: !fw.enabled }), fw.enabled ? "Puerto cerrado" : "Puerto abierto") }, icon("power")),
+          h("button", { class: "btn ghost icon", title: "Eliminar", onClick: async () => {
+            if (await confirmDialog({ title: "Eliminar puerto", message: `El puerto ${fw.public_port} dejará de llegar a ${fw.target_ip}.`, confirmLabel: "Eliminar" })) {
+              run(() => api("DELETE", `/api/forwards/${fw.id}`), "Puerto eliminado");
+            }
+          } }, icon("trash")))),
+      st && st !== "loading" ? h("div", { class: "domain-status" },
+        checkLine(st.ok, "El equipo responde en ese puerto", `Sin respuesta del equipo: ${st.error}`)) : null);
+  };
+
+  const draw = () => {
+    if (addBtn) addBtn.disabled = data.forwards.length >= data.max;
+    fill(body,
+      data.max === 0 ? h("div", { class: "banner" }, icon("alert"), "Tu plan no incluye puertos abiertos. Pídeselo a tu proveedor.") : null,
+      data.forwards.length ? data.forwards.map(row) : h("div", { class: "card empty" }, icon("plug"),
+        h("h2", { text: "Ningún puerto abierto" }),
+        h("p", { text: "Da acceso desde Internet a un equipo de tu red por un puerto: escritorio remoto, cámaras (RTSP), un servidor de juegos, SSH…" }),
+        data.max > 0 ? h("button", { class: "btn primary", onClick: add }, icon("plus"), "Abrir puerto") : null),
+      h("div", { class: "card" }, h("h3", { text: "Cómo funciona" }),
+        h("ol", { class: "steps" },
+          h("li", null, "Desde Internet se conecta a ", h("code", { text: `${data.public_host}:<puerto público>` }), "."),
+          h("li", { text: "El servidor lo lleva por el túnel al equipo y puerto que indiques. El equipo debe estar conectado a la VPN (o en la LAN de tu router)." }),
+          h("li", { text: "El equipo verá la conexión como si viniera del servidor de la VPN: si filtra por IP, permite la red de la VPN." })),
+        h("p", { class: "note", style: { margin: "10px 0 0" } }, icon("shield"),
+          ` Cualquiera en Internet puede intentar conectar a un puerto abierto: ábrelo sólo para servicios con su propia contraseña y ciérralo cuando no lo uses. Usados: ${data.forwards.length} de ${data.max}. `,
+          "Para webs (HTTP) usa mejor Servicios: tienen HTTPS y nombre propio.")),
+    );
+    body.querySelectorAll(".note > svg").forEach((svg) => Object.assign(svg.style, { width: "14px", height: "14px", verticalAlign: "-2px" }));
+  };
+
+  const crumbs = isAdmin ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / Puertos"] : null;
+  addBtn = data.max > 0 ? h("button", { class: "btn primary", onClick: add }, icon("plus"), "Abrir puerto") : null;
+  fill(main, pageHead("Puertos abiertos", `Accesos TCP/UDP desde Internet a equipos de la red de ${tenant.name}`, addBtn, crumbs), body);
+  draw();
+}
+
+/* ------------------------------------------------------------------ gráficos */
+const RANGE_LABEL = { "24h": "24 h", "7d": "7 días", "30d": "30 días", "12m": "12 meses" };
+const MONTHS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+const WEEKDAYS = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"];
+
+function bucketLabel(unit, key, long = false) {
+  if (unit === "hour") {
+    const d = new Date(key * 3600 * 1000);
+    const hh = `${String(d.getHours()).padStart(2, "0")}:00`;
+    return long ? `${d.getDate()} ${MONTHS[d.getMonth()]}, ${hh}` : hh;
+  }
+  if (unit === "day") {
+    const [y, m, dd] = key.split("-").map(Number);
+    const d = new Date(y, m - 1, dd);
+    return long ? `${WEEKDAYS[d.getDay()]} ${dd} ${MONTHS[m - 1]} ${y}` : `${dd} ${MONTHS[m - 1]}`;
+  }
+  const [y, m] = key.split("-").map(Number);
+  return long ? `${MONTHS[m - 1]} ${y}` : MONTHS[m - 1];
+}
+
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const p = 10 ** Math.floor(Math.log10(v));
+  return [1, 2, 2.5, 5, 10].map((x) => x * p).find((x) => x >= v);
+}
+function niceBytes(v) { // tope del eje en múltiplos «redondos» de KB/MB/GB
+  if (v <= 0) return 1024;
+  const i = Math.max(0, Math.floor(Math.log(v) / Math.log(1024)));
+  const n = niceMax(v / 1024 ** i);
+  return n >= 1000 ? 1024 ** (i + 1) : n * 1024 ** i;
+}
+function axisBytes(n) { return fmtBytes(n).replace(/\.0 /, " "); }
+function fmtNum(n) { return Number(n || 0).toLocaleString("es-ES"); }
+
+/* Barras apiladas en HTML (nítidas a cualquier ancho). series: [{key, label, cls}] de abajo arriba. */
+function barChart({ unit, buckets, series, fmt, axis = fmt, max: maxFn = niceMax, empty = "Sin datos en este periodo" }) {
+  const totals = buckets.map((b) => series.reduce((a, s) => a + (b[s.key] || 0), 0));
+  const top = maxFn(Math.max(...totals, 0));
+  const tip = h("div", { class: "chart-tip", hidden: true });
+  const plot = h("div", { class: "chart-plot" });
+  [1, 0.5, 0].forEach((f) => plot.append(h("div", { class: "chart-grid", style: { bottom: `${f * 100}%` } },
+    h("span", { text: f ? axis(top * f) : "0" }))));
+  const step = buckets.length > 24 ? 5 : buckets.length > 12 ? 3 : buckets.length > 8 ? 2 : 1;
+  const cols = h("div", { class: "chart-cols" });
+  const xs = h("div", { class: "chart-x" });
+  let pinned = null;
+  const show = (i, col) => {
+    const b = buckets[i];
+    fill(tip, h("b", { text: bucketLabel(unit, b.key, true) }),
+      ...series.slice().reverse().map((s) => h("div", { class: "tip-row" }, h("i", { class: `sw ${s.cls}` }), h("span", { text: s.label }), h("em", { text: fmt(b[s.key] || 0) }))),
+      series.length > 1 ? h("div", { class: "tip-row total" }, h("span", { text: "Total" }), h("em", { text: fmt(totals[i]) })) : null);
+    tip.hidden = false;
+    const box = plot.getBoundingClientRect();
+    const r = col.getBoundingClientRect();
+    const x = r.left - box.left + r.width / 2;
+    tip.style.left = `${Math.min(Math.max(x, 70), box.width - 70)}px`;
+    cols.querySelectorAll(".chart-col.hover").forEach((el) => el.classList.remove("hover"));
+    col.classList.add("hover");
+  };
+  const hide = () => { if (pinned === null) { tip.hidden = true; cols.querySelectorAll(".chart-col.hover").forEach((el) => el.classList.remove("hover")); } };
+  buckets.forEach((b, i) => {
+    const col = h("div", { class: "chart-col", tabindex: "0", "aria-label": `${bucketLabel(unit, b.key, true)}: ${fmt(totals[i])}`,
+      onMouseenter: (e) => show(i, e.currentTarget), onMouseleave: hide, onFocus: (e) => show(i, e.currentTarget), onBlur: () => { pinned = null; hide(); },
+      onClick: (e) => { pinned = pinned === i ? null : i; if (pinned === null) { tip.hidden = true; } else show(i, e.currentTarget); } });
+    const stack = h("div", { class: "chart-stack", style: { height: `${(100 * totals[i]) / top}%` } });
+    const nonzero = series.filter((s) => b[s.key] > 0);
+    nonzero.forEach((s, j) => stack.append(h("div", { class: `chart-seg ${s.cls}${j === nonzero.length - 1 ? " end" : ""}`,
+      style: { flexGrow: String(b[s.key]) } })));
+    col.append(stack);
+    cols.append(col);
+    xs.append(h("span", { text: i % step === 0 || i === buckets.length - 1 && step === 1 ? bucketLabel(unit, b.key) : "" }));
+  });
+  plot.append(cols, tip);
+  const table = h("table", { class: "chart-table", hidden: true },
+    h("thead", null, h("tr", null, h("th", { text: "Periodo" }), ...series.map((s) => h("th", { text: s.label })))),
+    h("tbody", null, buckets.map((b) => h("tr", null, h("td", { text: bucketLabel(unit, b.key, true) }), ...series.map((s) => h("td", { text: fmt(b[s.key] || 0) }))))));
+  const tableBtn = h("button", { class: "btn ghost sm", type: "button", onClick: () => {
+    table.hidden = !table.hidden;
+    tableBtn.textContent = table.hidden ? "Ver tabla" : "Ver gráfico";
+    plot.hidden = xs.hidden = !table.hidden;
+  } }, "Ver tabla");
+  const legend = h("div", { class: "chart-legend" },
+    series.length > 1 ? series.map((s) => h("span", null, h("i", { class: `sw ${s.cls}` }), s.label)) : null,
+    h("span", { class: "grow" }), tableBtn);
+  const wrap = h("div", { class: "chart" }, legend, plot, xs, h("div", { class: "table-wrap" }, table));
+  if (!totals.some(Boolean)) plot.append(h("div", { class: "chart-empty", text: empty }));
+  return wrap;
+}
+
+const TRAFFIC_SERIES = [{ key: "tx", label: "Descarga", cls: "s1" }, { key: "rx", label: "Subida", cls: "s2" }];
+const DNS_SERIES = [{ key: "allowed", label: "Permitidas", cls: "s1" }, { key: "blocked", label: "Bloqueadas", cls: "s2" }];
+
+function rangePicker(value, onChange) {
+  const name = `range-${Math.random().toString(36).slice(2)}`;
+  return h("div", { class: "segmented compact" }, Object.entries(RANGE_LABEL).map(([k, label]) => h("label", null,
+    h("input", { type: "radio", name, checked: k === value, onChange: () => onChange(k) }),
+    h("span", { text: label }))));
+}
+
+function eventList(events, { showTenant = false, showDevice = true } = {}) {
+  if (!events.length) return h("p", { class: "note", style: { margin: 0 }, text: "Todavía no hay conexiones registradas." });
+  return h("div", { class: "event-list" }, events.map((e) => h("div", { class: `event ${e.kind}` },
+    h("span", { class: `dot ${e.kind === "online" ? "on" : ""}` }),
+    h("div", { class: "grow" },
+      h("div", { class: "name" }, showDevice ? h("b", { text: e.device }) : null, showDevice ? " " : "",
+        e.kind === "online" ? "se conectó" : "se desconectó", showTenant ? h("span", { class: "note", text: ` · ${e.tenant}` }) : null),
+      h("div", { class: "meta", text: [new Date(e.ts * 1000).toLocaleString(), e.kind === "online" && e.endpoint ? `desde ${e.endpoint}` : null].filter(Boolean).join(" · ") })))));
+}
+
+function rankList(items, total, onClick) {
+  if (!items.length) return h("p", { class: "note", style: { margin: 0 }, text: "Sin tráfico en este periodo." });
+  return h("div", { class: "rank-list" }, items.map((x) => h(onClick ? "button" : "div", { class: "rank", type: onClick ? "button" : null, onClick: onClick ? () => onClick(x) : null },
+    h("div", { class: "rank-head" }, h("span", { class: "name", text: x.name }), h("span", { class: "mono", text: fmtBytes(x.rx + x.tx) })),
+    h("div", { class: "rank-bar" }, h("span", { style: { width: `${total ? Math.max(2, (100 * (x.rx + x.tx)) / total) : 0}%` } })))));
+}
+
+/* ------------------------------------------------------------------ actividad */
+async function activityView(main, tenantId) {
+  const isAdmin = state.me.role === "admin";
+  const isMember = state.me.role === "member";
+  const platform = isAdmin && !tenantId;
+  const qs = isAdmin && tenantId ? `&tenant_id=${tenantId}` : "";
+  const tenant = isAdmin && tenantId ? await api("GET", `/api/admin/tenants/${tenantId}`) : null;
+  let range = "24h";
+  const trafficBox = h("div", { class: "card" }, spinnerBlock());
+  const dnsBox = h("div", { class: "card" }, spinnerBlock());
+  const eventsBox = h("div", { class: "card" }, spinnerBlock());
+
+  const loadTraffic = async () => {
+    const t = await api("GET", `/api/history/traffic?range=${range}${qs}`);
+    const total = t.total.rx + t.total.tx;
+    fill(trafficBox,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Tráfico" }),
+        h("div", { class: "big-num" }, fmtBytes(total), h("span", { class: "note", text: ` en ${RANGE_LABEL[range]} · ↓ ${fmtBytes(t.total.tx)} · ↑ ${fmtBytes(t.total.rx)}` })))),
+      barChart({ unit: t.unit, buckets: t.buckets, series: TRAFFIC_SERIES, fmt: fmtBytes, axis: axisBytes, max: niceBytes }),
+      h("div", { class: "grid two", style: { marginTop: "18px" } },
+        platform ? h("div", null, h("h3", { text: "Clientes con más tráfico" }),
+          rankList(t.tenants, total, (x) => go(`#/clients/${x.id}/activity`))) : null,
+        h("div", null, h("h3", { text: "Dispositivos con más tráfico" }),
+          rankList(t.devices.map((x) => ({ ...x, name: platform ? `${x.name} · ${x.tenant}` : x.name })), total))));
+  };
+  const loadDns = async () => {
+    if (isMember) return;
+    const d = await api("GET", `/api/history/dns?range=${range}${qs}`);
+    if (!d.enabled) { dnsBox.hidden = true; return; }
+    const buckets = d.buckets.map((b) => ({ ...b, allowed: b.queries - b.blocked }));
+    const pct = d.total.queries ? ((100 * d.total.blocked) / d.total.queries).toFixed(1) : "0";
+    fill(dnsBox,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Filtro DNS" }),
+        h("div", { class: "big-num" }, fmtNum(d.total.blocked), h("span", { class: "note", text: ` bloqueadas de ${fmtNum(d.total.queries)} consultas (${pct} %)` })))),
+      barChart({ unit: d.unit, buckets, series: DNS_SERIES, fmt: fmtNum, empty: "Sin consultas en este periodo" }),
+      h("h3", { style: { marginTop: "18px" }, text: "Dominios más bloqueados" }),
+      d.top.length ? h("div", { class: "blocked-list" }, d.top.map((x) => h("div", { class: "blocked-row" },
+        h("div", { class: "grow mono name", text: x.domain }), h("span", { class: "badge", text: fmtNum(x.count) }))))
+        : h("p", { class: "note", style: { margin: 0 }, text: "Nada bloqueado en este periodo." }));
+  };
+  let events = [];
+  const loadEvents = async (more = false) => {
+    const before = more && events.length ? `&before=${events[events.length - 1].ts}` : "";
+    const r = await api("GET", `/api/history/events?limit=30${qs}${before}`);
+    events = more ? events.concat(r.events) : r.events;
+    fill(eventsBox,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Conexiones" }),
+        h("div", { class: "note", text: "Cuándo se conecta y desconecta cada dispositivo, y desde qué IP pública." }))),
+      eventList(events, { showTenant: platform }),
+      r.more ? h("button", { class: "btn sm", style: { marginTop: "12px" }, onClick: () => loadEvents(true).catch((e) => toast(e.message, "err")) }, "Cargar más") : null);
+  };
+  const loadAll = () => Promise.all([loadTraffic(), loadDns(), loadEvents()]).catch((e) => toast(e.message, "err"));
+
+  const crumbs = tenant ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / Actividad"] : null;
+  const sub = platform ? "Tráfico, filtro DNS y conexiones de toda la plataforma"
+    : isMember ? "Tráfico y conexiones de tus dispositivos" : `Tráfico, filtro DNS y conexiones de ${tenant ? tenant.name : "tu red"}`;
+  fill(main, pageHead("Actividad", sub, rangePicker(range, (r) => { range = r; loadTraffic().catch((e) => toast(e.message, "err")); loadDns().catch(() => {}); }), crumbs),
+    trafficBox, isMember ? null : dnsBox, eventsBox);
+  if (isMember) dnsBox.hidden = true;
+  await loadAll();
+}
+
+async function deviceActivityModal(d) {
+  let range = "24h";
+  const chartBox = h("div", null, spinnerBlock());
+  const load = async () => {
+    const t = await api("GET", `/api/history/traffic?range=${range}&device_id=${d.id}`);
+    fill(chartBox,
+      h("div", { class: "big-num", style: { marginBottom: "10px" } }, fmtBytes(t.total.rx + t.total.tx),
+        h("span", { class: "note", text: ` en ${RANGE_LABEL[range]} · ↓ ${fmtBytes(t.total.tx)} · ↑ ${fmtBytes(t.total.rx)}` })),
+      barChart({ unit: t.unit, buckets: t.buckets, series: TRAFFIC_SERIES, fmt: fmtBytes, axis: axisBytes, max: niceBytes }));
+  };
+  const evBox = h("div", null, spinnerBlock());
+  const m = modal({
+    title: `Actividad de ${d.name}`,
+    wide: true,
+    body: [rangePicker(range, (r) => { range = r; load().catch((e) => toast(e.message, "err")); }), chartBox,
+      h("h3", { style: { margin: "6px 0 0" }, text: "Conexiones" }), evBox],
+    actions: [h("button", { class: "btn", onClick: () => m.close() }, "Cerrar")],
+  });
+  try {
+    await load();
+    const r = await api("GET", `/api/history/events?limit=15&device_id=${d.id}`);
+    fill(evBox, eventList(r.events, { showDevice: false }));
+  } catch (e) { toast(e.message, "err"); }
+}
+
+/* ------------------------------------------------------------------ avisos */
+const CHANNEL_ICON = { telegram: "send", email: "mail", push: "bell" };
+const CHANNEL_NAME = { telegram: "Telegram", email: "Email", push: "Notificaciones" };
+
+function pushSupport() {
+  if (!window.isSecureContext || !("serviceWorker" in navigator)) return "Las notificaciones necesitan HTTPS: abre el panel con su dominio.";
+  if (!("PushManager" in window) || !("Notification" in window)) {
+    return isIOS() ? "En iPhone/iPad, instala primero la app (Compartir › Añadir a pantalla de inicio) y actívalas desde ella."
+      : "Este navegador no admite notificaciones.";
+  }
+  return null;
+}
+
+async function enablePush(key) {
+  const problem = pushSupport();
+  if (problem) throw new Error(problem);
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") throw new Error("Permiso denegado. Actívalo en los ajustes del navegador para este sitio.");
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (sub && sub.options && sub.options.applicationServerKey) {
+    const cur = btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    if (cur !== key) { await sub.unsubscribe(); sub = null; }
+  }
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToBuf(key) });
+  const j = sub.toJSON();
+  return api("POST", "/api/alerts/push", { endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth, label: deviceLabel() });
+}
+
+async function alertsView(main) {
+  const role = state.me.role;
+  let st = await api("GET", "/api/alerts");
+  const body = h("div");
+  let watching = null;
+  const savePrefs = async (patch) => {
+    try { st = await api("PUT", "/api/alerts/prefs", patch); toast("Preferencias guardadas"); draw(); } catch (e) { toast(e.message, "err"); }
+  };
+  const loadDevices = async () => {
+    if (role === "admin") return;
+    try { watching = await api("GET", "/api/devices"); } catch { watching = []; }
+    draw();
+  };
+
+  const connectTelegram = async () => {
+    let link;
+    try { link = await api("POST", "/api/alerts/telegram/link"); } catch (e) { return toast(e.message, "err"); }
+    const before = st.channels.filter((c) => c.kind === "telegram").length;
+    let timer = null;
+    const m = modal({
+      title: "Conectar Telegram",
+      body: [
+        h("ol", { class: "steps" },
+          h("li", null, "Pulsa «Abrir Telegram» y, en el chat con ", h("b", { text: `@${st.available.telegram_bot}` }), ", toca ", h("b", { text: "Iniciar" }), "."),
+          h("li", { text: "Vuelve aquí: en cuanto lo hagas, aparecerá conectado." })),
+        h("a", { class: "btn primary", href: link.url, target: "_blank", rel: "noopener" }, icon("send"), "Abrir Telegram"),
+        h("p", { class: "note", style: { margin: 0 }, text: "El enlace caduca en 15 minutos." }),
+      ],
+      actions: [h("button", { class: "btn", onClick: () => m.close() }, "Cerrar")],
+      onClose: () => clearInterval(timer),
+    });
+    timer = setInterval(async () => {
+      try {
+        const now = await api("GET", "/api/alerts");
+        if (now.channels.filter((c) => c.kind === "telegram").length > before) {
+          st = now; clearInterval(timer); m.close(); toast("Telegram conectado"); draw();
+        }
+      } catch { /* sigue intentando */ }
+    }, 3000);
+    setTimeout(() => clearInterval(timer), LINK_POLL_MS);
+  };
+  const addEmail = () => formModal({
+    title: "Avisos por email",
+    submitLabel: "Añadir",
+    fields: [h("div", { class: "full" }, field("Email", input({ name: "email", type: "email", required: true, maxlength: "254", autocomplete: "email", placeholder: "tu@empresa.com" })))],
+    onSubmit: async (fd) => { st = await api("POST", "/api/alerts/email", { email: fd.get("email").trim() }); toast("Email añadido"); draw(); },
+  });
+
+  const channelRow = (c) => h("div", { class: "blocked-row" },
+    h("span", { class: "channel-icon" }, icon(CHANNEL_ICON[c.kind])),
+    h("div", { class: "grow" }, h("div", { class: "name", text: `${CHANNEL_NAME[c.kind]} · ${c.label}` }),
+      h("div", { class: `meta${c.last_error ? " err" : ""}`, text: c.last_error ? `Último envío fallido: ${c.last_error}`
+        : c.last_ok ? `Último aviso: ${new Date(c.last_ok * 1000).toLocaleString()}` : `Añadido el ${fmtDate(c.created_at)}` })),
+    h("button", { class: "btn sm", onClick: async (e) => {
+      const b = e.currentTarget; b.disabled = true;
+      try { await api("POST", `/api/alerts/channels/${c.id}/test`); toast("Aviso de prueba enviado"); } catch (err) { toast(err.message, "err"); }
+      st = await api("GET", "/api/alerts"); draw();
+    } }, "Probar"),
+    h("button", { class: "btn ghost icon", title: "Quitar", onClick: async () => {
+      try { st = await api("DELETE", `/api/alerts/channels/${c.id}`); toast("Canal eliminado"); draw(); } catch (e) { toast(e.message, "err"); }
+    } }, icon("trash")));
+
+  const draw = () => {
+    const a = st.available;
+    const pushProblem = pushSupport();
+    const prefs = st.prefs;
+    fill(body,
+      h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dónde recibir los avisos" }),
+          h("div", { class: "note", text: "Puedes usar varios a la vez. Cada persona configura los suyos." }))),
+        st.channels.length ? h("div", { class: "blocked-list" }, st.channels.map(channelRow))
+          : h("p", { class: "note", style: { marginTop: 0 }, text: "Todavía no has añadido ningún canal." }),
+        h("div", { class: "cell-flex", style: { flexWrap: "wrap", marginTop: "14px" } },
+          h("button", { class: "btn", disabled: Boolean(pushProblem), title: pushProblem, onClick: async (e) => {
+            const b = e.currentTarget; b.disabled = true;
+            try { st = await enablePush(a.push_key); toast("Notificaciones activadas en este dispositivo"); } catch (err) { toast(err.message, "err"); }
+            draw();
+          } }, icon("bell"), "Notificaciones en este dispositivo"),
+          a.telegram ? h("button", { class: "btn", onClick: connectTelegram }, icon("send"), "Conectar Telegram") : null,
+          a.email ? h("button", { class: "btn", onClick: addEmail }, icon("mail"), "Añadir email") : null),
+        pushProblem ? h("p", { class: "help", text: pushProblem }) : null,
+        !a.telegram && !a.email && role !== "admin" ? h("p", { class: "help", text: "Telegram y email aparecerán aquí cuando tu proveedor los active." }) : null,
+        !a.telegram && !a.email && role === "admin" ? h("p", { class: "help" }, "Para Telegram y email, configúralos en ", h("a", { href: "#/settings", text: "Ajustes › Avisos" }), ".") : null),
+      h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Qué avisar" }),
+          h("div", { class: "note", text: `Un dispositivo vigilado se considera caído tras ${st.delay_min} min sin conectar; también avisa cuando vuelve.` }))),
+        h("div", { class: "grid", style: { gap: "14px" } },
+          role === "admin" ? [
+            h("label", { class: "switch" }, h("input", { type: "checkbox", checked: prefs.devices_all, onChange: (e) => savePrefs({ devices_all: e.target.checked }) }),
+              h("span", { class: "track" }), h("span", { text: "Dispositivos vigilados de todos los clientes" })),
+            h("label", { class: "switch" }, h("input", { type: "checkbox", checked: prefs.backup, onChange: (e) => savePrefs({ backup: e.target.checked }) }),
+              h("span", { class: "track" }), h("span", { text: "Copias de seguridad fallidas" })),
+          ] : h("label", { class: "switch" }, h("input", { type: "checkbox", checked: prefs.devices, onChange: (e) => savePrefs({ devices: e.target.checked }) }),
+            h("span", { class: "track" }), h("span", { text: role === "member" ? "Mis dispositivos vigilados" : "Dispositivos vigilados de mi red" })))),
+      role === "admin" ? null : h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dispositivos vigilados" }),
+          h("div", { class: "note", text: "Los routers se vigilan por defecto. Para un dispositivo que se desconecta a menudo (un móvil), mejor no." }))),
+        watching === null ? spinnerBlock() : watching.length ? h("div", { class: "blocked-list" }, watching.map((d) => h("div", { class: "blocked-row" },
+          h("span", { class: `dot ${d.online ? "on" : ""}` }),
+          h("div", { class: "grow" }, h("div", { class: "name", text: d.name }), h("div", { class: "meta", text: d.online ? "En línea" : "Desconectado" })),
+          h("label", { class: "switch", title: "Avisar si se desconecta" }, h("input", { type: "checkbox", checked: d.monitor, onChange: async (e) => {
+            try { await api("PATCH", `/api/devices/${d.id}`, { monitor: e.target.checked }); d.monitor = e.target.checked; toast(d.monitor ? `Vigilando ${d.name}` : `${d.name} ya no se vigila`); }
+            catch (err) { e.target.checked = !e.target.checked; toast(err.message, "err"); }
+          } }), h("span", { class: "track" })))))
+          : h("p", { class: "note", style: { margin: 0 }, text: "Aún no hay dispositivos." })),
+    );
+  };
+  fill(main, pageHead("Avisos", "Entérate al momento si un router o dispositivo importante se desconecta"), body);
+  draw();
+  loadDevices();
+}
+const LINK_POLL_MS = 15 * 60 * 1000;
+
+function alertsConfigCard() {
+  const card = h("div", { class: "card" }, spinnerBlock());
+  let cfg = null;
+  const save = async (patch, msg) => {
+    try { cfg = await api("PUT", "/api/admin/alerts-config", patch); toast(msg); draw(); } catch (e) { toast(e.message, "err"); }
+  };
+  const smtpModal = () => {
+    const s = cfg.smtp;
+    formModal({
+      title: "Servidor de correo (SMTP)",
+      fields: [
+        h("p", { class: "note full", style: { margin: 0 }, text: "El de tu proveedor de correo (Gmail con contraseña de aplicación, Brevo, Mailgun, tu hosting…)." }),
+        field("Servidor", input({ name: "smtp_host", required: true, value: s.host, placeholder: "smtp.tudominio.com", class: "input mono", autocapitalize: "off" })),
+        field("Puerto", input({ name: "smtp_port", type: "number", required: true, value: String(s.port), min: "1", max: "65535" })),
+        h("div", { class: "full" }, field("Seguridad", h("div", { class: "segmented" }, [["starttls", "STARTTLS (587)"], ["ssl", "SSL/TLS (465)"], ["none", "Ninguna"]].map(([k, l]) =>
+          h("label", null, h("input", { type: "radio", name: "smtp_security", value: k, checked: s.security === k }), h("span", { text: l })))))),
+        field("Usuario", input({ name: "smtp_user", value: s.user, autocomplete: "off", autocapitalize: "off" })),
+        field("Contraseña", input({ name: "smtp_password", type: "password", autocomplete: "new-password", placeholder: s.password_set ? "(guardada)" : "" }),
+          s.password_set ? "Déjala vacía para conservarla." : null),
+        h("div", { class: "full" }, field("Remitente", input({ name: "smtp_from", required: true, value: s.from, placeholder: "Avisos VPN <avisos@tudominio.com>" }))),
+      ],
+      onSubmit: async (fd) => {
+        cfg = await api("PUT", "/api/admin/alerts-config", { smtp_host: fd.get("smtp_host"), smtp_port: Number(fd.get("smtp_port")),
+          smtp_security: fd.get("smtp_security"), smtp_user: fd.get("smtp_user"), smtp_password: fd.get("smtp_password") || null, smtp_from: fd.get("smtp_from") });
+        toast("Correo configurado. Prueba enviando un aviso desde Avisos.");
+        draw();
+      },
+    });
+  };
+  const telegramModal = () => formModal({
+    title: "Bot de Telegram",
+    fields: [
+      h("ol", { class: "steps full" },
+        h("li", null, "En Telegram, abre ", h("a", { href: "https://t.me/BotFather", target: "_blank", rel: "noopener", text: "@BotFather" }), " y envía ", h("code", { text: "/newbot" }), "."),
+        h("li", { text: "Elige un nombre (p. ej. «Avisos de Mi VPN») y un usuario acabado en bot." }),
+        h("li", { text: "Copia el token que te da y pégalo aquí." })),
+      h("div", { class: "full" }, field("Token", input({ name: "token", required: true, class: "input mono", placeholder: "123456789:AA…", autocomplete: "off", autocapitalize: "off", spellcheck: "false" }))),
+    ],
+    onSubmit: async (fd) => { cfg = await api("PUT", "/api/admin/alerts-config", { telegram_token: fd.get("token").trim() }); toast("Bot de Telegram conectado"); draw(); },
+  });
+  const draw = () => {
+    const delays = [2, 5, 10, 15, 30, 60].map((n) => h("option", { value: String(n), selected: n === cfg.delay_min, text: `${n} min` }));
+    fill(card,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Avisos" }),
+        h("div", { class: "note", text: "Canales que podrán usar tú y tus clientes para recibir avisos. Las notificaciones push funcionan siempre (con HTTPS)." }))),
+      h("div", { class: "grid", style: { gap: "14px" } },
+        h("div", { class: "blocked-row" }, h("span", { class: "channel-icon" }, icon("send")),
+          h("div", { class: "grow" }, h("div", { class: "name", text: "Telegram" }),
+            h("div", { class: "meta", text: cfg.telegram.configured ? `Bot @${cfg.telegram.bot}` : "Sin configurar" })),
+          h("button", { class: "btn sm", onClick: telegramModal }, cfg.telegram.configured ? "Cambiar" : "Configurar"),
+          cfg.telegram.configured ? h("button", { class: "btn ghost icon", title: "Quitar", onClick: () => save({ telegram_token: "" }, "Telegram desactivado") }, icon("trash")) : null),
+        h("div", { class: "blocked-row" }, h("span", { class: "channel-icon" }, icon("mail")),
+          h("div", { class: "grow" }, h("div", { class: "name", text: "Email" }),
+            h("div", { class: "meta", text: cfg.smtp.host ? `${cfg.smtp.host}:${cfg.smtp.port} · ${cfg.smtp.from}` : "Sin configurar" })),
+          h("button", { class: "btn sm", onClick: smtpModal }, cfg.smtp.host ? "Cambiar" : "Configurar")),
+        h("label", { class: "inline-field" }, "Considerar caído un dispositivo tras",
+          h("select", { class: "input", onChange: (e) => save({ delay_min: Number(e.target.value) }, "Guardado") }, delays), "sin conectar")));
+  };
+  api("GET", "/api/admin/alerts-config").then((d) => { cfg = d; draw(); }).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
+  return card;
+}
+
+/* ------------------------------------------------------------------ usuarios de un cliente */
+async function memberHomeView(main) {
+  const load = async () => {
+    const devices = await api("GET", "/api/devices");
+    fill(main,
+      pageHead(`Hola, ${state.me.name}`, `Tus dispositivos en la red privada de ${state.me.tenant_name}`),
+      devicesCard(devices, { tenantId: state.me.tenant_id, max: state.me.max_devices, onChange: load }));
+  };
+  await load();
+  every(load);
+}
+
+function shareOrCopy(url, title) {
+  if (navigator.share && (isIOS() || isStandalone() || /Android/.test(navigator.userAgent))) {
+    navigator.share({ title, url }).catch(() => {});
+  } else copyText(url, "Enlace copiado");
+}
+
+function linkBox(url, title, note) {
+  return h("div", { class: "grid", style: { gap: "10px" } },
+    h("div", { class: "input-group" }, input({ value: url, readonly: true, class: "input mono", onFocus: (e) => e.target.select() }),
+      h("button", { class: "btn icon", type: "button", title: "Copiar", onClick: () => copyText(url, "Enlace copiado") }, icon("copy"))),
+    h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+      h("button", { class: "btn primary", type: "button", onClick: () => shareOrCopy(url, title) }, icon("share"), "Compartir"),
+      h("a", { class: "btn", href: `https://wa.me/?text=${encodeURIComponent(`${title}: ${url}`)}`, target: "_blank", rel: "noopener" }, "WhatsApp"),
+      h("a", { class: "btn", href: `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(url)}` }, icon("mail"), "Email")),
+    note ? h("p", { class: "note", style: { margin: 0 }, text: note }) : null);
+}
+
+async function installLinkModal(d) {
+  const box = h("div", null, spinnerBlock());
+  const draw = (st, url) => {
+    const hours = [[1, "1 hora"], [24, "24 horas"], [168, "7 días"]];
+    let chosen = 24;
+    fill(box,
+      h("p", { class: "note", style: { marginTop: 0 }, text: `Una página con el QR y el archivo de ${d.name}, para quien lo vaya a instalar. No necesita cuenta. Cualquiera con el enlace puede usar esta configuración: compártelo sólo con esa persona.` }),
+      url ? linkBox(url, `Configuración VPN de ${d.name}`, `Caduca el ${new Date(st.expires_at * 1000).toLocaleString()}.`) : null,
+      !url && st.active ? h("div", { class: "domain-status" },
+        checkLine(true, `Hay un enlace activo hasta el ${new Date(st.expires_at * 1000).toLocaleString()} · abierto ${st.views} ${st.views === 1 ? "vez" : "veces"}`, ""),
+        h("p", { class: "note", style: { margin: 0 }, text: "Por seguridad no se puede volver a mostrar: crea uno nuevo (el anterior dejará de funcionar) o anúlalo." })) : null,
+      h("div", { class: "cell-flex", style: { flexWrap: "wrap", marginTop: "12px" } },
+        h("div", { class: "segmented compact" }, hours.map(([n, label]) => h("label", null,
+          h("input", { type: "radio", name: "link-hours", checked: n === chosen, onChange: () => { chosen = n; } }), h("span", { text: label })))),
+        h("button", { class: "btn", onClick: async () => {
+          try { const r = await api("POST", `/api/devices/${d.id}/link`, { hours: chosen }); draw(r, r.url); } catch (e) { toast(e.message, "err"); }
+        } }, icon("plus"), url || st.active ? "Crear otro" : "Crear enlace"),
+        st.active ? h("button", { class: "btn ghost", onClick: async () => {
+          try { draw(await api("DELETE", `/api/devices/${d.id}/link`), null); toast("Enlace anulado"); } catch (e) { toast(e.message, "err"); }
+        } }, icon("trash"), "Anular") : null));
+  };
+  const m = modal({ title: `Enlace de instalación · ${d.name}`, wide: true, body: box,
+    actions: [h("button", { class: "btn", onClick: () => m.close() }, "Cerrar")] });
+  try { draw(await api("GET", `/api/devices/${d.id}/link`), null); } catch (e) { toast(e.message, "err"); m.close(); }
+}
+
+async function usersView(main, tenantId) {
+  const isAdmin = state.me.role === "admin";
+  const qs = isAdmin ? `?tenant_id=${tenantId}` : "";
+  const tenant = isAdmin ? await api("GET", `/api/admin/tenants/${tenantId}`) : { name: state.me.name };
+  let data = await api("GET", `/api/members${qs}`);
+  const body = h("div");
+  const reload = async () => { data = await api("GET", `/api/members${qs}`); draw(); };
+  const run = async (fn, msg) => { try { await fn(); toast(msg); await reload(); } catch (e) { toast(e.message, "err"); } };
+  const withTenant = (b) => (isAdmin ? { ...b, tenant_id: tenantId } : b);
+  const canCreateField = (checked) => h("div", { class: "full field" }, switchEl("can_create", checked, "Puede añadir sus propios dispositivos"),
+    h("div", { class: "help", text: "Si no, sólo verá los que le asignes tú." }));
+
+  const invite = () => formModal({
+    title: "Invitar a un usuario",
+    submitLabel: "Crear invitación",
+    fields: [h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "64", placeholder: "Ana López" }))), canCreateField(true)],
+    onSubmit: async (fd) => {
+      const r = await api("POST", "/api/members/invite", withTenant({ name: fd.get("name"), can_create: fd.get("can_create") === "on" }));
+      reload();
+      setTimeout(() => {
+        const m = modal({ title: "Invitación creada", wide: true,
+          body: linkBox(r.url, `Invitación a la VPN de ${tenant.name}`, `Enlace de un solo uso, válido 7 días. Con él, ${fd.get("name")} elige su usuario y contraseña.`),
+          actions: [h("button", { class: "btn", onClick: () => m.close() }, "Hecho")] });
+      }, 50);
+    },
+  });
+  const create = () => formModal({
+    title: "Crear usuario",
+    submitLabel: "Crear",
+    fields: [
+      h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "64" }))),
+      h("div", { class: "full" }, field("Usuario", input({ name: "username", required: true, pattern: "[A-Za-z0-9][A-Za-z0-9._\\-]{2,31}", autocapitalize: "off", spellcheck: "false" }))),
+      passwordField("password", "Contraseña temporal", "Se le pedirá cambiarla al entrar."),
+      canCreateField(true),
+    ],
+    onSubmit: async (fd) => {
+      await api("POST", "/api/members", withTenant({ name: fd.get("name"), username: fd.get("username"), password: fd.get("password"),
+        can_create: fd.get("can_create") === "on" }));
+      reload();
+      setTimeout(() => credentialsModal(fd.get("name"), fd.get("username"), fd.get("password"), tenant.name), 50);
+    },
+  });
+  const edit = (m) => formModal({
+    title: `Editar ${m.name}`,
+    fields: [h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "64", value: m.name }))), canCreateField(m.can_create)],
+    onSubmit: async (fd) => { await api("PATCH", `/api/members/${m.id}`, { name: fd.get("name"), can_create: fd.get("can_create") === "on" }); toast("Usuario actualizado"); reload(); },
+  });
+  const resetPassword = (m) => formModal({
+    title: `Nueva contraseña para ${m.name}`,
+    fields: [passwordField("password", "Contraseña temporal", "Se le pedirá cambiarla al entrar. Se cerrarán sus sesiones abiertas.")],
+    onSubmit: async (fd) => {
+      await api("PATCH", `/api/members/${m.id}`, { password: fd.get("password") });
+      reload();
+      setTimeout(() => credentialsModal(m.name, m.username, fd.get("password"), tenant.name), 50);
+    },
+  });
+
+  const draw = () => {
+    fill(body,
+      h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Usuarios" }),
+          h("div", { class: "note", text: "Cada usuario entra con su propia cuenta y sólo ve sus dispositivos, su actividad y sus avisos." }))),
+        data.members.length ? h("div", { class: "table-wrap" }, h("table", { class: "cards" },
+          h("thead", null, h("tr", null, h("th", { text: "Usuario" }), h("th", { text: "Dispositivos" }), h("th", { class: "hide-sm", text: "Último acceso" }), h("th"))),
+          h("tbody", null, data.members.map((m) => h("tr", null,
+            h("td", { class: "primary" }, h("div", { class: "cell-flex" }, h("span", { class: `dot ${m.enabled ? "on" : "dis"}` }),
+              h("div", null, h("div", { class: "name", text: m.name }),
+                h("div", { class: "meta", text: [m.username, m.enabled ? null : "desactivado", m.must_change ? "pendiente de primer acceso" : null,
+                  m.can_create ? null : "sin altas propias"].filter(Boolean).join(" · ") })))),
+            h("td", { "data-label": "Dispositivos", text: String(m.devices) }),
+            h("td", { class: "hide-sm", "data-label": "Último acceso", text: m.last_login ? ago(m.last_login) : "nunca" }),
+            h("td", { class: "actions aside" },
+              h("button", { class: "btn ghost icon", title: "Editar", onClick: () => edit(m) }, icon("edit")),
+              h("button", { class: "btn ghost icon", title: "Nueva contraseña", onClick: () => resetPassword(m) }, icon("key")),
+              h("button", { class: "btn ghost icon", title: m.enabled ? "Desactivar" : "Activar", onClick: () =>
+                run(() => api("PATCH", `/api/members/${m.id}`, { enabled: !m.enabled }), m.enabled ? "Usuario desactivado" : "Usuario activado") }, icon("power")),
+              h("button", { class: "btn ghost icon", title: "Eliminar", onClick: async () => {
+                if (await confirmDialog({ title: "Eliminar usuario", message: `${m.name} ya no podrá entrar. Sus ${m.devices} dispositivos se quedan en la red sin asignar (puedes asignarlos a otro usuario o eliminarlos).`, confirmLabel: "Eliminar" })) {
+                  run(() => api("DELETE", `/api/members/${m.id}`), "Usuario eliminado");
+                }
+              } }, icon("trash")))))))) : h("div", { class: "empty" }, icon("users"), h("h2", { text: "Sólo tú, de momento" }),
+          h("p", { text: "Invita a tus empleados o familiares: cada uno tendrá su cuenta y sus dispositivos, y tú lo verás todo." }),
+          h("button", { class: "btn primary", onClick: invite }, icon("send"), "Invitar"))),
+      data.invites.length ? h("div", { class: "card" }, h("h3", { text: "Invitaciones pendientes" }),
+        h("div", { class: "blocked-list", style: { marginTop: "10px" } }, data.invites.map((i) => h("div", { class: "blocked-row" },
+          h("div", { class: "grow" }, h("div", { class: "name", text: i.name }), h("div", { class: "meta", text: `Caduca el ${new Date(i.expires_at * 1000).toLocaleDateString()}` })),
+          h("button", { class: "btn ghost icon", title: "Anular", onClick: () => run(() => api("DELETE", `/api/invites/${i.id}`), "Invitación anulada") }, icon("trash")))))) : null,
+    );
+  };
+  const crumbs = isAdmin ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / Usuarios"] : null;
+  fill(main, pageHead("Usuarios", `Personas con acceso a la red de ${tenant.name}`, h("div", { class: "cell-flex" },
+    h("button", { class: "btn", onClick: create }, icon("plus"), "Crear"),
+    h("button", { class: "btn primary", onClick: invite }, icon("send"), "Invitar")), crumbs), body);
+  draw();
+}
+
+/* ------------------------------------------------------------------ páginas públicas */
+function publicShell(...children) {
+  $app.className = "";
+  fill($app, h("div", { class: "auth" }, h("div", { class: "auth-card wide" }, brand(), ...children)));
+}
+
+async function inviteView(token) {
+  let info;
+  try { info = await api("GET", `/api/invite/${encodeURIComponent(token)}`); }
+  catch (e) { return publicShell(h("p", { class: "lead", text: e.message }), h("a", { class: "btn block", href: "#/" }, "Ir al inicio")); }
+  const err = h("div", { class: "help", style: { color: "var(--danger)", minHeight: "18px" } });
+  const btn = h("button", { class: "btn primary block", type: "submit" }, "Crear mi cuenta");
+  const form = h("form", { onSubmit: async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    err.textContent = "";
+    if (fd.get("password") !== fd.get("repeat")) { err.textContent = "Las contraseñas no coinciden"; return; }
+    btn.disabled = true;
+    try {
+      await api("POST", `/api/invite/${encodeURIComponent(token)}`, { username: fd.get("username"), password: fd.get("password") });
+      state.me = await api("GET", "/api/me");
+      state.passkeyChecked = false;
+      history.replaceState(null, "", "#/");
+      render();
+      toast(`Bienvenido/a, ${state.me.name}`);
+    } catch (ex) { err.textContent = ex.message; } finally { btn.disabled = false; }
+  } },
+    field("Elige tu usuario", input({ name: "username", required: true, pattern: "[A-Za-z0-9][A-Za-z0-9._\\-]{2,31}", autocomplete: "username",
+      autocapitalize: "none", spellcheck: "false", placeholder: info.name.split(" ")[0].toLowerCase().normalize("NFD").replace(/[^a-z0-9]/g, "") })),
+    field("Contraseña", input({ name: "password", type: "password", required: true, minlength: "8", autocomplete: "new-password" })),
+    field("Repítela", input({ name: "repeat", type: "password", required: true, minlength: "8", autocomplete: "new-password" })),
+    err, btn);
+  publicShell(h("p", { class: "lead" }, "Hola, ", h("b", { text: info.name }), `. Te han invitado a la red privada de `, h("b", { text: info.tenant }), "."), form);
+}
+
+async function sharedConfigView(token) {
+  let info;
+  try { info = await api("GET", `/api/get/${encodeURIComponent(token)}`); }
+  catch (e) { return publicShell(h("p", { class: "lead", text: e.message })); }
+  const stores = [["App Store", "https://apps.apple.com/app/wireguard/id1441195209"], ["Google Play", "https://play.google.com/store/apps/details?id=com.wireguard.android"],
+    ["Windows / Mac / Linux", "https://www.wireguard.com/install/"]];
+  publicShell(
+    h("p", { class: "lead" }, "Configuración VPN de ", h("b", { text: info.device }), ` (${info.tenant})`),
+    h("ol", { class: "steps" },
+      h("li", null, "Instala la app WireGuard: ", ...stores.flatMap(([n, u], i) => [i ? " · " : "", h("a", { href: u, target: "_blank", rel: "noopener", text: n })]), "."),
+      h("li", { text: "En el móvil: «Añadir túnel» › «Crear desde código QR» y escanea este código (desde otra pantalla)." }),
+      h("li", { text: "En este mismo dispositivo u ordenador: descarga el archivo e impórtalo en la app." })),
+    h("div", { class: "qr-box" }, h("img", { src: `/api/get/${encodeURIComponent(token)}/qr.svg`, alt: "Código QR de la configuración", width: "260", height: "260" })),
+    h("button", { class: "btn primary block", onClick: () => saveConfig({ name: info.filename.replace(/\.conf$/, ""), id: 0 }, info.conf) }, icon("download"), "Descargar archivo"),
+    h("p", { class: "note", style: { textAlign: "center" }, text: `Enlace válido hasta el ${new Date(info.expires_at * 1000).toLocaleString()}. Contiene una clave privada: no lo compartas.` }));
 }
 
 /* ------------------------------------------------------------------ cliente: mi red */

@@ -109,6 +109,22 @@ Después, sus dispositivos móviles llegan a los equipos de la oficina y la ofic
 
 Cada cliente puede publicar en Internet un equipo de su red (NAS, cámaras, Home Assistant, un servidor web…) con **un nombre propio y HTTPS**: en **Servicios → Publicar servicio** indica el nombre (`nas.suempresa.com`), la IP del equipo (de su red o de la LAN de su router) y el puerto. Basta con crear un registro **A** de ese nombre hacia la IP del VPS: el certificado se emite solo. Opcionalmente, añade **usuario y contraseña** delante del servicio. El botón *Comprobar* verifica DNS, certificado y que el equipo responde. Requiere `ENABLE_HTTPS=true` (Caddy).
 
+## Puertos abiertos (TCP/UDP)
+
+Para lo que no es web (escritorio remoto, cámaras RTSP, SSH, juegos…), cada cliente puede abrir puertos en **Puertos → Abrir puerto**: `IP_del_VPS:3389 → 10.252.1.20:3389` (TCP, UDP o ambos), hacia un dispositivo o un equipo de la LAN de su router. El equipo ve la conexión como si viniera del servidor de la VPN, así la respuesta vuelve siempre por el túnel. El admin fija cuántos puede abrir cada cliente (5 por defecto, 0 = ninguno); los clientes usan puertos ≥ 1024 y nunca los del propio servidor (SSH, panel, WireGuard, 53, 80, 443). Las reglas las crea el host (`wgp-firewall`), que valida cada línea.
+
+## Usuarios de cada cliente
+
+En **Usuarios**, el responsable de un cliente invita a sus empleados o familiares con un enlace (de un solo uso, 7 días) o les crea la cuenta. Cada usuario entra con su propia cuenta (también con llave biométrica) y sólo ve **sus** dispositivos, su actividad y sus avisos; el responsable lo ve todo y decide si pueden añadir dispositivos por su cuenta.
+
+Para instalar un dispositivo sin dar una cuenta, usa el botón **Enlace de instalación** de su fila: una página temporal (1 h, 24 h o 7 días) con el QR, el archivo y las instrucciones, para mandarla por WhatsApp o email. Se puede anular en cualquier momento.
+
+## Actividad y avisos
+
+- **Actividad:** tráfico por hora, día y mes (24 h, 7 días, 30 días y 12 meses), dispositivos y clientes que más consumen, consultas y bloqueos del filtro DNS con los dominios más bloqueados, y un registro de conexiones con la IP pública de origen. También por dispositivo (botón de actividad en su fila). Se guarda el detalle por hora 8 días y por día 2 años.
+- **Avisos:** si un dispositivo **vigilado** (los routers, por defecto) deja de conectar unos minutos, llega un aviso, y otro cuando vuelve. Cada persona elige dónde recibirlos: **notificaciones** en el móvil u ordenador (en iPhone, desde la app instalada), **Telegram** o **email**. Los administradores también reciben los fallos de las copias de seguridad.
+- Para Telegram y email, el admin los configura una vez en **Ajustes → Avisos**: un bot creado con [@BotFather](https://t.me/BotFather) (se pega su token) y un servidor SMTP. Cada persona vincula su Telegram con un clic desde **Avisos**.
+
 ## Endpoint y copias de seguridad
 
 - **Ajustes → Endpoint de WireGuard:** usa un nombre (p. ej. `wg.tudominio.com`, nube **gris** en Cloudflare) en lugar de la IP. Si un día cambias de servidor, basta con mover el DNS.
@@ -130,6 +146,9 @@ Cada cliente puede publicar en Internet un equipo de su red (NAS, cámaras, Home
 | Crear, editar, suspender y eliminar clientes | ✔ | |
 | Restablecer contraseñas de clientes | ✔ | |
 | Crear, deshabilitar y borrar dispositivos | ✔ (de cualquier cliente) | ✔ (solo los suyos) |
+| Usuarios propios con invitación; enlaces de instalación | ✔ | ✔ |
+| Actividad (tráfico, DNS, conexiones) y avisos | ✔ (toda la plataforma) | ✔ (su red) |
+| Servicios HTTPS y puertos abiertos | ✔ | ✔ (con límite) |
 | QR y descarga del `.conf` de cada dispositivo | ✔ | ✔ |
 | Modo de túnel por dispositivo: todo el tráfico o solo la red privada | ✔ | ✔ |
 

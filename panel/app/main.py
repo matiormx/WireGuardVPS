@@ -15,6 +15,7 @@ import unicodedata
 import urllib.parse
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Annotated
 
@@ -26,7 +27,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import bcrypt
 
-from . import backup, caddy, dnsfilter, domains, passkeys, security, wg
+from . import alerts, backup, caddy, dnsfilter, domains, forwards, history, members, monitor, passkeys, security, wg
 from .config import Settings, load_settings
 from .db import (LABEL_RE, Database, get_setting, make_hostname, name_in_use, set_setting,
                  unique_hostname, username_taken)
@@ -85,6 +86,7 @@ class TenantUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     enabled: bool | None = None
     max_devices: int | None = Field(default=None, ge=1, le=16384)
+    max_forwards: int | None = Field(default=None, ge=0, le=100)
     notes: str | None = Field(default=None, max_length=500)
     password: str | None = Field(default=None, min_length=8, max_length=256)
 
@@ -100,6 +102,8 @@ class DeviceCreate(BaseModel):
     tenant_id: int | None = None  # sólo admin
     kind: str = Field(default="device", pattern="^(device|router)$")
     lan_networks: list[str] = Field(default_factory=list, max_length=10)
+    monitor: bool | None = None       # avisar si se desconecta (por defecto: sólo routers)
+    member_id: int | None = None      # usuario del cliente al que pertenece (responsable/admin)
 
     @field_validator("name")
     @classmethod
@@ -114,6 +118,8 @@ class DeviceUpdate(BaseModel):
     dns_filter: bool | None = None
     hostname: str | None = Field(default=None, max_length=63)
     lan_networks: list[str] | None = Field(default=None, max_length=10)
+    monitor: bool | None = None
+    member_id: int | None = None      # 0 = sin asignar
 
     @field_validator("name")
     @classmethod
@@ -244,15 +250,29 @@ def _clean_host(value: str | None) -> str | None:
 
 @dataclass
 class Principal:
+    """Quién hace la petición.
+
+    role: admin | tenant (responsable de un cliente) | member (usuario de un cliente).
+    id: id en su tabla (admins, tenants o members). tenant_id: cliente al que pertenece.
+    """
     role: str
     id: int
     username: str
     name: str
     must_change: bool
+    tenant_id: int | None = None
+    can_create: bool = True
 
     @property
     def is_admin(self) -> bool:
         return self.role == "admin"
+
+    @property
+    def is_member(self) -> bool:
+        return self.role == "member"
+
+
+ROLE_TABLE = {"admin": "admins", "tenant": "tenants", "member": "members"}
 
 
 # --------------------------------------------------------------------------------- app
@@ -268,6 +288,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     keys = passkeys.Passkeys()
     proxy = caddy.CaddySync(settings, database, settings.caddy_admin, settings.acme_email)
     backups = backup.Backups(settings, database)
+    mon = monitor.Monitor(settings, database, wgm, dns)
+    notifier = alerts.Notifier(database)
+    mon.listeners.append(notifier.on_monitor_events)
+    backups.on_failure = notifier.on_backup_failed
     doms.seed_from_env(settings.panel_domain)
 
     @asynccontextmanager
@@ -280,7 +304,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await dns.start()
         proxy.start()
         backups.start()
+        mon.start()
+        await asyncio.to_thread(notifier.start_telegram)
         yield
+        notifier.stop_telegram()
+        await mon.stop()
         await backups.stop()
         await proxy.stop()
         await dns.stop()
@@ -290,6 +318,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.domains = doms
     app.state.caddy = proxy
     app.state.backups = backups
+    app.state.monitor = mon
+    app.state.notifier = notifier
 
     # ------------------------------------------------------------------ middleware
     @app.middleware("http")
@@ -340,15 +370,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         data = sessions.load(request.cookies.get(sessions.COOKIE))
         if not data:
             raise HTTPException(401, "Sesión no válida")
+        tenant_id, can_create = None, True
         if data["role"] == "admin":
             row = c.execute("SELECT * FROM admins WHERE id = ?", (data["uid"],)).fetchone()
             name = row["username"] if row else ""
+        elif data["role"] == "member":
+            row = c.execute("""SELECT m.* FROM members m JOIN tenants t ON t.id = m.tenant_id
+                               WHERE m.id = ? AND m.enabled = 1 AND t.enabled = 1""", (data["uid"],)).fetchone()
+            name = row["name"] if row else ""
+            if row:
+                tenant_id, can_create = row["tenant_id"], bool(row["can_create"])
         else:
             row = c.execute("SELECT * FROM tenants WHERE id = ? AND enabled = 1", (data["uid"],)).fetchone()
             name = row["name"] if row else ""
+            tenant_id = row["id"] if row else None
         if not row or security.password_version(row["password_hash"]) != data.get("pwv"):
             raise HTTPException(401, "Sesión caducada")
-        return Principal(data["role"], row["id"], row["username"], name, bool(row["must_change"]))
+        return Principal(data["role"], row["id"], row["username"], name, bool(row["must_change"]), tenant_id, can_create)
 
     AnyUser = Annotated[Principal, Depends(principal)]
 
@@ -357,7 +395,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(403, "password_change_required")
         return p
 
-    User = Annotated[Principal, Depends(ready)]
+    # Anyone: cualquier sesión (también usuarios de un cliente). User: admin o
+    # responsable del cliente; los usuarios de un cliente sólo llegan a lo que
+    # usa Anyone (sus dispositivos, su cuenta, su historial y sus avisos).
+    Anyone = Annotated[Principal, Depends(ready)]
+
+    def manager(p: Anyone) -> Principal:
+        if p.is_member:
+            raise HTTPException(403, "Sólo el responsable de la cuenta puede hacer esto")
+        return p
+
+    User = Annotated[Principal, Depends(manager)]
 
     def admin(p: User) -> Principal:
         if not p.is_admin:
@@ -382,13 +430,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def device_for(c: sqlite3.Connection, p: Principal, device_id: int) -> sqlite3.Row:
         row = c.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
-        if not row or (not p.is_admin and row["tenant_id"] != p.id):
+        if (not row or (not p.is_admin and row["tenant_id"] != p.tenant_id)
+                or (p.is_member and row["member_id"] != p.id)):
             raise HTTPException(404, "Dispositivo no encontrado")
         return row
 
-    def device_json(d: sqlite3.Row, tenant: sqlite3.Row, stats: dict) -> dict:
+    def visible_devices(p: Principal, c: sqlite3.Connection) -> set[int] | None:
+        """Dispositivos que puede ver un usuario de cliente (None = sin restricción)."""
+        if not p.is_member:
+            return None
+        return {r["id"] for r in c.execute("SELECT id FROM devices WHERE member_id = ?", (p.id,))}
+
+    def member_names(c: sqlite3.Connection, tenant_id: int) -> dict[int, str]:
+        return {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM members WHERE tenant_id = ?", (tenant_id,))}
+
+    def device_json(d: sqlite3.Row, tenant: sqlite3.Row, stats: dict, members: dict | None = None) -> dict:
         st = stats.get(d["public_key"], {})
         return {
+            "monitor": bool(d["monitor"]), "member_id": d["member_id"],
+            "member_name": (members or {}).get(d["member_id"]) if d["member_id"] else None,
             "id": d["id"], "tenant_id": d["tenant_id"], "tenant_name": tenant["name"],
             "name": d["name"], "ip": d["ip"], "public_key": d["public_key"],
             "full_tunnel": bool(d["full_tunnel"]), "enabled": bool(d["enabled"]),
@@ -406,7 +466,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "id": t["id"], "name": t["name"], "username": t["username"],
             "network": str(wg.tenant_network(settings, t["net_index"])),
-            "max_devices": t["max_devices"], "enabled": bool(t["enabled"]), "notes": t["notes"],
+            "max_devices": t["max_devices"], "max_forwards": t["max_forwards"],
+            "enabled": bool(t["enabled"]), "notes": t["notes"],
             "created_at": t["created_at"], "must_change": bool(t["must_change"]),
             "filters": dnsfilter.parse_filters(t["dns_filters"]),
             "device_count": len(dj), "online_count": sum(d["online"] for d in dj),
@@ -473,6 +534,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             role, row = "tenant", c.execute(
                 "SELECT * FROM tenants WHERE username = ? COLLATE NOCASE", (body.username,)
             ).fetchone()
+        if not row:
+            role, row = "member", c.execute(
+                "SELECT * FROM members WHERE username = ? COLLATE NOCASE", (body.username,)
+            ).fetchone()
         if not row or not security.verify_password(body.password, row["password_hash"]):
             limiter.hit(key)
             raise HTTPException(401, "Usuario o contraseña incorrectos")
@@ -481,11 +546,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def finish_login(request: Request, response: Response, c: sqlite3.Connection, role: str, row: sqlite3.Row) -> dict:
         """Comprobaciones comunes a contraseña y llave biométrica, y apertura de sesión."""
+        tenant_id = row["id"] if role == "tenant" else row["tenant_id"] if role == "member" else None
         if role == "tenant" and not row["enabled"]:
             raise HTTPException(403, "Cuenta deshabilitada. Contacte con su proveedor.")
-        # En el dominio propio de un cliente sólo puede entrar ese cliente.
+        if role == "member":
+            t = c.execute("SELECT enabled FROM tenants WHERE id = ?", (tenant_id,)).fetchone()
+            if not row["enabled"] or not t or not t["enabled"]:
+                raise HTTPException(403, "Cuenta deshabilitada. Contacte con el responsable de su empresa.")
+            c.execute("UPDATE members SET last_login = ? WHERE id = ?", (int(time.time()), row["id"]))
+        # En el dominio propio de un cliente sólo pueden entrar ese cliente y sus usuarios.
         owner = doms.tenant_for_host(c, domains.host_of(request.headers.get("host")))
-        if owner is not None and not (role == "tenant" and row["id"] == owner["id"]):
+        if owner is not None and tenant_id != owner["id"]:
             raise HTTPException(403, "Esta cuenta no puede acceder desde este dominio")
         set_session(request, response, role, row["id"], row["password_hash"])
         return {"role": role, "must_change": bool(row["must_change"])}
@@ -499,13 +570,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def me(p: AnyUser, c: Conn):
         data = {"role": p.role, "id": p.id, "username": p.username, "name": p.name, "must_change": p.must_change}
         if not p.is_admin:
-            t = tenant_or_404(c, p.id)
-            data.update(network=str(wg.tenant_network(settings, t["net_index"])), max_devices=t["max_devices"])
+            t = tenant_or_404(c, p.tenant_id)
+            data.update(network=str(wg.tenant_network(settings, t["net_index"])), max_devices=t["max_devices"],
+                        tenant_id=t["id"], tenant_name=t["name"])
+        if p.is_member:
+            data.update(can_create=p.can_create)
         return data
 
     @app.post("/api/me/password")
     def change_password(body: PasswordIn, p: AnyUser, request: Request, response: Response, c: Conn):
-        table = "admins" if p.is_admin else "tenants"
+        table = ROLE_TABLE[p.role]
         row = c.execute(f"SELECT password_hash FROM {table} WHERE id = ?", (p.id,)).fetchone()
         if not security.verify_password(body.current, row["password_hash"]):
             raise HTTPException(400, "La contraseña actual no es correcta")
@@ -583,6 +657,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(400, f"El cliente ya tiene {count} dispositivos")
             c.execute("UPDATE tenants SET max_devices = ? WHERE id = ?",
                       (min(body.max_devices, wg.device_capacity(settings)), tenant_id))
+        if body.max_forwards is not None:
+            c.execute("UPDATE tenants SET max_forwards = ? WHERE id = ?", (body.max_forwards, tenant_id))
         if body.password is not None:
             c.execute("UPDATE tenants SET password_hash = ?, must_change = 1 WHERE id = ?",
                       (security.hash_password(body.password), tenant_id))
@@ -595,6 +671,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.delete("/api/admin/tenants/{tenant_id}")
     def delete_tenant(tenant_id: int, _: Admin, c: Conn):
         tenant_or_404(c, tenant_id)
+        for table in ("passkeys", "alert_channels", "alert_prefs"):
+            c.execute(f"""DELETE FROM {table} WHERE role = 'member'
+                          AND user_id IN (SELECT id FROM members WHERE tenant_id = ?)""", (tenant_id,))
+            c.execute(f"DELETE FROM {table} WHERE role = 'tenant' AND user_id = ?", (tenant_id,))
         c.execute("DELETE FROM tenants WHERE id = ?", (tenant_id,))
         c.execute("DELETE FROM passkeys WHERE role = 'tenant' AND user_id = ?", (tenant_id,))
         c.commit()
@@ -603,23 +683,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ------------------------------------------------------------------ dispositivos
     @app.get("/api/devices")
-    def list_devices(p: User, c: Conn, tenant_id: int | None = None):
+    def list_devices(p: Anyone, c: Conn, tenant_id: int | None = None):
         if not p.is_admin:
-            tenant_id = p.id
+            tenant_id = p.tenant_id
         stats = wgm.stats()
         q = "SELECT * FROM devices" + (" WHERE tenant_id = ?" if tenant_id else "") + " ORDER BY created_at, id"
         rows = c.execute(q, (tenant_id,) if tenant_id else ()).fetchall()
+        if p.is_member:
+            rows = [d for d in rows if d["member_id"] == p.id]
         tenants = {t["id"]: t for t in c.execute("SELECT * FROM tenants")}
-        return [device_json(d, tenants[d["tenant_id"]], stats) for d in rows]
+        names = {r["id"]: r["name"] for r in c.execute("SELECT id, name FROM members")}
+        return [device_json(d, tenants[d["tenant_id"]], stats, names) for d in rows]
+
+    def clean_member(c: sqlite3.Connection, tenant_id: int, member_id: int | None) -> int | None:
+        if not member_id:
+            return None
+        if not c.execute("SELECT 1 FROM members WHERE id = ? AND tenant_id = ?", (member_id, tenant_id)).fetchone():
+            raise HTTPException(422, "Ese usuario no pertenece a este cliente")
+        return member_id
 
     @app.post("/api/devices", status_code=201)
-    def create_device(body: DeviceCreate, p: User, c: Conn):
+    def create_device(body: DeviceCreate, p: Anyone, c: Conn):
         if p.is_admin:
             if body.tenant_id is None:
                 raise HTTPException(400, "tenant_id es obligatorio")
             tenant_id = body.tenant_id
         else:
-            tenant_id = p.id
+            tenant_id = p.tenant_id
+        if p.is_member:
+            if not p.can_create:
+                raise HTTPException(403, "Pide al responsable de tu empresa que añada el dispositivo")
+            if body.kind == "router":
+                raise HTTPException(403, "Sólo el responsable de la cuenta puede añadir routers")
+            member_id = p.id
+        else:
+            member_id = clean_member(c, tenant_id, body.member_id)
         t = tenant_or_404(c, tenant_id)
         count = c.execute("SELECT COUNT(*) FROM devices WHERE tenant_id = ?", (tenant_id,)).fetchone()[0]
         if count >= t["max_devices"]:
@@ -635,19 +733,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, "Indica al menos una red LAN del router (p. ej. 192.168.88.0/24)")
         cur = c.execute(
             """INSERT INTO devices (tenant_id, name, ip, private_key, public_key, preshared_key, full_tunnel,
-                                    created_at, hostname, kind, lan_networks)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                    created_at, hostname, kind, lan_networks, monitor, member_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (tenant_id, body.name, ip, private, public, wg.generate_psk(), int(body.full_tunnel and not is_router),
-             int(time.time()), hostname, body.kind, " ".join(lans)),
+             int(time.time()), hostname, body.kind, " ".join(lans),
+             int(is_router if body.monitor is None else body.monitor), member_id),
         )
         c.commit()
         apply_wg()
         d = c.execute("SELECT * FROM devices WHERE id = ?", (cur.lastrowid,)).fetchone()
-        return device_json(d, t, {})
+        return device_json(d, t, {}, member_names(c, tenant_id))
 
     @app.patch("/api/devices/{device_id}")
-    def update_device(device_id: int, body: DeviceUpdate, p: User, c: Conn):
+    def update_device(device_id: int, body: DeviceUpdate, p: Anyone, c: Conn):
         d = device_for(c, p, device_id)
+        if p.is_member and any(v is not None for v in (body.lan_networks, body.hostname, body.dns_filter, body.member_id)):
+            raise HTTPException(403, "Sólo el responsable de la cuenta puede cambiar eso")
+        if body.member_id is not None:
+            c.execute("UPDATE devices SET member_id = ? WHERE id = ?", (clean_member(c, d["tenant_id"], body.member_id), device_id))
+        if body.monitor is not None:
+            c.execute("UPDATE devices SET monitor = ? WHERE id = ?", (int(body.monitor), device_id))
         if body.lan_networks is not None:
             if d["kind"] != "router":
                 raise HTTPException(422, "Sólo los routers tienen redes LAN")
@@ -673,10 +778,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         c.commit()
         apply_wg()
         d = c.execute("SELECT * FROM devices WHERE id = ?", (device_id,)).fetchone()
-        return device_json(d, tenant_or_404(c, d["tenant_id"]), wgm.stats())
+        return device_json(d, tenant_or_404(c, d["tenant_id"]), wgm.stats(), member_names(c, d["tenant_id"]))
 
     @app.delete("/api/devices/{device_id}")
-    def delete_device(device_id: int, p: User, c: Conn):
+    def delete_device(device_id: int, p: Anyone, c: Conn):
         device_for(c, p, device_id)
         c.execute("DELETE FROM devices WHERE id = ?", (device_id,))
         c.commit()
@@ -684,7 +789,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True}
 
     def client_config(c: sqlite3.Connection, p: Principal, device_id: int) -> tuple[str, str]:
-        d = device_for(c, p, device_id)
+        return render_config(c, device_for(c, p, device_id))
+
+    def render_config(c: sqlite3.Connection, d: sqlite3.Row) -> tuple[str, str]:
         t = tenant_or_404(c, d["tenant_id"])
         conf = wg.render_client_conf(settings, get_setting(c, "server_public_key") or "", t, d,
                                      search=dnsfilter.parse_suffixes(get_setting(c, "dns_suffixes")),
@@ -695,13 +802,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return conf, slug
 
     @app.get("/api/devices/{device_id}/config")
-    def device_config(device_id: int, p: User, c: Conn):
+    def device_config(device_id: int, p: Anyone, c: Conn):
         conf, slug = client_config(c, p, device_id)
         return Response(conf, media_type="text/plain; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{slug}.conf"'})
 
     @app.get("/api/devices/{device_id}/mikrotik")
-    def device_mikrotik(device_id: int, p: User, c: Conn):
+    def device_mikrotik(device_id: int, p: Anyone, c: Conn):
         d = device_for(c, p, device_id)
         t = tenant_or_404(c, d["tenant_id"])
         script = wg.render_mikrotik(settings, get_setting(c, "server_public_key") or "", t, d,
@@ -828,7 +935,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return get_wg_settings(admin_, c)
 
     @app.get("/api/devices/{device_id}/qr.svg")
-    def device_qr(device_id: int, p: User, c: Conn):
+    def device_qr(device_id: int, p: Anyone, c: Conn):
         conf, _ = client_config(c, p, device_id)
         buf = io.BytesIO()
         segno.make(conf, error="m").save(buf, kind="svg", scale=5, border=2, dark="#000", light="#fff")
@@ -893,7 +1000,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(400, str(exc)) from exc
 
     @app.get("/api/passkeys")
-    def list_passkeys(request: Request, p: User, c: Conn):
+    def list_passkeys(request: Request, p: Anyone, c: Conn):
         try:
             current = passkeys.relying_party(request).rp_id
         except passkeys.PasskeyError:
@@ -904,7 +1011,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "passkeys": [dict(r) | {"current": r["rp_id"] == current} for r in rows]}
 
     @app.post("/api/passkeys/register/options")
-    def passkey_register_options(request: Request, p: User, c: Conn):
+    def passkey_register_options(request: Request, p: Anyone, c: Conn):
         rp = rp_or_400(request)
         try:
             state, options = keys.registration_options(c, rp, branding_for(c, request)["title"], p.role, p.id,
@@ -914,7 +1021,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"state": state, "options": json.loads(options)}
 
     @app.post("/api/passkeys/register/verify", status_code=201)
-    def passkey_register_verify(body: PasskeyRegisterIn, request: Request, p: User, c: Conn):
+    def passkey_register_verify(body: PasskeyRegisterIn, request: Request, p: Anyone, c: Conn):
         rp = rp_or_400(request)
         try:
             keys.register(c, rp, body.state, body.credential, p.role, p.id, body.name.strip())
@@ -923,7 +1030,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return list_passkeys(request, p, c)
 
     @app.delete("/api/passkeys/{passkey_id}")
-    def delete_passkey(passkey_id: int, request: Request, p: User, c: Conn):
+    def delete_passkey(passkey_id: int, request: Request, p: Anyone, c: Conn):
         cur = c.execute("DELETE FROM passkeys WHERE id = ? AND role = ? AND user_id = ?", (passkey_id, p.role, p.id))
         if cur.rowcount == 0:
             raise HTTPException(404, "Llave no encontrada")
@@ -945,8 +1052,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except passkeys.PasskeyError as exc:
             limiter.hit(key)
             raise HTTPException(401, str(exc)) from exc
-        table = "admins" if pk["role"] == "admin" else "tenants"
-        row = c.execute(f"SELECT * FROM {table} WHERE id = ?", (pk["user_id"],)).fetchone()
+        row = c.execute(f"SELECT * FROM {ROLE_TABLE[pk['role']]} WHERE id = ?", (pk["user_id"],)).fetchone()
         if row is None:
             raise HTTPException(401, "La cuenta de esta llave ya no existe")
         limiter.reset(key)
@@ -1241,6 +1347,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "Ese dominio ya está en uso")
         c.execute("UPDATE tenants SET domain = ? WHERE id = ?", (host, tid))
         return get_tenant_domain(p, c, tid)
+
+    # ------------------------------------------------------------------ módulos
+    deps = SimpleNamespace(
+        settings=settings, db=database, wgm=wgm, dns=dns, doms=doms,
+        Conn=Conn, User=User, Admin=Admin, Anyone=Anyone, visible_devices=visible_devices,
+        tenant_or_404=tenant_or_404, apply_wg=apply_wg, scope_tenant=services_tenant,
+        clean_target=clean_target, probe=_probe,
+        endpoint_host=lambda c: wg.endpoint_host(c, settings),
+        tenant_networks=lambda c, tid: [str(wg.tenant_network(settings, tenant_or_404(c, tid)["net_index"]))]
+        + wg.tenant_lans(c, tid),
+    )
+    forwards.register(app, deps)
+    history.register(app, deps)
+    deps.notifier = notifier
+    alerts.register(app, deps)
+    vars(deps).update(set_session=set_session, limiter=limiter, device_for=device_for, render_config=render_config)
+    members.register(app, deps)
 
     # ------------------------------------------------------------------ SPA
     @app.get("/healthz", include_in_schema=False)

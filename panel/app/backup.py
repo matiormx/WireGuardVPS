@@ -209,6 +209,8 @@ class Backups:
         self.dir = settings.data_dir / "backups"
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        self.on_failure = None  # callback(error): avisos a los administradores
+        self._notified_day: str | None = None
 
     # ---- configuración
     def config(self) -> dict:
@@ -306,14 +308,28 @@ class Backups:
     async def run(self) -> None:
         while True:
             await asyncio.sleep(60)
+            error = None
             try:
                 if await asyncio.to_thread(self.due):
-                    await self.run_now("automática")
+                    result = await self.run_now("automática")
+                    error = result["error"]
             except BackupError as exc:
                 log.error("Copia automática fallida: %s", exc)
-                self._record({"at": int(time.time()), "name": None, "size": 0, "ok": False, "error": str(exc), "s3": None})
+                error = str(exc)
+                self._record({"at": int(time.time()), "name": None, "size": 0, "ok": False, "error": error, "s3": None})
             except Exception:  # noqa: BLE001 - el bucle no debe morir
                 log.exception("Error inesperado en la copia automática")
+            self._notify(error)
+
+    def _notify(self, error: str | None) -> None:
+        """Un aviso por día como mucho (los reintentos son cada hora)."""
+        today = dt.date.today().isoformat()
+        if error and self.on_failure and self._notified_day != today:
+            self._notified_day = today
+            try:
+                self.on_failure(error)
+            except Exception:  # noqa: BLE001
+                log.exception("No se pudo avisar del fallo de la copia")
 
     def start(self) -> None:
         if self._task is None:

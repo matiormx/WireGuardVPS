@@ -74,6 +74,133 @@ CREATE TABLE IF NOT EXISTS services (
     enabled     INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS forwards (
+    id          INTEGER PRIMARY KEY,
+    tenant_id   INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    proto       TEXT NOT NULL,
+    public_port INTEGER NOT NULL,
+    target_ip   TEXT NOT NULL,
+    target_port INTEGER NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS members (
+    id            INTEGER PRIMARY KEY,
+    tenant_id     INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    name          TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    must_change   INTEGER NOT NULL DEFAULT 0,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    can_create    INTEGER NOT NULL DEFAULT 1,
+    created_at    INTEGER NOT NULL,
+    last_login    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_members_tenant ON members(tenant_id);
+CREATE TABLE IF NOT EXISTS invites (
+    id         INTEGER PRIMARY KEY,
+    tenant_id  INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    name       TEXT NOT NULL,
+    can_create INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at    INTEGER,
+    member_id  INTEGER
+);
+CREATE TABLE IF NOT EXISTS device_links (
+    id         INTEGER PRIMARY KEY,
+    device_id  INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    views      INTEGER NOT NULL DEFAULT 0,
+    last_view  INTEGER
+);
+CREATE TABLE IF NOT EXISTS alert_channels (
+    id         INTEGER PRIMARY KEY,
+    role       TEXT NOT NULL,
+    user_id    INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    target     TEXT NOT NULL,
+    label      TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    last_ok    INTEGER,
+    last_error TEXT,
+    UNIQUE (role, user_id, kind, target)
+);
+CREATE TABLE IF NOT EXISTS alert_prefs (
+    role    TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    prefs   TEXT NOT NULL,
+    PRIMARY KEY (role, user_id)
+);
+CREATE TABLE IF NOT EXISTS telegram_links (
+    code       TEXT PRIMARY KEY,
+    role       TEXT NOT NULL,
+    user_id    INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS device_state (
+    device_id      INTEGER PRIMARY KEY,
+    rx             INTEGER NOT NULL DEFAULT 0,
+    tx             INTEGER NOT NULL DEFAULT 0,
+    online         INTEGER NOT NULL DEFAULT 0,
+    changed_at     INTEGER NOT NULL DEFAULT 0,
+    last_seen      INTEGER,
+    endpoint       TEXT,
+    alerted        INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS traffic_hourly (
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    device_id INTEGER NOT NULL,
+    hour      INTEGER NOT NULL,
+    rx        INTEGER NOT NULL DEFAULT 0,
+    tx        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (device_id, hour)
+);
+CREATE INDEX IF NOT EXISTS idx_traffic_hourly_tenant ON traffic_hourly(tenant_id, hour);
+CREATE TABLE IF NOT EXISTS traffic_daily (
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    device_id INTEGER NOT NULL,
+    day       TEXT NOT NULL,
+    rx        INTEGER NOT NULL DEFAULT 0,
+    tx        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (device_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_traffic_daily_tenant ON traffic_daily(tenant_id, day);
+CREATE TABLE IF NOT EXISTS conn_events (
+    id        INTEGER PRIMARY KEY,
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    device_id INTEGER NOT NULL,
+    ts        INTEGER NOT NULL,
+    kind      TEXT NOT NULL,
+    endpoint  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_conn_events_tenant ON conn_events(tenant_id, ts);
+CREATE INDEX IF NOT EXISTS idx_conn_events_device ON conn_events(device_id, ts);
+CREATE TABLE IF NOT EXISTS dns_hourly (
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    hour      INTEGER NOT NULL,
+    queries   INTEGER NOT NULL DEFAULT 0,
+    blocked   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, hour)
+);
+CREATE TABLE IF NOT EXISTS dns_daily (
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    day       TEXT NOT NULL,
+    queries   INTEGER NOT NULL DEFAULT 0,
+    blocked   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, day)
+);
+CREATE TABLE IF NOT EXISTS dns_top (
+    tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    day       TEXT NOT NULL,
+    domain    TEXT NOT NULL,
+    count     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, day, domain)
+);
 CREATE TABLE IF NOT EXISTS dns_records (
     id         INTEGER PRIMARY KEY,
     tenant_id  INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -145,6 +272,12 @@ def _migrate(c: sqlite3.Connection) -> None:
                   (unique_hostname(c, row["tenant_id"], make_hostname(row["name"])), row["id"]))
     _ensure_column(c, "devices", "kind", "TEXT NOT NULL DEFAULT 'device'")
     _ensure_column(c, "devices", "lan_networks", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(c, "tenants", "max_forwards", "INTEGER NOT NULL DEFAULT 5")
+    _ensure_column(c, "devices", "member_id", "INTEGER REFERENCES members(id) ON DELETE SET NULL")
+    if "monitor" not in {r["name"] for r in c.execute("PRAGMA table_info(devices)")}:
+        # Avisar si se desconecta: activado por defecto en los routers existentes.
+        _ensure_column(c, "devices", "monitor", "INTEGER NOT NULL DEFAULT 0")
+        c.execute("UPDATE devices SET monitor = 1 WHERE kind = 'router'")
     if get_setting(c, "dns_suffixes") is None:
         set_setting(c, "dns_suffixes", "vpn")
 
@@ -194,6 +327,8 @@ def set_setting(c: sqlite3.Connection, key: str, value: str) -> None:
 def username_taken(c: sqlite3.Connection, username: str, exclude_tenant: int | None = None) -> bool:
     """Los usuarios son únicos entre admins y clientes (un solo formulario de login)."""
     if c.execute("SELECT 1 FROM admins WHERE username = ? COLLATE NOCASE", (username,)).fetchone():
+        return True
+    if c.execute("SELECT 1 FROM members WHERE username = ? COLLATE NOCASE", (username,)).fetchone():
         return True
     row = c.execute("SELECT id FROM tenants WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
     return bool(row) and row["id"] != exclude_tenant

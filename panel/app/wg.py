@@ -129,6 +129,20 @@ def tenant_lans(c: sqlite3.Connection, tenant_id: int, exclude_device: int | Non
     return out
 
 
+def forward_lines(c: sqlite3.Connection) -> list[str]:
+    """Reenvíos de puertos activos para el host: «proto puerto_público ip puerto_destino»."""
+    rows = c.execute(
+        """SELECT f.proto, f.public_port, f.target_ip, f.target_port FROM forwards f
+           JOIN tenants t ON t.id = f.tenant_id WHERE f.enabled = 1 AND t.enabled = 1
+           ORDER BY f.public_port, f.proto"""
+    ).fetchall()
+    out = []
+    for r in rows:
+        for proto in (("tcp", "udp") if r["proto"] == "both" else (r["proto"],)):
+            out.append(f"{proto} {int(r['public_port'])} {ipaddress.IPv4Address(r['target_ip'])} {int(r['target_port'])}")
+    return out
+
+
 @dataclass
 class Peer:
     tenant: str
@@ -255,6 +269,7 @@ class WireGuardManager:
         self.fw_dir = settings.wg_conf_dir / "wgp"
         self.tenants_list = self.fw_dir / "tenants.list"
         self.dns_list = self.fw_dir / "dns.list"
+        self.forwards_list = self.fw_dir / "forwards.list"
         self.stamp = self.fw_dir / "apply.stamp"
 
     def server_public_key(self) -> str:
@@ -290,10 +305,13 @@ class WireGuardManager:
             peers = [Peer(r["tenant"], r["name"], r["ip"], r["public_key"], r["preshared_key"],
                           tuple(parse_lans(r["lan_networks"])) if r["kind"] == "router" else ()) for r in rows]
             all_lans = {lan for lans in lans_by_tenant.values() for lan in lans}
+            with self.db.conn() as c:
+                fwd_lines = forward_lines(c)
 
             _atomic_write(self.conf_path, render_server_conf(self.settings, private, peers), 0o600)
             _atomic_write(self.tenants_list, "".join(f"{g}\n" for g in groups), 0o644)
             _atomic_write(self.dns_list, "".join(f"{n}\n" for n in dns_nets), 0o644)
+            _atomic_write(self.forwards_list, "".join(f"{x}\n" for x in fwd_lines), 0o644)
             # Escritura in situ (IN_CLOSE_WRITE) para disparar la unidad .path del host.
             with open(self.stamp, "w") as fh:
                 fh.write(f"{time.time():.3f}\n")

@@ -31,7 +31,7 @@ set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 # -----------------------------------------------------------------------------
 # VERSIÓN DEL SCRIPT (se compara con la publicada en GitHub). SemVer.
 # -----------------------------------------------------------------------------
-readonly VERSION="2.6.0"
+readonly VERSION="2.7.0"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
@@ -99,6 +99,9 @@ readonly FIREWALL_BIN="/usr/local/sbin/wgp-firewall"
 readonly TENANT_CHAIN="WGP-TENANTS"
 readonly EGRESS_CHAIN="WGP-EGRESS"
 readonly DNS_CHAIN="WGP-DNS"
+readonly PFWD_CHAIN="WGP-PFWD"                     # reenvío de puertos: FORWARD
+readonly PDNAT_CHAIN="WGP-PDNAT"                   # reenvío de puertos: DNAT (PREROUTING)
+readonly PSNAT_CHAIN="WGP-PSNAT"                   # reenvío de puertos: SNAT hacia wg0
 readonly RULE_TAG="wg-manager"
 readonly SYSTEMD_DIR="/etc/systemd/system"
 readonly LOCK_FILE="/var/lock/wg-manager.lock"
@@ -253,6 +256,15 @@ detect_ssh_ports() {
     fi
     [[ -n "${ports// /}" ]] || ports="22"
     printf '%s' "${ports}"
+}
+
+reserved_ports() {
+    # Puertos del propio servidor: nunca se pueden reenviar a un dispositivo.
+    local p out=" "
+    for p in 53 80 443 2019 "${WG_PORT}" "${PANEL_PORT}" $(detect_ssh_ports); do
+        [[ "${out}" == *" ${p} "* ]] || out+="${p} "
+    done
+    printf '%s' "${out# }"
 }
 
 random_secret() {
@@ -449,13 +461,16 @@ install_firewall_helper() {
     detect_wan_iface
     install -d -m 0700 "${WG_CONF_DIR}"
     install -d -m 0755 "${WGP_DIR}"
+    # Puertos que un reenvío nunca puede ocupar (servicios del propio servidor).
+    local reserved
+    reserved="$(reserved_ports)"
 
     cat >"${FIREWALL_BIN}" <<EOF
 #!/usr/bin/env bash
 # Generado por wg-manager ${VERSION}. No editar: se regenera en cada install/update.
 #   wgp-firewall up <iface>     PostUp de wg-quick: reglas base + cadena de clientes
 #   wgp-firewall down <iface>   PostDown de wg-quick: retira todo
-#   wgp-firewall sync           Regenera WGP-TENANTS desde ${WGP_DIR}/tenants.list
+#   wgp-firewall sync           Regenera las cadenas desde ${WGP_DIR}/{tenants,dns,forwards}.list
 #   wgp-firewall apply          sync + arranca wg-quick@${WG_INTERFACE} si está parado
 set -euo pipefail
 
@@ -465,9 +480,14 @@ IFACE_DEFAULT="${WG_INTERFACE}"
 SERVER_IP="${WG_SERVER_ADDRESS%/*}"
 LIST="${WGP_DIR}/tenants.list"
 DNS_LIST="${WGP_DIR}/dns.list"
+FWD_LIST="${WGP_DIR}/forwards.list"
+RESERVED=" ${reserved} "
 CHAIN="${TENANT_CHAIN}"
 EGRESS="${EGRESS_CHAIN}"
 DNSCHAIN="${DNS_CHAIN}"
+PFWD="${PFWD_CHAIN}"
+PDNAT="${PDNAT_CHAIN}"
+PSNAT="${PSNAT_CHAIN}"
 TAG="${RULE_TAG}"
 EOF
     cat >>"${FIREWALL_BIN}" <<'EOF'
@@ -484,8 +504,12 @@ rule_specs() {
         "filter|FORWARD|2|-i ${i} -o ${WAN} ${c} -j ${EGRESS}" \
         "filter|FORWARD|3|-i ${i} -o ${WAN} -s ${SUBNET} ${c} -j ACCEPT" \
         "filter|FORWARD|4|-i ${WAN} -o ${i} -d ${SUBNET} -m conntrack --ctstate RELATED,ESTABLISHED ${c} -j ACCEPT" \
+        "filter|FORWARD|5|-i ${WAN} -o ${i} ${c} -j ${PFWD}" \
+        "filter|FORWARD|6|-i ${i} -o ${WAN} -m conntrack --ctstate RELATED,ESTABLISHED ${c} -j ACCEPT" \
         "nat|PREROUTING|1|-i ${i} ${c} -j ${DNSCHAIN}" \
-        "nat|POSTROUTING|1|-s ${SUBNET} -o ${WAN} ${c} -j MASQUERADE"
+        "nat|PREROUTING|2|-i ${WAN} -m addrtype --dst-type LOCAL ${c} -j ${PDNAT}" \
+        "nat|POSTROUTING|1|-s ${SUBNET} -o ${WAN} ${c} -j MASQUERADE" \
+        "nat|POSTROUTING|2|-o ${i} ${c} -j ${PSNAT}"
 }
 
 valid_cidr() {
@@ -512,10 +536,37 @@ read_nets() {
     done <"${file}"
 }
 
+valid_ip() {
+    local o x
+    [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r -a o <<<"$1"
+    for x in "${o[@]}"; do (( 10#${x} <= 255 )) || return 1; done
+}
+
+valid_port() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 )); }
+
+# read_forwards FICHERO -> "proto puerto_publico ip_destino puerto_destino" válidos
+read_forwards() {
+    local file=$1 proto pport dest dport extra
+    [[ -f "${file}" ]] || return 0
+    while read -r proto pport dest dport extra || [[ -n "${proto}" ]]; do
+        [[ -z "${proto}" ]] && continue
+        if [[ "${proto}" =~ ^(tcp|udp)$ ]] && valid_port "${pport}" && valid_ip "${dest}" \
+            && valid_port "${dport}" && [[ -z "${extra}" ]] && [[ "${RESERVED}" != *" $((10#${pport})) "* ]]; then
+            echo "${proto} $((10#${pport})) ${dest} $((10#${dport}))"
+        else
+            logger -t wgp-firewall "Reenvío ignorado en ${file}: ${proto} ${pport} ${dest} ${dport} ${extra}" || true
+        fi
+    done <"${file}"
+}
+
 ensure_chains() {
     ipt -N "${CHAIN}" 2>/dev/null || true
     ipt -N "${EGRESS}" 2>/dev/null || true
+    ipt -N "${PFWD}" 2>/dev/null || true
     ipt -t nat -N "${DNSCHAIN}" 2>/dev/null || true
+    ipt -t nat -N "${PDNAT}" 2>/dev/null || true
+    ipt -t nat -N "${PSNAT}" 2>/dev/null || true
 }
 
 # read_groups FICHERO -> un grupo por línea (red del cliente + LAN de sus routers),
@@ -540,14 +591,16 @@ read_groups() {
 
 sync_tenants() {
     ensure_chains
-    local net src dst group c="-m comment --comment ${TAG}" groups dns
+    local net src dst group c="-m comment --comment ${TAG}" groups dns fwds proto pport dest dport
     groups="$(read_groups "${LIST}")"
     dns="$(read_nets "${DNS_LIST}")"
+    fwds="$(read_forwards "${FWD_LIST}")"
     {
         # Con --noflush, declarar una cadena la vacía: el cambio es atómico.
         echo "*filter"
         echo ":${CHAIN} - [0:0]"
         echo ":${EGRESS} - [0:0]"
+        echo ":${PFWD} - [0:0]"
         for group in ${groups}; do
             for src in ${group//,/ }; do
                 for dst in ${group//,/ }; do
@@ -560,16 +613,30 @@ sync_tenants() {
             echo "-A ${EGRESS} -s ${net} -p tcp --dport 853 ${c} -j REJECT --reject-with tcp-reset"
             echo "-A ${EGRESS} -s ${net} -p udp --dport 853 ${c} -j REJECT"
         done
+        # Reenvío de puertos: sólo las conexiones redirigidas por WGP-PDNAT.
+        while read -r proto pport dest dport; do
+            [[ -n "${proto}" ]] || continue
+            echo "-A ${PFWD} -d ${dest} -p ${proto} --dport ${dport} -m conntrack --ctstate DNAT ${c} -j ACCEPT"
+        done <<<"${fwds}"
         echo "COMMIT"
         echo "*nat"
         echo ":${DNSCHAIN} - [0:0]"
+        echo ":${PDNAT} - [0:0]"
+        echo ":${PSNAT} - [0:0]"
+        # SNAT a la IP del servidor: la respuesta vuelve siempre por el túnel,
+        # aunque el dispositivo sólo enrute la red privada por WireGuard.
+        while read -r proto pport dest dport; do
+            [[ -n "${proto}" ]] || continue
+            echo "-A ${PDNAT} -p ${proto} --dport ${pport} ${c} -j DNAT --to-destination ${dest}:${dport}"
+            echo "-A ${PSNAT} -d ${dest} -p ${proto} --dport ${dport} -m conntrack --ctstate DNAT ${c} -j SNAT --to-source ${SERVER_IP}"
+        done <<<"${fwds}"
         for net in ${dns}; do
             echo "-A ${DNSCHAIN} -s ${net} ! -d ${SERVER_IP} -p udp --dport 53 ${c} -j DNAT --to-destination ${SERVER_IP}:53"
             echo "-A ${DNSCHAIN} -s ${net} ! -d ${SERVER_IP} -p tcp --dport 53 ${c} -j DNAT --to-destination ${SERVER_IP}:53"
         done
         echo "COMMIT"
     } | iptables-restore -w --noflush
-    logger -t wgp-firewall "Sincronizado: $(wc -w <<<"${groups}") clientes, $(wc -w <<<"${dns}") con filtrado DNS" || true
+    logger -t wgp-firewall "Sincronizado: $(wc -w <<<"${groups}") clientes, $(wc -w <<<"${dns}") con filtrado DNS, $(grep -c . <<<"${fwds}") puertos" || true
 }
 
 up() {
@@ -591,8 +658,13 @@ down() {
     ipt -X "${CHAIN}" 2>/dev/null || true
     ipt -F "${EGRESS}" 2>/dev/null || true
     ipt -X "${EGRESS}" 2>/dev/null || true
-    ipt -t nat -F "${DNSCHAIN}" 2>/dev/null || true
-    ipt -t nat -X "${DNSCHAIN}" 2>/dev/null || true
+    ipt -F "${PFWD}" 2>/dev/null || true
+    ipt -X "${PFWD}" 2>/dev/null || true
+    local t
+    for t in "${DNSCHAIN}" "${PDNAT}" "${PSNAT}"; do
+        ipt -t nat -F "${t}" 2>/dev/null || true
+        ipt -t nat -X "${t}" 2>/dev/null || true
+    done
 }
 
 apply() {
@@ -695,6 +767,7 @@ WG_KEEPALIVE='${WG_KEEPALIVE}'
 FIREWALL_HOOK='${FIREWALL_BIN}'
 DNS_ENABLED='${DNS_ENABLED}'
 CADDY_ADMIN='$([[ "${ENABLE_HTTPS}" == "true" ]] && echo "http://127.0.0.1:2019")'
+RESERVED_PORTS='$(reserved_ports)'
 ACME_EMAIL='${ACME_EMAIL}'
 COOKIE_SECURE='false'
 LOG_LEVEL='INFO'

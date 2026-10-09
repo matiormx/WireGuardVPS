@@ -340,13 +340,26 @@ class TenantStats:
     hours: dict[int, list[int]] = field(default_factory=dict)  # hora -> [consultas, bloqueadas]
     top: Counter = field(default_factory=Counter)
     recent: deque = field(default_factory=lambda: deque(maxlen=50))
+    # Pendiente de guardar en el historial (lo recoge el monitor cada minuto).
+    pending: dict[int, list[int]] = field(default_factory=dict)
+    pending_top: Counter = field(default_factory=Counter)
+
+    def drain(self) -> tuple[dict[int, list[int]], Counter]:
+        out = (self.pending, self.pending_top)
+        self.pending, self.pending_top = {}, Counter()
+        return out
 
     def record(self, blocked: bool, domain: str, client: str) -> None:
         hour = int(time.time() // 3600)
         bucket = self.hours.setdefault(hour, [0, 0])
         bucket[0] += 1
+        pend = self.pending.setdefault(hour, [0, 0])
+        pend[0] += 1
         if blocked:
             bucket[1] += 1
+            pend[1] += 1
+            if len(self.pending_top) < 5000 or domain in self.pending_top:
+                self.pending_top[domain] += 1
             self.top[domain] += 1
             if len(self.top) > 2000:
                 self.top = Counter(dict(self.top.most_common(1000)))

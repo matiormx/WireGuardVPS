@@ -28,6 +28,7 @@ trap - ERR
 trap netns_cleanup EXIT   # tras el source, que define sus propios traps
 LIST=/etc/wireguard/wgp/tenants.list
 DNS_LIST=/etc/wireguard/wgp/dns.list
+FWD_LIST=/etc/wireguard/wgp/forwards.list
 PIDS=()
 
 for n in "${NS[@]}"; do ip netns add "$n"; ip -n "$n" link set lo up; done
@@ -74,6 +75,21 @@ udp_srv inet 8.8.8.8 internet
 ip netns exec inet python3 -c "
 import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('8.8.8.8', 853)); s.listen()
 while True: s.accept()[0].close()" & PIDS+=($!)
+# Reenvío de puertos: servicios que responden con la IP de origen que ven.
+tcp_srv() { ip netns exec "$1" python3 -c "
+import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('0.0.0.0', $2)); s.listen()
+while True:
+    c, a = s.accept(); c.sendall(('$3 ' + a[0]).encode()); c.close()" & PIDS+=($!); }
+udp_echo() { ip netns exec "$1" python3 -c "
+import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('0.0.0.0', $2))
+while True:
+    d, a = s.recvfrom(512); s.sendto(('$3 ' + a[0]).encode(), a)" & PIDS+=($!); }
+tcp_srv a1 80 web-a1
+tcp_srv a1 22 ssh-a1
+tcp_srv lan1 8000 nas-lan1
+udp_echo b1 7777 udp-b1
+printf '%s\n' "tcp 8080 10.252.1.2 80" "tcp 9090 192.168.88.10 8000" "udp 7000 10.252.2.2 7777" \
+    "tcp 22 10.252.1.2 22" "tcp 99999 10.252.1.2 80" "tcp 8081 10.252.1.2; iptables -F" "icmp 1 10.252.1.2 1" >"$FWD_LIST"
 sleep 1
 ip netns exec srv /usr/local/sbin/wgp-firewall up wg0
 ip netns exec srv /usr/local/sbin/wgp-firewall up wg0   # idempotente
@@ -111,6 +127,27 @@ check lan1 10.252.1.2 pass  "site-to-site: LAN del router -> dispositivo de su c
 check b1 192.168.88.10 block "site-to-site: otro cliente -> LAN ajena"
 check lan1 10.252.2.2 block "site-to-site: LAN -> dispositivo de otro cliente"
 
+fwd_check() { # fwd_check <tcp|udp> <puerto> <respuesta esperada|cerrado> <descripción>
+    local got
+    got=$(ip netns exec inet python3 -c "
+import socket, sys
+kind = socket.SOCK_STREAM if '$1' == 'tcp' else socket.SOCK_DGRAM
+s = socket.socket(socket.AF_INET, kind); s.settimeout(2)
+try:
+    s.connect(('198.51.100.1', $2))
+    if kind == socket.SOCK_DGRAM: s.send(b'hola')
+    print(s.recv(512).decode() or 'cerrado')
+except Exception: print('cerrado')")
+    if [[ "$got" == "$3" ]]; then echo "ok    inet -> :$2/$1 = $got  ($4)"; else echo "FALLO inet -> :$2/$1 = $got  ($4, esperado $3)"; fail=1; fi
+}
+fwd_check tcp 8080 "web-a1 10.252.0.1" "puerto TCP -> dispositivo (con SNAT al servidor)"
+fwd_check tcp 9090 "nas-lan1 10.252.0.1" "puerto TCP -> equipo de la LAN de un router"
+fwd_check udp 7000 "udp-b1 10.252.0.1" "puerto UDP -> dispositivo de otro cliente"
+fwd_check tcp 22   cerrado "puerto reservado (SSH del servidor) nunca se reenvía"
+fwd_check tcp 8081 cerrado "línea inválida ignorada"
+fwd_check tcp 80   cerrado "puerto no publicado"
+check inet 10.252.1.2 block "Internet -> cliente directo sigue bloqueado"
+
 dns_check a1 8.8.8.8 resolver "cliente con filtros: su DNS se redirige al resolver"
 dns_check a1 10.252.0.1 resolver "cliente con filtros: resolver directo"
 dns_check b1 8.8.8.8 internet "cliente sin filtros: DNS sin tocar"
@@ -118,12 +155,15 @@ dns_check b1 10.252.0.1 resolver "cliente sin filtros puede usar el resolver"
 dot_check a1 block "DNS-over-TLS bloqueado con filtros"
 dot_check b1 pass  "DNS-over-TLS permitido sin filtros"
 
-[[ $(ip netns exec srv iptables -S FORWARD | grep -c wg-manager) -eq 4 ]] || { echo "FALLO reglas duplicadas"; fail=1; }
+[[ $(ip netns exec srv iptables -S FORWARD | grep -c wg-manager) -eq 6 ]] || { echo "FALLO reglas duplicadas"; fail=1; }
 
 printf '10.252.2.0/24\n' >"$LIST"
+printf 'udp 7000 10.252.2.2 7777\n' >"$FWD_LIST"
 ip netns exec srv /usr/local/sbin/wgp-firewall sync
 check a1 10.252.1.3 block "cliente suspendido"
 check b1 8.8.8.8    pass  "otro cliente sigue con Internet"
+fwd_check tcp 8080 cerrado "puerto retirado"
+fwd_check udp 7000 "udp-b1 10.252.0.1" "los demás puertos siguen"
 
 ip netns exec srv /usr/local/sbin/wgp-firewall down wg0
 [[ $(ip netns exec srv iptables-save | grep -c wg-manager) -eq 0 ]] || { echo "FALLO down no limpió"; fail=1; }
