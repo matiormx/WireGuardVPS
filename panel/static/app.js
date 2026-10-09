@@ -7,7 +7,7 @@
 "use strict";
 
 const $app = document.getElementById("app");
-const state = { me: null, timer: null };
+const state = { me: null, timer: null, installPrompt: null };
 const REFRESH_MS = 10000;
 
 /* ------------------------------------------------------------------ iconos */
@@ -282,7 +282,9 @@ function shell(active) {
   const sidebar = h("aside", { class: "sidebar" },
     brand(),
     h("nav", { class: "nav" }, links.map(([key, href, ic, label]) =>
-      h("a", { href, class: key === active ? "active" : null, onClick: () => sidebar.classList.remove("open") }, icon(ic), label))),
+      h("a", { href, class: key === active ? "active" : null, onClick: () => sidebar.classList.remove("open") }, icon(ic), label)),
+      isStandalone() ? null : h("a", { href: "#", class: "install-link", onClick: (e) => { e.preventDefault(); sidebar.classList.remove("open"); installApp(); } },
+        icon("download"), "Instalar app")),
     h("div", { class: "spacer" }),
     h("div", { class: "userbox" },
       h("div", { class: "avatar", text: initials(state.me.name || state.me.username) }),
@@ -338,7 +340,9 @@ function loginView() {
     field("Contraseña", input({ name: "password", type: "password", required: true, autocomplete: "current-password" })),
     err, btn);
   fill($app, h("div", { class: "auth" },
-    h("div", { class: "auth-card" }, brand(), h("p", { class: "lead", text: "Accede a tu red privada" }), form)));
+    h("div", { class: "auth-card" }, brand(), h("p", { class: "lead", text: "Accede a tu red privada" }), form,
+      isStandalone() ? null : h("div", { style: { textAlign: "center", marginTop: "16px" } },
+        h("button", { class: "btn ghost sm", type: "button", onClick: installApp }, icon("download"), "Instalar app")))));
   setTimeout(() => form.querySelector("input").focus(), 30);
 }
 
@@ -385,8 +389,8 @@ function accountView(main) {
 }
 
 /* ------------------------------------------------------------------ admin: panel */
-function statCard(ic, label, value, hint) {
-  return h("div", { class: "card stat" },
+function statCard(ic, label, value, hint, wide = false) {
+  return h("div", { class: `card stat${wide ? " wide" : ""}` },
     h("div", { class: "label" }, icon(ic), label),
     h("div", { class: "value", text: value }),
     hint ? h("div", { class: "hint", text: hint }) : null);
@@ -408,13 +412,13 @@ async function dashboardView(main) {
       h("div", { class: "grid two" },
         h("div", { class: "card" },
           h("div", { class: "card-head" }, h("h2", { text: "Clientes con más tráfico" }), h("a", { href: "#/clients", class: "btn ghost sm" }, "Ver todos")),
-          o.top.length ? h("div", { class: "table-wrap" }, h("table", null,
+          o.top.length ? h("div", { class: "table-wrap" }, h("table", { class: "cards" },
             h("thead", null, h("tr", null, h("th", { text: "Cliente" }), h("th", { text: "Red" }), h("th", { text: "En línea" }), h("th", { text: "Tráfico" }))),
             h("tbody", null, o.top.map((t) => h("tr", { class: "link", onClick: () => go(`#/clients/${t.id}`) },
-              h("td", null, h("div", { class: "name", text: t.name }), h("div", { class: "meta", text: t.username })),
-              h("td", { class: "mono", text: t.network }),
-              h("td", null, `${t.online_count}/${t.device_count}`),
-              h("td", { text: fmtBytes(t.rx + t.tx) }))))))
+              h("td", { class: "primary" }, h("div", { class: "name", text: t.name }), h("div", { class: "meta", text: t.username })),
+              h("td", { class: "mono", "data-label": "Red", text: t.network }),
+              h("td", { "data-label": "En línea" }, `${t.online_count}/${t.device_count}`),
+              h("td", { "data-label": "Tráfico", text: fmtBytes(t.rx + t.tx) }))))))
             : h("div", { class: "empty" }, icon("users"), h("h2", { text: "Aún no hay clientes" }),
               h("p", { text: "Crea tu primer cliente para asignarle una red privada." }),
               h("button", { class: "btn primary", onClick: () => newTenantModal(() => render()) }, icon("plus"), "Nuevo cliente"))),
@@ -446,18 +450,18 @@ async function clientsView(main) {
       ? h("div", { class: "empty" }, icon("users"), h("h2", { text: "Sin clientes" }),
         h("p", { text: "Cada cliente recibe su propia red privada aislada." }),
         h("button", { class: "btn primary", onClick: () => newTenantModal(() => load()) }, icon("plus"), "Nuevo cliente"))
-      : h("div", { class: "table-wrap" }, h("table", null,
+      : h("div", { class: "table-wrap" }, h("table", { class: "cards" },
         h("thead", null, h("tr", null, h("th", { text: "Cliente" }), h("th", { text: "Red" }), h("th", { text: "Dispositivos" }),
           h("th", { class: "hide-sm", text: "En línea" }), h("th", { class: "hide-sm", text: "Tráfico" }), h("th", { text: "Estado" }))),
         h("tbody", null, rows.map((t) => h("tr", { class: "link", onClick: () => go(`#/clients/${t.id}`) },
-          h("td", null, h("div", { class: "cell-flex" }, h("div", { class: "avatar", text: initials(t.name) }),
+          h("td", { class: "primary" }, h("div", { class: "cell-flex" }, h("div", { class: "avatar", text: initials(t.name) }),
             h("div", null, h("div", { class: "name", text: t.name }), h("div", { class: "meta", text: t.username })))),
-          h("td", { class: "mono", text: t.network }),
-          h("td", null, h("div", { class: "meta", text: `${t.device_count} / ${t.max_devices}` }),
+          h("td", { class: "mono", "data-label": "Red", text: t.network }),
+          h("td", { "data-label": "Dispositivos" }, h("div", { class: "meta", text: `${t.device_count} / ${t.max_devices}` }),
             h("div", { class: "progress" }, h("span", { style: { width: `${Math.min(100, (100 * t.device_count) / t.max_devices)}%` } }))),
-          h("td", { class: "hide-sm" }, h("div", { class: "cell-flex" }, h("span", { class: `dot ${t.online_count ? "on" : ""}` }), String(t.online_count))),
-          h("td", { class: "hide-sm", text: fmtBytes(t.rx + t.tx) }),
-          h("td", null, h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : "Suspendido" })))))))
+          h("td", { class: "hide-sm", "data-label": "En línea" }, h("div", { class: "cell-flex" }, h("span", { class: `dot ${t.online_count ? "on" : ""}` }), String(t.online_count))),
+          h("td", { class: "hide-sm", "data-label": "Tráfico", text: fmtBytes(t.rx + t.tx) }),
+          h("td", { class: "aside" }, h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : "Suspendido" })))))))
     );
   };
   const load = async () => { tenants = await api("GET", "/api/admin/tenants"); draw(); };
@@ -531,10 +535,10 @@ async function clientDetailView(main, id) {
       ],
       [h("a", { href: "#/clients", text: "Clientes" }), " / ", t.name]),
       h("div", { class: "grid stats" },
-        statCard("network", "Red privada", t.network, `${t.device_count} de ${t.max_devices} dispositivos`),
+        statCard("network", "Red privada", t.network, `${t.device_count} de ${t.max_devices} dispositivos`, true),
         statCard("activity", "En línea", String(t.online_count), "dispositivos conectados"),
         statCard("arrows", "Tráfico", fmtBytes(t.rx + t.tx), `↓ ${fmtBytes(t.rx)} · ↑ ${fmtBytes(t.tx)}`),
-        statCard("users", "Usuario", t.username, `Alta: ${fmtDate(t.created_at)}`)),
+        statCard("users", "Usuario", t.username, `Alta: ${fmtDate(t.created_at)}`, true)),
       t.notes ? h("div", { class: "card" }, h("h3", { text: "Notas" }), h("p", { style: { margin: "8px 0 0", whiteSpace: "pre-wrap" }, text: t.notes })) : null,
       devicesCard(devices, { tenantId: t.id, max: t.max_devices, onChange: reload }),
     );
@@ -582,7 +586,7 @@ function devicesCard(devices, { tenantId, max, onChange }) {
       h("button", { class: "btn primary", disabled: full, title: full ? "Límite alcanzado" : null, onClick: () => newDeviceModal(tenantId, onChange) },
         icon("plus"), "Añadir dispositivo")),
     devices.length
-      ? h("div", { class: "table-wrap" }, h("table", null,
+      ? h("div", { class: "table-wrap" }, h("table", { class: "cards" },
         h("thead", null, h("tr", null, h("th", { text: "Dispositivo" }), h("th", { text: "IP" }), h("th", { class: "hide-sm", text: "Último contacto" }),
           h("th", { class: "hide-sm", text: "Tráfico" }), h("th", { class: "hide-sm", text: "Modo" }), h("th"))),
         h("tbody", null, devices.map((d) => deviceRow(d, onChange)))))
@@ -593,13 +597,13 @@ function devicesCard(devices, { tenantId, max, onChange }) {
 function deviceRow(d, onChange) {
   const status = !d.enabled ? ["dis", "Deshabilitado"] : d.online ? ["on", "En línea"] : ["", "Desconectado"];
   return h("tr", null,
-    h("td", null, h("div", { class: "cell-flex" }, h("span", { class: `dot ${status[0]}`, title: status[1] }),
+    h("td", { class: "primary" }, h("div", { class: "cell-flex" }, h("span", { class: `dot ${status[0]}`, title: status[1] }),
       h("div", null, h("div", { class: "name", text: d.name }), h("div", { class: "meta", text: d.endpoint ? `${status[1]} · ${d.endpoint}` : status[1] })))),
-    h("td", { class: "mono", text: d.ip }),
-    h("td", { class: "hide-sm", text: ago(d.last_handshake) }),
-    h("td", { class: "hide-sm", text: `↓ ${fmtBytes(d.tx)} · ↑ ${fmtBytes(d.rx)}` }),
-    h("td", { class: "hide-sm" }, h("span", { class: `badge ${d.full_tunnel ? "accent" : ""}` }, icon(d.full_tunnel ? "globe" : "network"), d.full_tunnel ? "Todo el tráfico" : "Solo red privada")),
-    h("td", { class: "actions" },
+    h("td", { class: "mono", "data-label": "IP", text: d.ip }),
+    h("td", { class: "hide-sm", "data-label": "Último contacto", text: ago(d.last_handshake) }),
+    h("td", { class: "hide-sm", "data-label": "Tráfico", text: `↓ ${fmtBytes(d.tx)} · ↑ ${fmtBytes(d.rx)}` }),
+    h("td", { class: "hide-sm", "data-label": "Modo" }, h("span", { class: `badge ${d.full_tunnel ? "accent" : ""}` }, icon(d.full_tunnel ? "globe" : "network"), d.full_tunnel ? "Todo el tráfico" : "Solo red privada")),
+    h("td", { class: "actions aside" },
       h("button", { class: "btn ghost icon", title: "Configuración y QR", onClick: () => deviceConfigModal(d) }, icon("qr")),
       h("button", { class: "btn ghost icon", title: "Editar", onClick: () => editDeviceModal(d, onChange) }, icon("edit")),
       h("button", { class: "btn ghost icon", title: d.enabled ? "Deshabilitar" : "Habilitar", onClick: async () => {
@@ -706,6 +710,64 @@ async function tenantHomeView(main) {
   };
   await load();
   every(load);
+}
+
+/* ------------------------------------------------------------------ PWA y móvil */
+// iOS Safari ignora user-scalable=no: se bloquean a mano el pellizco y el zoom
+// por gestos. El doble toque lo desactiva touch-action: manipulation (CSS).
+for (const type of ["gesturestart", "gesturechange", "gestureend"]) {
+  document.addEventListener(type, (e) => e.preventDefault(), { passive: false });
+}
+document.addEventListener("touchmove", (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
+
+function isStandalone() {
+  return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+}
+function isIOS() {
+  return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault(); // se muestra con nuestro botón «Instalar app»
+  state.installPrompt = e;
+});
+window.addEventListener("appinstalled", () => {
+  state.installPrompt = null;
+  toast("Aplicación instalada");
+});
+
+async function installApp() {
+  if (state.installPrompt) {
+    state.installPrompt.prompt();
+    await state.installPrompt.userChoice.catch(() => null);
+    state.installPrompt = null;
+    return;
+  }
+  const steps = isIOS()
+    ? [h("p", { style: { margin: 0 }, text: "En Safari:" }),
+      h("ol", { style: { margin: 0, paddingLeft: "20px", lineHeight: 1.9 } },
+        h("li", null, "Toca el botón ", h("b", { text: "Compartir" }), " (el cuadrado con la flecha)."),
+        h("li", null, "Elige ", h("b", { text: "Añadir a pantalla de inicio" }), "."),
+        h("li", null, "Pulsa ", h("b", { text: "Añadir" }), ": se abrirá a pantalla completa como una app."))]
+    : !window.isSecureContext
+      ? [h("p", { style: { margin: 0 }, text: "Chrome y Android solo permiten instalar aplicaciones servidas por HTTPS." }),
+        h("p", { class: "note", style: { margin: 0 } }, "Configura un dominio para el panel con ", h("code", { text: "PANEL_DOMAIN" }),
+          " en /etc/wg-manager.conf y ejecuta ", h("code", { text: "wg-manager update" }), ": se obtendrá un certificado gratuito automáticamente.")]
+      : [h("p", { style: { margin: 0 } }, "Abre el menú del navegador (⋮) y elige ", h("b", { text: "Instalar aplicación" }), " o ", h("b", { text: "Añadir a pantalla de inicio" }), ".")];
+  const m = modal({ title: "Instalar WireGuard Cloud", body: steps,
+    actions: [h("button", { class: "btn primary", onClick: () => m.close() }, "Entendido")] });
+}
+
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  const hadController = Boolean(navigator.serviceWorker.controller);
+  let reloading = false;
+  // Nueva versión desplegada: el SW nuevo toma el control y se recarga una vez.
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (!hadController || reloading) return;
+    reloading = true;
+    location.reload();
+  });
+  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
 }
 
 /* ------------------------------------------------------------------ arranque */

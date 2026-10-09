@@ -217,7 +217,7 @@ table { width: 100%; border-collapse: collapse; }
 th, td { padding: 12px 20px; text-align: left; border-top: 1px solid var(--border); vertical-align: middle; }
 th { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; border-top: 0; }
 tbody tr { transition: background .1s; }
-tbody tr:hover { background: var(--surface-2); }
+@media (hover: hover) { tbody tr:hover { background: var(--surface-2); } }
 tr.link { cursor: pointer; }
 td .name { font-weight: 600; }
 td .meta { color: var(--muted); font-size: 12.5px; }
@@ -316,4 +316,84 @@ pre.conf {
   .hide-sm { display: none; }
   th, td { padding: 10px 14px; }
   .table-wrap { margin: 0 -20px -20px; }
+}
+
+/* ==========================================================================
+   Móvil / PWA
+   ========================================================================== */
+/* Sin zoom: doble toque desactivado y sin ajuste automático de texto. */
+html { touch-action: manipulation; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { overscroll-behavior-y: none; -webkit-tap-highlight-color: transparent; }
+/* Los hijos de un grid tienen min-width:auto: una tabla ancha estiraba toda la
+   página (y el navegador hacía zoom-out). min-width:0 deja que se encojan. */
+.layout > div, .main { min-width: 0; }
+body { overflow-x: clip; } /* clip: no crea un contenedor de scroll (hidden sí) */
+
+/* Zonas seguras (notch, barra de inicio) con viewport-fit=cover. */
+.sidebar { padding-top: max(22px, env(safe-area-inset-top)); padding-bottom: max(22px, env(safe-area-inset-bottom)); }
+#toasts { right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom)); }
+.auth { padding-top: max(24px, env(safe-area-inset-top)); padding-bottom: max(24px, env(safe-area-inset-bottom)); }
+
+@media (max-width: 760px) {
+  /* iOS hace zoom al enfocar campos con letra < 16px. */
+  .input, select.input, textarea.input { font-size: 16px; }
+  .topbar {
+    padding-top: max(12px, env(safe-area-inset-top));
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+  }
+  .main {
+    padding-left: max(16px, env(safe-area-inset-left));
+    padding-right: max(16px, env(safe-area-inset-right));
+    padding-bottom: max(50px, calc(env(safe-area-inset-bottom) + 30px));
+  }
+  .card { padding: 16px; overflow: hidden; }
+  tr.link:active { background: var(--surface-2); }
+  .page-head { align-items: stretch; }
+  .page-head > .cell-flex { width: 100%; flex-wrap: wrap; }
+  .page-head > .cell-flex > .search { flex: 1 1 100%; }
+  .page-head > .cell-flex > .btn.primary { flex: 1; }
+  .stats { gap: 12px; }
+  .stat .value { font-size: 22px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stat.wide { grid-column: 1 / -1; }
+  .card > .table-wrap:first-child,
+  .card > div:only-child > .table-wrap:only-child { margin-top: -16px; }
+  .card > div:only-child > .table-wrap:only-child tbody tr:first-child,
+  .card > .table-wrap:first-child tbody tr:first-child { border-top: 0; }
+  .modal { border-radius: 18px 18px 0 0; max-height: calc(100vh - 24px); }
+  .overlay { place-items: end center; padding: 12px 0 0; }
+  .modal-body, .modal-head, .modal-foot { padding-left: 18px; padding-right: 18px; }
+  .modal-foot { padding-bottom: max(18px, env(safe-area-inset-bottom)); }
+  .modal-foot .btn { flex: 1; }
+  #toasts { left: 16px; right: 16px; }
+  .toast { min-width: 0; max-width: none; }
+
+  /* Tablas -> tarjetas apiladas. */
+  .table-wrap { margin: 0 -16px -16px; overflow: visible; }
+  table.cards thead { display: none; }
+  table.cards, table.cards tbody { display: block; }
+  table.cards tr {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px;
+    padding: 14px 16px; border-top: 1px solid var(--border);
+  }
+  table.cards td {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 0; border: 0; grid-column: 1 / -1; min-width: 0;
+  }
+  table.cards td[data-label]::before { content: attr(data-label); color: var(--muted); font: 12.5px var(--font); }
+  table.cards td.primary { grid-column: 1; grid-row: 1; justify-content: flex-start; min-width: 0; }
+  table.cards td.aside { grid-column: 2; grid-row: 1; justify-content: flex-end; }
+  table.cards td.primary .cell-flex, table.cards td.primary .cell-flex > div { min-width: 0; }
+  table.cards td.primary .name, table.cards td.primary .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  table.cards td .progress { flex: 0 0 90px; }
+  table.cards td:has(> .meta + .progress) { justify-content: flex-start; }
+  table.cards td:has(> .meta + .progress)::before { margin-right: auto; }
+  table.cards .hide-sm { display: flex; }
+  table.cards td.actions .btn.icon { width: 36px; height: 36px; }
+}
+
+/* App instalada (PWA): sin barra del navegador, la cabecera hace de barra de estado. */
+@media (display-mode: standalone) {
+  body { user-select: none; -webkit-user-select: none; }
+  input, textarea, pre, .mono, .kv dd { user-select: text; -webkit-user-select: text; }
 }

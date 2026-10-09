@@ -25,7 +25,9 @@ curl -fsSL https://raw.githubusercontent.com/matiormx/WireGuardVps/main/install.
 |---|---|---|
 | `ADMIN_USER` / `ADMIN_PASS` | `admin` / `admin` | Credenciales iniciales del administrador |
 | `PUBLIC_ENDPOINT` | autodetectada | IP o dominio que usarán los dispositivos |
-| `PANEL_PORT` | `5000` | Puerto del panel web |
+| `PANEL_DOMAIN` | — | Dominio del panel: activa HTTPS automático (Let's Encrypt) y lo hace instalable como app |
+| `ACME_EMAIL` | — | Email opcional para avisos de Let's Encrypt |
+| `PANEL_PORT` | `5000` | Puerto del panel web (sin dominio) |
 | `WG_PORT` | `51820` | Puerto UDP de WireGuard |
 | `WG_SUBNET` | `10.252.0.0/16` | Bloque global (una /24 por cliente) |
 | `WG_DNS` | `1.1.1.1, 1.0.0.1` | DNS para dispositivos en modo «todo el tráfico» |
@@ -33,6 +35,20 @@ curl -fsSL https://raw.githubusercontent.com/matiormx/WireGuardVps/main/install.
 | `WG_BRANCH` | `main` | Rama del repositorio a instalar |
 
 Requisitos: systemd, kernel ≥ 5.6 (WireGuard integrado) y acceso root. En VPS LXC/OpenVZ el proveedor debe habilitar WireGuard y Docker.
+
+## HTTPS y app instalable (PWA)
+
+El panel se puede instalar como app en el móvil y en el ordenador: icono propio, pantalla completa y sin zoom. El acceso «Instalar app» está en el menú y en la pantalla de login.
+
+- **iPhone/iPad:** funciona también por HTTP. En Safari: Compartir → *Añadir a pantalla de inicio*.
+- **Android/Chrome/Edge:** exigen **HTTPS**. Apunta un dominio (registro A) a la IP del VPS y ejecuta:
+
+```bash
+echo 'PANEL_DOMAIN="vpn.midominio.com"' | sudo tee -a /etc/wg-manager.conf
+sudo wg-manager update
+```
+
+Esto despliega Caddy con un certificado gratuito que se renueva solo. El panel queda en `https://vpn.midominio.com`: abre los puertos 80 y 443 y cierra el 5000.
 
 ## Cómo funciona
 
@@ -87,4 +103,4 @@ sudo tests/firewall_netns_test.sh                     # firewall con tráfico re
 
 Para publicar una versión nueva del script, sube `readonly VERSION="x.y.z"` en `wg-manager.sh`; `wg-manager update` solo lo sustituye si la versión remota es mayor.
 
-> ⚠️ El panel se sirve por HTTP. Ponle delante un proxy con TLS (Caddy, Nginx) o limita el acceso: `ufw delete allow 5000/tcp && ufw allow from <tu-IP> to any port 5000`.
+> ⚠️ Sin `PANEL_DOMAIN` el panel se sirve por HTTP en el puerto 5000. Configura un dominio (arriba) o limita el acceso: `ufw delete allow 5000/tcp && ufw allow from <tu-IP> to any port 5000`.

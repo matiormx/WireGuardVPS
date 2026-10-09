@@ -1,5 +1,6 @@
 """API HTTP y servidor de la SPA del panel WireGuard Multi-Tenant."""
 
+import hashlib
 import io
 import logging
 import re
@@ -21,6 +22,16 @@ from .config import Settings, load_settings
 from .db import Database, get_setting, username_taken
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+
+def _static_version() -> str:
+    """Hash de los estáticos: versión del service worker (cambia en cada despliegue)."""
+    digest = hashlib.sha256()
+    for path in sorted(STATIC_DIR.rglob("*")):
+        if path.is_file():
+            digest.update(path.relative_to(STATIC_DIR).as_posix().encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
 log = logging.getLogger("wgp")
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -141,7 +152,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
-            "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            "frame-ancestors 'none'; base-uri 'none'; form-action 'self'; "
+            "manifest-src 'self'; worker-src 'self'",
         )
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -447,9 +459,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True}
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    sw_source = (STATIC_DIR / "sw.js").read_text().replace("__VERSION__", _static_version())
 
     @app.get("/", include_in_schema=False)
     def index():
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+    # PWA: el service worker y el manifest se sirven desde la raíz para que su
+    # ámbito (scope) cubra toda la aplicación.
+    @app.get("/sw.js", include_in_schema=False)
+    def service_worker():
+        return Response(sw_source, media_type="text/javascript",
+                        headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
+
+    @app.get("/manifest.webmanifest", include_in_schema=False)
+    def manifest():
+        return FileResponse(STATIC_DIR / "manifest.webmanifest", media_type="application/manifest+json",
+                            headers={"Cache-Control": "no-cache"})
 
     return app

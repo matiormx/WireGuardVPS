@@ -31,7 +31,7 @@ set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 # -----------------------------------------------------------------------------
 # VERSIÓN DEL SCRIPT (se compara con la publicada en GitHub). SemVer.
 # -----------------------------------------------------------------------------
-readonly VERSION="2.0.0"
+readonly VERSION="2.1.0"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
@@ -62,6 +62,8 @@ fi
 : "${PANEL_PORT:=${WGUI_PORT:-5000}}"
 : "${ADMIN_USER:=${WGUI_ADMIN_USER:-admin}}"
 : "${ADMIN_PASS:=${WGUI_ADMIN_PASS:-admin}}"   # se obliga a cambiarla en el primer login
+: "${PANEL_DOMAIN:=}"                          # p. ej. vpn.midominio.com -> HTTPS automático (Caddy)
+: "${ACME_EMAIL:=}"                            # opcional: avisos de Let's Encrypt
 
 # --- WireGuard ----------------------------------------------------------------
 : "${WG_INTERFACE:=wg0}"
@@ -363,9 +365,20 @@ setup_ufw() {
         info "Permitido SSH en ${p}/tcp (anti-bloqueo)."
     done
     ufw allow "${WG_PORT}/udp" comment 'WireGuard' >/dev/null
-    ufw allow "${PANEL_PORT}/tcp" comment 'WireGuard panel' >/dev/null
-    ufw --force enable >/dev/null
-    success "UFW activo: SSH, ${WG_PORT}/udp y ${PANEL_PORT}/tcp permitidos."
+    if [[ -n "${PANEL_DOMAIN}" ]]; then
+        # Con dominio el panel sólo se publica por HTTPS (Caddy) y el puerto HTTP
+        # directo se cierra. 80/tcp hace falta para emitir y renovar el certificado.
+        ufw allow 80/tcp comment 'HTTP (ACME)' >/dev/null
+        ufw allow 443/tcp comment 'HTTPS panel' >/dev/null
+        ufw allow 443/udp comment 'HTTP/3 panel' >/dev/null
+        ufw delete allow "${PANEL_PORT}/tcp" >/dev/null 2>&1 || true
+        ufw --force enable >/dev/null
+        success "UFW activo: SSH, ${WG_PORT}/udp, 80/tcp y 443 permitidos (${PANEL_PORT}/tcp cerrado)."
+    else
+        ufw allow "${PANEL_PORT}/tcp" comment 'WireGuard panel' >/dev/null
+        ufw --force enable >/dev/null
+        success "UFW activo: SSH, ${WG_PORT}/udp y ${PANEL_PORT}/tcp permitidos."
+    fi
 }
 
 # =============================================================================
@@ -582,12 +595,22 @@ deploy_panel() {
     session_secret="$(env_value SESSION_SECRET)"
     [[ -n "${session_secret}" ]] || session_secret="$(random_secret)"
 
+    # Con dominio: el panel escucha sólo en localhost detrás de Caddy (HTTPS),
+    # las cookies se marcan Secure y se confía en X-Forwarded-For de 127.0.0.1
+    # para que el límite de intentos de login siga siendo por IP real.
+    local bind="${PANEL_BIND}" secure="false" trust_proxy="false"
+    if [[ -n "${PANEL_DOMAIN}" ]]; then
+        bind="127.0.0.1" secure="true" trust_proxy="true"
+        check_domain_dns "${endpoint}"
+    fi
+
     umask 077
     cat >"${ENV_FILE}" <<EOF
 # Generado por wg-manager ${VERSION}. Para cambiar valores edite ${CONFIG_FILE}
 # y ejecute: wg-manager update
-PANEL_BIND='${PANEL_BIND}'
+PANEL_BIND='${bind}'
 PANEL_PORT='${PANEL_PORT}'
+TRUST_PROXY='${trust_proxy}'
 SESSION_SECRET='${session_secret}'
 ADMIN_USER='${ADMIN_USER}'
 ADMIN_PASSWORD='${ADMIN_PASS}'
@@ -603,7 +626,7 @@ WG_DNS='${WG_DNS}'
 WG_MTU='${WG_MTU}'
 WG_KEEPALIVE='${WG_KEEPALIVE}'
 FIREWALL_HOOK='${FIREWALL_BIN}'
-COOKIE_SECURE='false'
+COOKIE_SECURE='${secure}'
 LOG_LEVEL='INFO'
 EOF
     umask 022
@@ -635,14 +658,74 @@ services:
         max-size: "10m"
         max-file: "3"
 EOF
+    if [[ -n "${PANEL_DOMAIN}" ]]; then
+        write_caddy_config
+        cat >>"${COMPOSE_FILE}" <<EOF
+
+  # Proxy HTTPS con certificado automático de Let's Encrypt (renovación incluida).
+  caddy:
+    image: caddy:2-alpine
+    container_name: wgp-caddy
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+EOF
+    fi
 
     compose config -q
     info "Construyendo la imagen del panel (puede tardar un par de minutos)..."
     compose build --pull -q
+    [[ -z "${PANEL_DOMAIN}" ]] || compose pull -q caddy
     # --remove-orphans retira el contenedor wireguard-ui de la v1 (mismo proyecto).
     compose up -d --remove-orphans
     wait_for_panel || die "El panel no responde en el puerto ${PANEL_PORT}. Ver: docker logs ${CONTAINER}"
     success "Panel en ejecución."
+    if [[ -n "${PANEL_DOMAIN}" ]]; then
+        local _
+        for _ in $(seq 1 45); do
+            curl -fsS -o /dev/null --max-time 5 "https://${PANEL_DOMAIN}/healthz" 2>/dev/null && break
+            sleep 2
+        done
+        if curl -fsS -o /dev/null --max-time 5 "https://${PANEL_DOMAIN}/healthz" 2>/dev/null; then
+            success "HTTPS activo: https://${PANEL_DOMAIN}"
+        else
+            warn "HTTPS aún no responde. Compruebe que ${PANEL_DOMAIN} apunta a este servidor y vea: docker logs wgp-caddy"
+        fi
+    fi
+}
+
+check_domain_dns() {
+    local expected=$1 resolved
+    resolved="$(getent ahostsv4 "${PANEL_DOMAIN}" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+    if [[ -z "${resolved}" ]]; then
+        warn "${PANEL_DOMAIN} no resuelve todavía. Cree un registro A hacia ${expected}; Caddy reintentará el certificado."
+    elif is_ipv4 "${expected}" && [[ "${resolved}" != "${expected}" ]]; then
+        warn "${PANEL_DOMAIN} apunta a ${resolved}, no a ${expected}. El certificado no se emitirá hasta corregirlo."
+    else
+        info "DNS correcto: ${PANEL_DOMAIN} -> ${resolved}"
+    fi
+}
+
+write_caddy_config() {
+    install -d -m 0755 "${PLATFORM_DIR}/caddy" "${PLATFORM_DIR}/caddy/data" "${PLATFORM_DIR}/caddy/config"
+    {
+        if [[ -n "${ACME_EMAIL}" ]]; then
+            printf '{\n\temail %s\n}\n\n' "${ACME_EMAIL}"
+        fi
+        printf '%s {\n' "${PANEL_DOMAIN}"
+        printf '\tencode zstd gzip\n'
+        printf '\theader Strict-Transport-Security "max-age=31536000"\n'
+        printf '\treverse_proxy 127.0.0.1:%s\n' "${PANEL_PORT}"
+        printf '}\n'
+    } >"${PLATFORM_DIR}/caddy/Caddyfile"
 }
 
 # =============================================================================
@@ -697,6 +780,8 @@ REPO_URL="${REPO_URL}"
 BRANCH="${BRANCH}"
 PANEL_BIND="${PANEL_BIND}"
 PANEL_PORT="${PANEL_PORT}"
+PANEL_DOMAIN="${PANEL_DOMAIN}"
+ACME_EMAIL="${ACME_EMAIL}"
 WG_SUBNET="${WG_SUBNET}"
 WG_SERVER_ADDRESS="${WG_SERVER_ADDRESS}"
 TENANT_PREFIX="${TENANT_PREFIX}"
@@ -709,6 +794,15 @@ EOF
         chmod 600 "${CONFIG_FILE}"
         info "Configuración persistida en ${CONFIG_FILE}."
     fi
+    # Claves añadidas en versiones posteriores: se guardan si se pasaron por
+    # entorno (p. ej. sudo PANEL_DOMAIN=vpn.ejemplo.com wg-manager update).
+    local key
+    for key in PANEL_DOMAIN ACME_EMAIL; do
+        if [[ -n "${!key}" ]] && ! grep -q "^${key}=" "${CONFIG_FILE}"; then
+            printf '%s="%s"\n' "${key}" "${!key}" >>"${CONFIG_FILE}"
+            info "${key} guardado en ${CONFIG_FILE}."
+        fi
+    done
     if [[ -n "${SCRIPT_PATH}" && "${SCRIPT_PATH}" != "${INSTALL_BIN}" ]]; then
         install -m 0755 "${SCRIPT_PATH}" "${INSTALL_BIN}"
         info "Script instalado en ${INSTALL_BIN}."
@@ -820,6 +914,7 @@ cmd_update() {
         deploy_panel
     fi
     start_wireguard
+    persist_installation
     print_summary
 }
 
@@ -856,7 +951,11 @@ print_summary() {
     printf '\n%s%s════════════════════════════════════════════════════════════%s\n' "${C_GREEN}" "${C_BOLD}" "${C_RESET}"
     printf '%s  Plataforma WireGuard Multi-Tenant operativa (v%s)%s\n' "${C_GREEN}${C_BOLD}" "${VERSION}" "${C_RESET}"
     printf '%s%s════════════════════════════════════════════════════════════%s\n' "${C_GREEN}" "${C_BOLD}" "${C_RESET}"
-    printf '  Panel web       : %shttp://%s:%s%s\n' "${C_CYAN}" "${ip}" "${PANEL_PORT}" "${C_RESET}"
+    if [[ -n "${PANEL_DOMAIN}" ]]; then
+        printf '  Panel web       : %shttps://%s%s  (instalable como app)\n' "${C_CYAN}" "${PANEL_DOMAIN}" "${C_RESET}"
+    else
+        printf '  Panel web       : %shttp://%s:%s%s\n' "${C_CYAN}" "${ip}" "${PANEL_PORT}" "${C_RESET}"
+    fi
     printf '  Endpoint WG     : %s:%s/udp\n' "${ip}" "${WG_PORT}"
     printf '  Subred          : %s (una /%s por cliente; servidor %s)\n' "${WG_SUBNET}" "${TENANT_PREFIX}" "${WG_SERVER_ADDRESS}"
     printf '  Aislamiento     : LAN privada por cliente; tráfico entre clientes BLOQUEADO\n'
@@ -864,7 +963,12 @@ print_summary() {
     printf '  Actualizar      : %s update\n' "${INSTALL_BIN}"
     printf '\n%s  ⚠  Acceso inicial: %s / (contraseña de instalación, por defecto "admin")%s\n' "${C_YELLOW}${C_BOLD}" "${ADMIN_USER}" "${C_RESET}"
     printf '%s     El panel obliga a cambiarla en el primer inicio de sesión.%s\n' "${C_YELLOW}" "${C_RESET}"
-    printf '%s     Se sirve por HTTP: use un proxy TLS o limite %s/tcp a IPs de confianza.%s\n\n' "${C_YELLOW}" "${PANEL_PORT}" "${C_RESET}"
+    if [[ -z "${PANEL_DOMAIN}" ]]; then
+        printf '%s     Se sirve por HTTP: defina PANEL_DOMAIN en %s para HTTPS automático%s\n' "${C_YELLOW}" "${CONFIG_FILE}" "${C_RESET}"
+        printf '%s     (necesario para instalar la app en Android/Chrome).%s\n\n' "${C_YELLOW}" "${C_RESET}"
+    else
+        printf '\n'
+    fi
 }
 
 usage() {

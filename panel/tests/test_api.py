@@ -170,3 +170,19 @@ def test_keys_are_valid_curve25519(env):
     priv, pub = wg.generate_keypair()
     import base64
     assert len(base64.b64decode(priv)) == 32 and len(base64.b64decode(pub)) == 32
+
+
+def test_pwa_assets(client):
+    m = client.get("/manifest.webmanifest")
+    assert m.status_code == 200 and m.headers["content-type"].startswith("application/manifest+json")
+    data = m.json()
+    assert data["display"] == "standalone"
+    assert any(i["purpose"] == "maskable" for i in data["icons"])
+    for icon in data["icons"]:
+        assert client.get(icon["src"]).status_code == 200
+    sw = client.get("/sw.js")
+    assert sw.status_code == 200 and "javascript" in sw.headers["content-type"]
+    assert "__VERSION__" not in sw.text and "wgp-" in sw.text
+    assert sw.headers["service-worker-allowed"] == "/"
+    html = client.get("/").text
+    assert 'user-scalable=no' in html and 'rel="manifest"' in html and "apple-touch-icon" in html
