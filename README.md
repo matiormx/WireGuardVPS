@@ -38,6 +38,16 @@ curl -fsSL https://raw.githubusercontent.com/matiormx/WireGuardVps/main/install.
 
 Requisitos: systemd, kernel ≥ 5.6 (WireGuard integrado) y acceso root. En VPS LXC/OpenVZ el proveedor debe habilitar WireGuard y Docker.
 
+## Inicio de sesión biométrico (passkeys)
+
+Admin y clientes pueden entrar con **Face ID, Touch ID, la huella de Android o Windows Hello**:
+
+- Tras entrar con la contraseña se sugiere activarlo en ese dispositivo. Si se pulsa «Ahora no», no se vuelve a sugerir en 30 días.
+- En el login hay un botón **Entrar con llave biométrica**, sin escribir usuario ni contraseña.
+- En **Cuenta → Inicio de sesión biométrico** se ven y se eliminan las llaves de cada dispositivo.
+
+Usa el estándar WebAuthn: la biometría nunca sale del dispositivo y el servidor solo guarda una clave pública. Cada llave queda ligada al dominio en el que se creó, así que **requiere abrir el panel con su dominio y HTTPS** (*Ajustes → Dominio del panel*). Un cliente suspendido no puede entrar ni con su llave, y al eliminar un cliente se borran sus llaves.
+
 ## DNS propio de cada cliente
 
 Cada cliente tiene su propio DNS en `10.252.0.1`, que los dispositivos usan automáticamente:

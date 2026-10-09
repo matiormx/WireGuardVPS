@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import dnsfilter, domains, security, wg
+from . import dnsfilter, domains, passkeys, security, wg
 from .config import Settings, load_settings
 from .db import (LABEL_RE, Database, get_setting, make_hostname, name_in_use, set_setting,
                  unique_hostname, username_taken)
@@ -156,6 +156,17 @@ class SuffixesIn(BaseModel):
     suffixes: list[str] = Field(default_factory=list, max_length=5)
 
 
+class PasskeyRegisterIn(BaseModel):
+    state: str = Field(max_length=64)
+    credential: dict
+    name: str = Field(default="", max_length=60)
+
+
+class PasskeyLoginIn(BaseModel):
+    state: str = Field(max_length=64)
+    credential: dict
+
+
 class SettingsIn(BaseModel):
     main_domain: str | None = Field(default=None, max_length=253)
     force_https: bool = False
@@ -197,6 +208,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     limiter = security.RateLimiter(limit=10, window=300)
     dns = dnsfilter.DnsFilter(settings, database)
     doms = domains.Domains(settings, database)
+    keys = passkeys.Passkeys()
     doms.seed_from_env(settings.panel_domain)
 
     @asynccontextmanager
@@ -359,13 +371,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not row or not security.verify_password(body.password, row["password_hash"]):
             limiter.hit(key)
             raise HTTPException(401, "Usuario o contraseña incorrectos")
+        limiter.reset(key)
+        return finish_login(request, response, c, role, row)
+
+    def finish_login(request: Request, response: Response, c: sqlite3.Connection, role: str, row: sqlite3.Row) -> dict:
+        """Comprobaciones comunes a contraseña y llave biométrica, y apertura de sesión."""
         if role == "tenant" and not row["enabled"]:
             raise HTTPException(403, "Cuenta deshabilitada. Contacte con su proveedor.")
         # En el dominio propio de un cliente sólo puede entrar ese cliente.
         owner = doms.tenant_for_host(c, domains.host_of(request.headers.get("host")))
         if owner is not None and not (role == "tenant" and row["id"] == owner["id"]):
             raise HTTPException(403, "Esta cuenta no puede acceder desde este dominio")
-        limiter.reset(key)
         set_session(request, response, role, row["id"], row["password_hash"])
         return {"role": role, "must_change": bool(row["must_change"])}
 
@@ -475,6 +491,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def delete_tenant(tenant_id: int, _: Admin, c: Conn):
         tenant_or_404(c, tenant_id)
         c.execute("DELETE FROM tenants WHERE id = ?", (tenant_id,))
+        c.execute("DELETE FROM passkeys WHERE role = 'tenant' AND user_id = ?", (tenant_id,))
         c.commit()
         apply_wg()
         return {"ok": True}
@@ -621,6 +638,74 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         c.commit()
         apply_wg()
         return filters_json(c, tid)
+
+    # ------------------------------------------------------------------ llaves biométricas (passkeys)
+    def rp_or_400(request: Request) -> passkeys.RelyingParty:
+        try:
+            return passkeys.relying_party(request)
+        except passkeys.PasskeyError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/passkeys")
+    def list_passkeys(request: Request, p: User, c: Conn):
+        try:
+            current = passkeys.relying_party(request).rp_id
+        except passkeys.PasskeyError:
+            current = None
+        rows = c.execute("SELECT id, name, rp_id, created_at, last_used_at FROM passkeys WHERE role = ? AND user_id = ?"
+                         " ORDER BY created_at", (p.role, p.id)).fetchall()
+        return {"available": current is not None, "rp_id": current,
+                "passkeys": [dict(r) | {"current": r["rp_id"] == current} for r in rows]}
+
+    @app.post("/api/passkeys/register/options")
+    def passkey_register_options(request: Request, p: User, c: Conn):
+        rp = rp_or_400(request)
+        try:
+            state, options = keys.registration_options(c, rp, branding_for(c, request)["title"], p.role, p.id,
+                                                       p.username, p.name or p.username)
+        except passkeys.PasskeyError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"state": state, "options": json.loads(options)}
+
+    @app.post("/api/passkeys/register/verify", status_code=201)
+    def passkey_register_verify(body: PasskeyRegisterIn, request: Request, p: User, c: Conn):
+        rp = rp_or_400(request)
+        try:
+            keys.register(c, rp, body.state, body.credential, p.role, p.id, body.name.strip())
+        except passkeys.PasskeyError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return list_passkeys(request, p, c)
+
+    @app.delete("/api/passkeys/{passkey_id}")
+    def delete_passkey(passkey_id: int, request: Request, p: User, c: Conn):
+        cur = c.execute("DELETE FROM passkeys WHERE id = ? AND role = ? AND user_id = ?", (passkey_id, p.role, p.id))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Llave no encontrada")
+        return list_passkeys(request, p, c)
+
+    @app.post("/api/passkeys/login/options")
+    def passkey_login_options(request: Request):
+        state, options = keys.authentication_options(rp_or_400(request))
+        return {"state": state, "options": json.loads(options)}
+
+    @app.post("/api/passkeys/login/verify")
+    def passkey_login_verify(body: PasskeyLoginIn, request: Request, response: Response, c: Conn):
+        key = request.client.host if request.client else "unknown"
+        if limiter.blocked(key):
+            raise HTTPException(429, "Demasiados intentos. Espere unos minutos.")
+        rp = rp_or_400(request)
+        try:
+            pk = keys.authenticate(c, rp, body.state, body.credential)
+        except passkeys.PasskeyError as exc:
+            limiter.hit(key)
+            raise HTTPException(401, str(exc)) from exc
+        table = "admins" if pk["role"] == "admin" else "tenants"
+        row = c.execute(f"SELECT * FROM {table} WHERE id = ?", (pk["user_id"],)).fetchone()
+        if row is None:
+            raise HTTPException(401, "La cuenta de esta llave ya no existe")
+        limiter.reset(key)
+        c.commit()  # contador de firmas y último uso
+        return finish_login(request, response, c, pk["role"], row)
 
     # ------------------------------------------------------------------ DNS propio de cada cliente
     def zone_json(c: sqlite3.Connection, tenant_id: int) -> dict:

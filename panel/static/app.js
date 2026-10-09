@@ -43,6 +43,7 @@ const ICONS = {
   heart: '<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8z"/>',
   dice: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.2"/><circle cx="16" cy="16" r="1.2"/><circle cx="12" cy="12" r="1.2"/>',
   check: '<path d="M20 6L9 17l-5-5"/>',
+  fingerprint: '<path d="M2 12C2 6.5 6.5 2 12 2a10 10 0 0 1 8 4"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M9 6.8a6 6 0 0 1 9 5.2c0 .47 0 1.17-.02 2"/>',
 };
 
 function icon(name) {
@@ -266,6 +267,10 @@ async function render() {
   const [section, id, sub] = route();
   const isAdmin = state.me.role === "admin";
   const main = shell(section || "home");
+  if (!state.passkeyChecked) {
+    state.passkeyChecked = true;
+    setTimeout(suggestPasskey, 900);
+  }
   try {
     if (section === "account") return accountView(main);
     if (section === "settings" && isAdmin) return await settingsView(main);
@@ -356,7 +361,20 @@ function loginView() {
   } },
     field("Usuario", input({ name: "username", required: true, autocomplete: "username", autofocus: true })),
     field("Contraseña", input({ name: "password", type: "password", required: true, autocomplete: "current-password" })),
-    err, btn);
+    err, btn,
+    h("div", { class: "or-sep" }, h("span", { text: "o" })),
+    h("button", { class: "btn block", type: "button", onClick: async (e) => {
+      err.textContent = "";
+      const b = e.currentTarget;
+      b.disabled = true;
+      try {
+        await loginWithPasskey();
+      } catch (ex) {
+        if (ex.name !== "NotAllowedError" && ex.name !== "AbortError") err.textContent = ex.message;
+      } finally {
+        b.disabled = false;
+      }
+    } }, icon("fingerprint"), "Entrar con llave biométrica"));
   fill($app, h("div", { class: "auth" },
     h("div", { class: "auth-card" }, brand(), h("p", { class: "lead", text: "Accede a tu red privada" }), form,
       isStandalone() ? null : h("div", { style: { textAlign: "center", marginTop: "16px" } },
@@ -402,6 +420,7 @@ function forcePasswordView() {
 function accountView(main) {
   fill(main,
     pageHead("Cuenta", `Sesión iniciada como ${state.me.username}`),
+    passkeysCard(),
     h("div", { class: "card", style: { maxWidth: "720px" } }, h("div", { class: "card-head" }, h("h2", { text: "Cambiar contraseña" })), passwordForm()),
     state.me.role === "tenant" ? h("div", { class: "card", style: { maxWidth: "720px" } },
       h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dominio personalizado" }),
@@ -1134,6 +1153,191 @@ async function tenantHomeView(main) {
   };
   await load();
   every(load);
+}
+
+/* ------------------------------------------------------------------ llaves biométricas (passkeys) */
+function bufToB64u(buf) {
+  let bin = "";
+  for (const byte of new Uint8Array(buf)) bin += String.fromCharCode(byte);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64uToBuf(text) {
+  const b64 = text.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((text.length + 3) % 4);
+  return Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0)).buffer;
+}
+function passkeySupported() {
+  return Boolean(window.PublicKeyCredential && window.isSecureContext && navigator.credentials);
+}
+function bioLabel() {
+  const ua = navigator.userAgent;
+  if (/iPhone|iPad|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)) return "Face ID / Touch ID";
+  if (/Macintosh/.test(ua)) return "Touch ID";
+  if (/Android/.test(ua)) return "huella o desbloqueo facial";
+  if (/Windows/.test(ua)) return "Windows Hello";
+  return "biometría";
+}
+function deviceLabel() {
+  const ua = navigator.userAgent;
+  const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android"
+    : /Macintosh/.test(ua) ? (navigator.maxTouchPoints > 1 ? "iPad" : "Mac") : /Windows/.test(ua) ? "Windows" : /Linux/.test(ua) ? "Linux" : "Dispositivo";
+  const br = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "";
+  return br ? `${os} · ${br}` : os;
+}
+function noPasskeyHelp() {
+  const m = modal({
+    title: "Llave biométrica no disponible",
+    body: h("p", { class: "note", style: { margin: 0, fontSize: "14px" } },
+      window.isSecureContext
+        ? "Este navegador no admite llaves de acceso (passkeys). Actualízalo o usa Safari, Chrome o Edge."
+        : "Por seguridad, la llave biométrica sólo funciona cuando el panel se abre con su dominio y HTTPS. Pide al administrador que configure el dominio en Ajustes."),
+    actions: [h("button", { class: "btn primary", onClick: () => m.close() }, "Entendido")],
+  });
+}
+
+async function loginWithPasskey() {
+  if (!passkeySupported()) return noPasskeyHelp();
+  const { state: st, options } = await api("POST", "/api/passkeys/login/options");
+  const cred = await navigator.credentials.get({
+    publicKey: {
+      ...options,
+      challenge: b64uToBuf(options.challenge),
+      allowCredentials: (options.allowCredentials || []).map((c) => ({ ...c, id: b64uToBuf(c.id) })),
+    },
+  });
+  await api("POST", "/api/passkeys/login/verify", {
+    state: st,
+    credential: {
+      id: cred.id, rawId: bufToB64u(cred.rawId), type: cred.type,
+      authenticatorAttachment: cred.authenticatorAttachment || undefined,
+      clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+      response: {
+        clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+        authenticatorData: bufToB64u(cred.response.authenticatorData),
+        signature: bufToB64u(cred.response.signature),
+        userHandle: cred.response.userHandle ? bufToB64u(cred.response.userHandle) : undefined,
+      },
+    },
+  });
+  state.me = await api("GET", "/api/me");
+  state.passkeyChecked = true; // acaba de usar una llave: no sugerir
+  render();
+}
+
+async function registerPasskey(name = deviceLabel()) {
+  if (!passkeySupported()) return noPasskeyHelp();
+  const { state: st, options } = await api("POST", "/api/passkeys/register/options");
+  const cred = await navigator.credentials.create({
+    publicKey: {
+      ...options,
+      challenge: b64uToBuf(options.challenge),
+      user: { ...options.user, id: b64uToBuf(options.user.id) },
+      excludeCredentials: (options.excludeCredentials || []).map((c) => ({ ...c, id: b64uToBuf(c.id) })),
+    },
+  }).catch((ex) => {
+    if (ex.name === "InvalidStateError") throw new Error("Este dispositivo ya tiene una llave para este panel.");
+    throw ex;
+  });
+  return api("POST", "/api/passkeys/register/verify", {
+    state: st,
+    name,
+    credential: {
+      id: cred.id, rawId: bufToB64u(cred.rawId), type: cred.type,
+      authenticatorAttachment: cred.authenticatorAttachment || undefined,
+      clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {},
+      response: {
+        clientDataJSON: bufToB64u(cred.response.clientDataJSON),
+        attestationObject: bufToB64u(cred.response.attestationObject),
+        transports: cred.response.getTransports ? cred.response.getTransports() : [],
+      },
+    },
+  });
+}
+
+const PASSKEY_SNOOZE_DAYS = 30;
+function snoozeKey() { return `wgp-passkey-snooze:${state.me.role}:${state.me.id}`; }
+
+async function suggestPasskey() {
+  if (!state.me || state.me.must_change || !passkeySupported()) return;
+  try {
+    const until = Number(localStorage.getItem(snoozeKey()) || 0);
+    if (until > Date.now()) return;
+  } catch { /* sin almacenamiento: se sugiere igualmente */ }
+  try {
+    if (PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable
+        && !(await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable())) return;
+    const info = await api("GET", "/api/passkeys");
+    if (!info.available || info.passkeys.some((k) => k.current)) return;
+  } catch { return; }
+  if (document.querySelector(".overlay")) return; // no interrumpir otro diálogo
+  const later = () => {
+    try { localStorage.setItem(snoozeKey(), String(Date.now() + PASSKEY_SNOOZE_DAYS * 864e5)); } catch { /* ignorar */ }
+  };
+  let decided = false;
+  const m = modal({
+    title: "Entra más rápido y seguro",
+    body: h("div", { class: "passkey-hero" },
+      h("div", { class: "passkey-icon" }, icon("fingerprint")),
+      h("p", { style: { margin: 0 } }, `Activa el inicio de sesión con ${bioLabel()} en este dispositivo. La próxima vez entrarás sin escribir la contraseña.`),
+      h("p", { class: "note", style: { margin: 0 } }, "Tu huella o tu cara nunca salen del dispositivo: sólo se guarda una llave pública cifrada.")),
+    actions: [
+      h("button", { class: "btn", onClick: () => { decided = true; later(); m.close(); } }, "Ahora no"),
+      h("button", { class: "btn primary", onClick: async (e) => {
+        e.currentTarget.disabled = true;
+        try {
+          await registerPasskey();
+          decided = true;
+          m.close();
+          toast(`Listo: ya puedes entrar con ${bioLabel()}`);
+          if (location.hash === "#/account") render();
+        } catch (ex) {
+          e.currentTarget.disabled = false;
+          if (ex.name !== "NotAllowedError" && ex.name !== "AbortError") toast(ex.message, "err");
+        }
+      } }, icon("fingerprint"), "Activar"),
+    ],
+    onClose: () => { if (!decided) later(); },
+  });
+}
+
+function passkeysCard() {
+  const card = h("div", { class: "card", style: { maxWidth: "720px" } }, spinnerBlock());
+  const draw = (info) => {
+    const addBtn = h("button", { class: "btn primary", onClick: async () => {
+      addBtn.disabled = true;
+      try {
+        draw(await registerPasskey());
+        toast("Llave biométrica añadida");
+      } catch (ex) {
+        if (ex.name !== "NotAllowedError" && ex.name !== "AbortError") toast(ex.message, "err");
+      } finally { addBtn.disabled = false; }
+    } }, icon("fingerprint"), "Añadir en este dispositivo");
+    fill(card,
+      h("div", { class: "card-head" },
+        h("div", null, h("h2", { text: "Inicio de sesión biométrico" }),
+          h("div", { class: "note", text: `Entra con ${bioLabel()} en lugar de la contraseña (passkeys).` })),
+        info.available && passkeySupported() && !info.passkeys.some((k) => k.current) ? addBtn : null),
+      !info.available || !passkeySupported()
+        ? h("div", { class: "banner" }, icon("alert"), window.isSecureContext && info.available
+          ? "Este navegador no admite llaves biométricas."
+          : "Disponible cuando el panel se abre con su dominio y HTTPS (Ajustes → Dominio del panel).")
+        : null,
+      info.passkeys.length
+        ? h("div", { class: "blocked-list" }, info.passkeys.map((k) => h("div", { class: "blocked-row" },
+          h("div", { class: "filter-icon" }, icon("fingerprint")),
+          h("div", { class: "grow" },
+            h("div", { class: "name" }, k.name, k.current ? h("span", { class: "badge ok", style: { marginLeft: "8px" }, text: "Este dominio" }) : null),
+            h("div", { class: "meta", text: `${k.rp_id} · creada ${fmtDate(k.created_at)} · ${k.last_used_at ? `último uso ${ago(k.last_used_at)}` : "sin usar"}` })),
+          h("button", { class: "btn ghost icon", title: "Eliminar", onClick: async () => {
+            if (!(await confirmDialog({ title: "Eliminar llave", message: `«${k.name}» dejará de servir para entrar. Podrás volver a crearla.`, confirmLabel: "Eliminar" }))) return;
+            try { draw(await api("DELETE", `/api/passkeys/${k.id}`)); toast("Llave eliminada"); } catch (ex) { toast(ex.message, "err"); }
+          } }, icon("trash")))))
+        : h("p", { class: "note", style: { margin: 0 }, text: "Todavía no tienes llaves biométricas." }),
+      info.available && passkeySupported() && info.passkeys.some((k) => k.current)
+        ? h("div", { style: { marginTop: "12px" } }, h("button", { class: "btn sm", onClick: addBtn.onclick || (() => addBtn.click()) }, icon("plus"), "Añadir otra llave")) : null,
+    );
+  };
+  api("GET", "/api/passkeys").then(draw).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
+  return card;
 }
 
 /* ------------------------------------------------------------------ PWA y móvil */

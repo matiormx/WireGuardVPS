@@ -48,6 +48,20 @@ CREATE TABLE IF NOT EXISTS devices (
     created_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_devices_tenant ON devices(tenant_id);
+CREATE TABLE IF NOT EXISTS passkeys (
+    id            INTEGER PRIMARY KEY,
+    role          TEXT NOT NULL,
+    user_id       INTEGER NOT NULL,
+    credential_id TEXT NOT NULL UNIQUE,
+    public_key    BLOB NOT NULL,
+    sign_count    INTEGER NOT NULL DEFAULT 0,
+    rp_id         TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    transports    TEXT NOT NULL DEFAULT '',
+    created_at    INTEGER NOT NULL,
+    last_used_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_passkeys_user ON passkeys(role, user_id);
 CREATE TABLE IF NOT EXISTS dns_records (
     id         INTEGER PRIMARY KEY,
     tenant_id  INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
