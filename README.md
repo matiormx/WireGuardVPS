@@ -38,6 +38,18 @@ curl -fsSL https://raw.githubusercontent.com/matiormx/WireGuardVps/main/install.
 
 Requisitos: systemd, kernel ≥ 5.6 (WireGuard integrado) y acceso root. En VPS LXC/OpenVZ el proveedor debe habilitar WireGuard y Docker.
 
+## DNS propio de cada cliente
+
+Cada cliente tiene su propio DNS en `10.252.0.1`, que los dispositivos usan automáticamente:
+
+- **Nombres de los dispositivos:** se crean a partir de su nombre («Portátil de Ana» → `portatil-de-ana`) y se pueden cambiar desde la sección **DNS** del cliente o al editar el dispositivo.
+- **Registros propios:** `nas → 10.252.1.50`, impresoras, servidores… (hasta 200 por cliente).
+- **Sufijos de red:** los configura el admin en **Ajustes → DNS de la red** (por ejemplo `vpn, lan`, como en MikroTik). Van en la configuración WireGuard (`DNS = 10.252.0.1, vpn, lan`), así que `ping nas` se resuelve como `nas.vpn`. También funciona la resolución inversa (PTR).
+- **Aislamiento:** un cliente solo resuelve los nombres de su propia red, y los sufijos internos nunca se consultan a Internet.
+- **Reenvío propio (opcional):** cada cliente puede usar sus propios servidores DNS: públicos o uno de su red, nunca la red de otro cliente. Los filtros de navegación se siguen aplicando.
+
+Los dispositivos creados antes de configurar los sufijos deben volver a importar su configuración (QR) para usar nombres cortos.
+
 ## Filtros de navegación (anuncios, malware y familia)
 
 Cada cliente activa desde su panel (**Filtros**) lo que quiere bloquear en todos sus dispositivos:

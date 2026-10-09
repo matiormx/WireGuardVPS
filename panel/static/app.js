@@ -271,11 +271,13 @@ async function render() {
     if (section === "settings" && isAdmin) return await settingsView(main);
     if (isAdmin) {
       if (section === "clients" && id && sub === "filters") return await filtersView(main, Number(id));
+      if (section === "clients" && id && sub === "dns") return await zoneView(main, Number(id));
       if (section === "clients" && id) return await clientDetailView(main, Number(id));
       if (section === "clients") return await clientsView(main);
       return await dashboardView(main);
     }
     if (section === "filters") return await filtersView(main, state.me.id);
+    if (section === "dns") return await zoneView(main, state.me.id);
     return await tenantHomeView(main);
   } catch (err) {
     if (err.status !== 401) {
@@ -293,7 +295,8 @@ function shell(active) {
   const isAdmin = state.me.role === "admin";
   const links = isAdmin
     ? [["home", "#/", "dashboard", "Panel"], ["clients", "#/clients", "users", "Clientes"], ["settings", "#/settings", "globe", "Ajustes"], ["account", "#/account", "key", "Cuenta"]]
-    : [["home", "#/", "network", "Mi red"], ["filters", "#/filters", "shield", "Filtros"], ["account", "#/account", "key", "Cuenta"]];
+    : [["home", "#/", "network", "Mi red"], ["dns", "#/dns", "server", "DNS"], ["filters", "#/filters", "shield", "Filtros"],
+      ["account", "#/account", "key", "Cuenta"]];
   const sidebar = h("aside", { class: "sidebar" },
     brand(),
     h("nav", { class: "nav" }, links.map(([key, href, ic, label]) =>
@@ -475,6 +478,29 @@ function domainEditor({ load, save, statusUrl, example, onChange }) {
   return box;
 }
 
+function dnsSettingsCard() {
+  const card = h("div", { class: "card" }, spinnerBlock());
+  const draw = (cfg) => {
+    const inp = input({ value: cfg.suffixes.join(", "), placeholder: "vpn, lan", class: "input mono", autocapitalize: "off", spellcheck: false });
+    fill(card,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "DNS de la red" }),
+        h("div", { class: "note", text: "Sufijos de búsqueda que reciben todos los dispositivos (como «vpn, lan» en MikroTik). Con ellos, «nas» se resuelve como «nas.vpn»." }))),
+      h("div", { class: "grid", style: { gap: "12px" } },
+        h("div", { class: "input-group" }, inp,
+          h("button", { class: "btn primary", onClick: async () => {
+            try {
+              draw(await api("PUT", "/api/admin/dns-settings", { suffixes: inp.value.split(/[\s,]+/).filter(Boolean) }));
+              toast("Sufijos guardados");
+            } catch (e) { toast(e.message, "err"); }
+          } }, "Guardar")),
+        h("div", { class: "help", text: `Configuración de los dispositivos: DNS = ${[cfg.server, ...cfg.suffixes].join(", ")}. Máximo 5. ` +
+          "Evita «local» (iPhone y Mac lo reservan para mDNS). Los dispositivos existentes deben reimportar su configuración para recibir los cambios." }),
+        h("div", { class: "help", text: `Cada cliente gestiona los nombres de su red desde su sección DNS. Reenvío por defecto: ${cfg.upstreams.join(", ")}.` })));
+  };
+  api("GET", "/api/admin/dns-settings").then(draw).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
+  return card;
+}
+
 async function settingsView(main) {
   let cfg = await api("GET", "/api/admin/settings");
   let status = null;
@@ -523,6 +549,7 @@ async function settingsView(main) {
               h("code", { text: cfg.main_domain || "vpn.tudominio.com" }), " → ", h("code", { text: ip }), "."),
             h("li", { text: "Escríbelo arriba y pulsa Guardar." }),
             h("li", { text: "Pulsa Comprobar. Cuando HTTPS esté activo, abre el panel con el dominio y activa «Forzar HTTPS»." })))),
+      dnsSettingsCard(),
       h("div", { class: "card" },
         h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dominios de clientes" }),
           h("div", { class: "note", text: "Cada cliente puede usar su propio dominio (desde su Cuenta o desde su ficha). Allí verá el panel con su nombre y sólo podrá entrar él." }))),
@@ -537,7 +564,7 @@ async function settingsView(main) {
     );
   };
 
-  fill(main, pageHead("Ajustes", "Dominio, HTTPS y dominios personalizados de los clientes"), body);
+  fill(main, pageHead("Ajustes", "Dominio, HTTPS, DNS de la red y dominios de los clientes"), body);
   draw();
   if (cfg.main_domain) check();
 }
@@ -682,6 +709,7 @@ async function clientDetailView(main, id) {
         filterBadges(t.filters)),
       [
         h("a", { class: "btn", href: `#/clients/${t.id}/filters` }, icon("shield"), "Filtros"),
+        h("a", { class: "btn", href: `#/clients/${t.id}/dns` }, icon("server"), "DNS"),
         h("button", { class: "btn", onClick: () => {
           const m = modal({ title: `Dominio de ${t.name}`, wide: true,
             body: domainEditor({
@@ -816,6 +844,10 @@ function editDeviceModal(d, onDone) {
     title: "Editar dispositivo",
     fields: [
       h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "48", value: d.name }))),
+      h("div", { class: "full" }, field("Nombre de red (DNS)",
+        input({ name: "hostname", required: true, maxlength: "63", value: d.hostname || "", pattern: "[a-zA-Z0-9]([a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?",
+          autocapitalize: "off", spellcheck: false, class: "input mono" }),
+        "Los demás dispositivos del cliente lo encuentran por este nombre (p. ej. portatil-ana o portatil-ana.vpn).")),
       tunnelField(d.full_tunnel),
       h("div", { class: "full field" },
         switchEl("dns_filter", d.dns_filter, "Aplicar los filtros de navegación"),
@@ -825,6 +857,7 @@ function editDeviceModal(d, onDone) {
     onSubmit: async (fd) => {
       await api("PATCH", `/api/devices/${d.id}`, {
         name: fd.get("name"), full_tunnel: fd.get("full_tunnel") === "on", dns_filter: fd.get("dns_filter") === "on",
+        hostname: fd.get("hostname"),
       });
       toast("Dispositivo actualizado");
       onDone();
@@ -983,6 +1016,97 @@ async function filtersView(main, tenantId) {
     data = await api("GET", `/api/filters${qs}`);
     draw();
   });
+}
+
+/* ------------------------------------------------------------------ DNS propio del cliente */
+function fqdns(name, suffixes) {
+  return suffixes.length ? suffixes.map((sfx) => `${name}.${sfx}`) : [name];
+}
+
+async function zoneView(main, tenantId) {
+  const isAdmin = state.me.role === "admin";
+  const qs = isAdmin ? `?tenant_id=${tenantId}` : "";
+  let zone = await api("GET", `/api/dns-zone${qs}`);
+  const tenant = isAdmin ? await api("GET", `/api/admin/tenants/${tenantId}`) : { name: state.me.name };
+  const body = h("div");
+
+  const run = async (fn, msg) => {
+    try { zone = await fn(); toast(msg); draw(); } catch (e) { toast(e.message, "err"); }
+  };
+
+  const draw = () => {
+    const sfx = zone.suffixes;
+    const example = (zone.devices[0] && zone.devices[0].hostname) || "nas";
+    const recName = input({ placeholder: "nas", maxlength: "100", autocapitalize: "off", spellcheck: false, class: "input mono" });
+    const recIp = input({ placeholder: zone.network.replace(/0\/\d+$/, "50"), maxlength: "15", inputmode: "decimal", class: "input mono" });
+    const ups = input({ value: zone.upstreams.join(", "), placeholder: zone.default_upstreams.join(", "), class: "input mono" });
+    fill(body,
+      zone.resolver.enabled ? null : h("div", { class: "banner" }, icon("alert"), "El DNS del servidor está desactivado (DNS_ENABLED=false)."),
+      h("div", { class: "card net-hero" },
+        h("div", { class: "grow" },
+          h("h3", { text: "Servidor DNS de tu red" }),
+          h("div", { class: "big", text: zone.server }),
+          h("div", { class: "note", text: "Tus dispositivos lo usan automáticamente. Resuelve los nombres de tu red (que sólo ven tus dispositivos) y reenvía el resto a Internet." })),
+        h("div", null, h("h3", { text: "Sufijos de red" }),
+          h("div", { class: "cell-flex", style: { flexWrap: "wrap", marginTop: "6px" } },
+            sfx.length ? sfx.map((x) => h("span", { class: "badge accent mono", text: `.${x}` })) : h("span", { class: "note", text: "ninguno" })),
+          h("div", { class: "note", style: { marginTop: "6px" }, text: `Ej.: ping ${example} o ${fqdns(example, sfx)[0]}` }))),
+      h("div", { class: "card" },
+        h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Nombres de los dispositivos" }),
+          h("div", { class: "note", text: "Se crean solos a partir del nombre de cada dispositivo. Pulsa el lápiz para cambiarlos." }))),
+        zone.devices.length ? h("div", { class: "table-wrap" }, h("table", { class: "cards" },
+          h("thead", null, h("tr", null, h("th", { text: "Nombre" }), h("th", { text: "IP" }), h("th", { class: "hide-sm", text: "Dispositivo" }), h("th"))),
+          h("tbody", null, zone.devices.map((d) => h("tr", null,
+            h("td", { class: "primary" }, h("div", null, h("div", { class: "name mono", text: d.hostname }),
+              h("div", { class: "meta mono", text: fqdns(d.hostname, sfx).join("  ·  ") }))),
+            h("td", { class: "mono", "data-label": "IP", text: d.ip }),
+            h("td", { class: "hide-sm", "data-label": "Dispositivo", text: d.name }),
+            h("td", { class: "actions aside" }, h("button", { class: "btn ghost icon", title: "Cambiar nombre", onClick: () => formModal({
+              title: `Nombre de red de ${d.name}`,
+              fields: [h("div", { class: "full" }, field("Nombre", input({ name: "hostname", required: true, maxlength: "63", value: d.hostname,
+                class: "input mono", autocapitalize: "off", spellcheck: false }), "Letras, números y guiones."))],
+              onSubmit: async (fd) => {
+                await api("PATCH", `/api/devices/${d.id}`, { hostname: fd.get("hostname") });
+                zone = await api("GET", `/api/dns-zone${qs}`);
+                toast("Nombre actualizado");
+                draw();
+              },
+            }) }, icon("edit")))))))) : h("p", { class: "note", text: "Aún no hay dispositivos." })),
+      h("div", { class: "grid two" },
+        h("div", { class: "card" },
+          h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Registros propios" }),
+            h("div", { class: "note", text: "Nombres para otros equipos o servicios: NAS, impresoras, servidores de tu oficina…" }))),
+          h("form", { class: "input-group", style: { marginBottom: "14px" }, onSubmit: (e) => {
+            e.preventDefault();
+            run(() => api("POST", `/api/dns-zone/records${qs}`, { name: recName.value, ip: recIp.value }), "Registro añadido");
+          } }, recName, recIp, h("button", { class: "btn primary", type: "submit" }, icon("plus"), "Añadir")),
+          zone.records.length ? h("div", { class: "blocked-list" }, zone.records.map((r) => h("div", { class: "blocked-row" },
+            h("div", { class: "grow" }, h("div", { class: "mono name", text: `${r.name}  →  ${r.ip}` }),
+              h("div", { class: "meta mono", text: fqdns(r.name, sfx).join("  ·  ") })),
+            h("button", { class: "btn ghost icon", title: "Eliminar", onClick: async () => {
+              if (await confirmDialog({ title: "Eliminar registro", message: `${r.name} dejará de resolverse.`, confirmLabel: "Eliminar" })) {
+                run(() => api("DELETE", `/api/dns-zone/records/${r.id}`), "Registro eliminado");
+              }
+            } }, icon("trash")))))
+            : h("p", { class: "note", text: "Sin registros propios." })),
+        h("div", { class: "card" },
+          h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Servidores DNS de reenvío" }),
+            h("div", { class: "note", text: "Opcional: dónde se resuelve todo lo que no es de tu red. Puede ser un DNS público o uno de tu propia red." }))),
+          h("div", { class: "grid", style: { gap: "12px" } },
+            h("div", { class: "input-group" }, ups,
+              h("button", { class: "btn primary", onClick: () => run(() => api("PUT", `/api/dns-zone/upstreams${qs}`,
+                { upstreams: ups.value.split(/[\s,]+/).filter(Boolean) }), "Servidores de reenvío guardados") }, "Guardar")),
+            h("div", { class: "help", text: `Vacío = los del servidor (${zone.default_upstreams.join(", ")}). Máximo 3. Los filtros de navegación se siguen aplicando.` })))),
+      h("p", { class: "note" }, icon("shield"),
+        " Los nombres de tu red sólo los resuelven tus dispositivos: ningún otro cliente puede verlos. ",
+        "Los dispositivos creados antes de activar los sufijos deben volver a importar su configuración (QR) para usar los nombres cortos."),
+    );
+    body.querySelectorAll(".note > svg").forEach((svg) => Object.assign(svg.style, { width: "14px", height: "14px", verticalAlign: "-2px" }));
+  };
+
+  const crumbs = isAdmin ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / DNS"] : null;
+  fill(main, pageHead("DNS de la red", `Nombres para los dispositivos de ${tenant.name} (${zone.network})`, null, crumbs), body);
+  draw();
 }
 
 /* ------------------------------------------------------------------ cliente: mi red */

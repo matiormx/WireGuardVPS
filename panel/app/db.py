@@ -1,8 +1,10 @@
 """Base de datos SQLite: esquema, arranque y helpers."""
 from __future__ import annotations
 
+import re
 import sqlite3
 import time
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -46,6 +48,14 @@ CREATE TABLE IF NOT EXISTS devices (
     created_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_devices_tenant ON devices(tenant_id);
+CREATE TABLE IF NOT EXISTS dns_records (
+    id         INTEGER PRIMARY KEY,
+    tenant_id  INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    name       TEXT NOT NULL,
+    ip         TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE (tenant_id, name)
+);
 """
 
 
@@ -101,6 +111,44 @@ def _migrate(c: sqlite3.Connection) -> None:
     _ensure_column(c, "devices", "dns_filter", "INTEGER NOT NULL DEFAULT 1")
     _ensure_column(c, "tenants", "domain", "TEXT")
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_domain ON tenants(domain) WHERE domain IS NOT NULL")
+    _ensure_column(c, "tenants", "dns_upstream", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(c, "devices", "hostname", "TEXT")
+    # Nombre DNS para los dispositivos que aún no lo tienen (bases anteriores).
+    for row in c.execute("SELECT id, tenant_id, name FROM devices WHERE hostname IS NULL").fetchall():
+        c.execute("UPDATE devices SET hostname = ? WHERE id = ?",
+                  (unique_hostname(c, row["tenant_id"], make_hostname(row["name"])), row["id"]))
+    if get_setting(c, "dns_suffixes") is None:
+        set_setting(c, "dns_suffixes", "vpn")
+
+
+# --------------------------------------------------------------------------- nombres DNS
+LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def make_hostname(name: str) -> str:
+    """«Portátil de Ana» -> «portatil-de-ana» (etiqueta DNS válida)."""
+    ascii_name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode()
+    label = re.sub(r"[^a-z0-9]+", "-", ascii_name.lower()).strip("-")[:63].strip("-")
+    return label or "dispositivo"
+
+
+def name_in_use(c: sqlite3.Connection, tenant_id: int, name: str, exclude_device: int | None = None,
+                exclude_record: int | None = None) -> bool:
+    """Los nombres son únicos dentro de la red de un cliente (dispositivos y registros)."""
+    dev = c.execute("SELECT id FROM devices WHERE tenant_id = ? AND hostname = ?", (tenant_id, name)).fetchone()
+    if dev and dev["id"] != exclude_device:
+        return True
+    rec = c.execute("SELECT id FROM dns_records WHERE tenant_id = ? AND name = ?", (tenant_id, name)).fetchone()
+    return bool(rec) and rec["id"] != exclude_record
+
+
+def unique_hostname(c: sqlite3.Connection, tenant_id: int, base: str, exclude_device: int | None = None) -> str:
+    name, n = base, 2
+    while name_in_use(c, tenant_id, name, exclude_device=exclude_device):
+        suffix = f"-{n}"
+        name = base[: 63 - len(suffix)] + suffix
+        n += 1
+    return name
 
 
 def get_setting(c: sqlite3.Connection, key: str) -> str | None:

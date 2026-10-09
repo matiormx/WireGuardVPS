@@ -143,7 +143,8 @@ def render_server_conf(settings: Settings, private_key: str, peers: list[Peer], 
     return "\n".join(lines)
 
 
-def render_client_conf(settings: Settings, server_public: str, tenant: sqlite3.Row, device: sqlite3.Row) -> str:
+def render_client_conf(settings: Settings, server_public: str, tenant: sqlite3.Row, device: sqlite3.Row,
+                       search: list[str] | tuple[str, ...] = ()) -> str:
     net = tenant_network(settings, tenant["net_index"])
     # full tunnel: todo el tráfico (y ::/0 para evitar fugas IPv6);
     # split tunnel: sólo la red privada del cliente (+ el resolver DNS del servidor).
@@ -160,7 +161,10 @@ def render_client_conf(settings: Settings, server_public: str, tenant: sqlite3.R
         f"Address = {device['ip']}/32",
     ]
     if device["full_tunnel"] or settings.dns_enabled:
-        lines.append(f"DNS = {settings.client_dns}")
+        # Los sufijos de búsqueda van en la misma línea DNS (wg-quick y las apps
+        # oficiales los tratan como dominios de búsqueda): «nas» -> «nas.vpn».
+        dns = [settings.client_dns] + (list(search) if settings.dns_enabled else [])
+        lines.append(f"DNS = {', '.join(dns)}")
     lines += [
         f"MTU = {settings.mtu}",
         "",

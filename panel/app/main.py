@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import ipaddress
 import io
 import json
 import logging
@@ -21,7 +22,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from . import dnsfilter, domains, security, wg
 from .config import Settings, load_settings
-from .db import Database, get_setting, username_taken
+from .db import (LABEL_RE, Database, get_setting, make_hostname, name_in_use, set_setting,
+                 unique_hostname, username_taken)
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -102,6 +104,7 @@ class DeviceUpdate(BaseModel):
     enabled: bool | None = None
     full_tunnel: bool | None = None
     dns_filter: bool | None = None
+    hostname: str | None = Field(default=None, max_length=63)
 
     @field_validator("name")
     @classmethod
@@ -129,6 +132,28 @@ class FiltersIn(BaseModel):
             if d not in out:
                 out.append(d)
         return out
+
+
+def _dns_name(value: str, what: str = "Nombre") -> str:
+    """Nombre relativo dentro de la red: una o varias etiquetas DNS («nas», «impresora.planta2»)."""
+    name = value.strip().lower().rstrip(".")
+    labels = name.split(".")
+    if not name or len(name) > 100 or not all(LABEL_RE.match(x) for x in labels):
+        raise HTTPException(422, f"{what} no válido: {value!r}. Usa letras, números y guiones (p. ej. portatil-ana)")
+    return name
+
+
+class RecordIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    ip: str = Field(min_length=7, max_length=15)
+
+
+class UpstreamsIn(BaseModel):
+    upstreams: list[str] = Field(default_factory=list, max_length=3)
+
+
+class SuffixesIn(BaseModel):
+    suffixes: list[str] = Field(default_factory=list, max_length=5)
 
 
 class SettingsIn(BaseModel):
@@ -290,7 +315,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "id": d["id"], "tenant_id": d["tenant_id"], "tenant_name": tenant["name"],
             "name": d["name"], "ip": d["ip"], "public_key": d["public_key"],
             "full_tunnel": bool(d["full_tunnel"]), "enabled": bool(d["enabled"]),
-            "dns_filter": bool(d["dns_filter"]),
+            "dns_filter": bool(d["dns_filter"]), "hostname": d["hostname"],
             "created_at": d["created_at"],
             "online": bool(st.get("online")) and bool(d["enabled"]) and bool(tenant["enabled"]),
             "last_handshake": st.get("last_handshake"), "endpoint": st.get("endpoint"),
@@ -481,10 +506,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if ip is None:
             raise HTTPException(409, "No quedan IPs libres en la red del cliente")
         private, public = wg.generate_keypair()
+        hostname = unique_hostname(c, tenant_id, make_hostname(body.name))
         cur = c.execute(
-            """INSERT INTO devices (tenant_id, name, ip, private_key, public_key, preshared_key, full_tunnel, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (tenant_id, body.name, ip, private, public, wg.generate_psk(), int(body.full_tunnel), int(time.time())),
+            """INSERT INTO devices (tenant_id, name, ip, private_key, public_key, preshared_key, full_tunnel,
+                                    created_at, hostname)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tenant_id, body.name, ip, private, public, wg.generate_psk(), int(body.full_tunnel), int(time.time()),
+             hostname),
         )
         c.commit()
         apply_wg()
@@ -494,6 +522,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.patch("/api/devices/{device_id}")
     def update_device(device_id: int, body: DeviceUpdate, p: User, c: Conn):
         d = device_for(c, p, device_id)
+        if body.hostname is not None:
+            hostname = _dns_name(body.hostname, "Nombre de red")
+            if "." in hostname:
+                raise HTTPException(422, "El nombre de red de un dispositivo no puede contener puntos")
+            if name_in_use(c, d["tenant_id"], hostname, exclude_device=device_id):
+                raise HTTPException(409, f"El nombre «{hostname}» ya está en uso en esta red")
+            c.execute("UPDATE devices SET hostname = ? WHERE id = ?", (hostname, device_id))
         if body.name is not None:
             c.execute("UPDATE devices SET name = ? WHERE id = ?", (body.name, device_id))
         if body.enabled is not None:
@@ -518,7 +553,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def client_config(c: sqlite3.Connection, p: Principal, device_id: int) -> tuple[str, str]:
         d = device_for(c, p, device_id)
         t = tenant_or_404(c, d["tenant_id"])
-        conf = wg.render_client_conf(settings, get_setting(c, "server_public_key") or "", t, d)
+        conf = wg.render_client_conf(settings, get_setting(c, "server_public_key") or "", t, d,
+                                     search=dnsfilter.parse_suffixes(get_setting(c, "dns_suffixes")))
         slug = re.sub(r"[^A-Za-z0-9_-]+", "-", d["name"]).strip("-")[:15] or f"wg{d['id']}"
         return conf, slug
 
@@ -585,6 +621,97 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         c.commit()
         apply_wg()
         return filters_json(c, tid)
+
+    # ------------------------------------------------------------------ DNS propio de cada cliente
+    def zone_json(c: sqlite3.Connection, tenant_id: int) -> dict:
+        t = tenant_or_404(c, tenant_id)
+        suffixes = dnsfilter.parse_suffixes(get_setting(c, "dns_suffixes"))
+        devices = c.execute("SELECT id, name, hostname, ip, enabled FROM devices WHERE tenant_id = ? ORDER BY hostname",
+                            (tenant_id,)).fetchall()
+        records = c.execute("SELECT id, name, ip FROM dns_records WHERE tenant_id = ? ORDER BY name", (tenant_id,)).fetchall()
+        return {
+            "tenant_id": t["id"], "network": str(wg.tenant_network(settings, t["net_index"])),
+            "server": str(settings.server_address.ip), "suffixes": suffixes,
+            "devices": [dict(d) | {"enabled": bool(d["enabled"])} for d in devices],
+            "records": [dict(r) for r in records],
+            "upstreams": dnsfilter.parse_suffixes(t["dns_upstream"]),
+            "default_upstreams": settings.dns_upstreams,
+            "resolver": {"enabled": settings.dns_enabled, "running": dns.running},
+        }
+
+    @app.get("/api/dns-zone")
+    def get_zone(p: User, c: Conn, tenant_id: int | None = None):
+        return zone_json(c, filters_tenant(p, tenant_id))
+
+    @app.post("/api/dns-zone/records", status_code=201)
+    def add_record(body: RecordIn, p: User, c: Conn, tenant_id: int | None = None):
+        tid = filters_tenant(p, tenant_id)
+        tenant_or_404(c, tid)
+        name = _dns_name(body.name)
+        try:
+            ip = str(ipaddress.IPv4Address(body.ip.strip()))
+        except ValueError:
+            raise HTTPException(422, f"IP no válida: {body.ip!r}") from None
+        if name_in_use(c, tid, name):
+            raise HTTPException(409, f"El nombre «{name}» ya está en uso en esta red")
+        if c.execute("SELECT COUNT(*) FROM dns_records WHERE tenant_id = ?", (tid,)).fetchone()[0] >= 200:
+            raise HTTPException(409, "Máximo 200 registros por cliente")
+        c.execute("INSERT INTO dns_records (tenant_id, name, ip, created_at) VALUES (?, ?, ?, ?)",
+                  (tid, name, ip, int(time.time())))
+        c.commit()
+        dns.reload_policies()
+        return zone_json(c, tid)
+
+    @app.delete("/api/dns-zone/records/{record_id}")
+    def delete_record(record_id: int, p: User, c: Conn):
+        row = c.execute("SELECT * FROM dns_records WHERE id = ?", (record_id,)).fetchone()
+        if not row or (not p.is_admin and row["tenant_id"] != p.id):
+            raise HTTPException(404, "Registro no encontrado")
+        c.execute("DELETE FROM dns_records WHERE id = ?", (record_id,))
+        c.commit()
+        dns.reload_policies()
+        return zone_json(c, row["tenant_id"])
+
+    @app.put("/api/dns-zone/upstreams")
+    def put_upstreams(body: UpstreamsIn, p: User, c: Conn, tenant_id: int | None = None):
+        tid = filters_tenant(p, tenant_id)
+        t = tenant_or_404(c, tid)
+        net = wg.tenant_network(settings, t["net_index"])
+        clean: list[str] = []
+        for raw in body.upstreams:
+            try:
+                ip = ipaddress.IPv4Address(raw.strip())
+            except ValueError:
+                raise HTTPException(422, f"IP no válida: {raw!r}") from None
+            # Sólo DNS públicos o un servidor de la propia red del cliente: el
+            # servidor nunca consulta en nombre de un cliente la red de otro.
+            if not (ip.is_global or ip in net):
+                raise HTTPException(422, f"{ip} no está permitido: usa un DNS público o uno de tu red ({net})")
+            if str(ip) not in clean:
+                clean.append(str(ip))
+        c.execute("UPDATE tenants SET dns_upstream = ? WHERE id = ?", (" ".join(clean), tid))
+        c.commit()
+        dns.reload_policies()
+        return zone_json(c, tid)
+
+    @app.get("/api/admin/dns-settings")
+    def get_dns_settings(_: Admin, c: Conn):
+        return {"suffixes": dnsfilter.parse_suffixes(get_setting(c, "dns_suffixes")),
+                "server": str(settings.server_address.ip), "upstreams": settings.dns_upstreams}
+
+    @app.put("/api/admin/dns-settings")
+    def put_dns_settings(body: SuffixesIn, admin_: Admin, c: Conn):
+        clean: list[str] = []
+        for raw in body.suffixes:
+            suffix = _dns_name(raw, "Sufijo")
+            if suffix.endswith("in-addr.arpa"):
+                raise HTTPException(422, "Sufijo reservado")
+            if suffix not in clean:
+                clean.append(suffix)
+        set_setting(c, "dns_suffixes", " ".join(clean))
+        c.commit()
+        dns.reload_policies()
+        return get_dns_settings(admin_, c)
 
     # ------------------------------------------------------------------ dominios
     @app.get("/internal/tls-ask", include_in_schema=False)

@@ -12,6 +12,9 @@ origen (la red /24 del cliente) y cada dispositivo puede quedar exento.
 Flujo de una consulta
 ---------------------
   1. Se localiza el cliente por la IP de origen (10.252.N.x -> cliente N).
+  1b. Nombres locales del cliente (DNS propio): «portatil-ana.vpn», «nas.lan»,
+     los nombres sin sufijo y la resolución inversa de su red se contestan aquí
+     y nunca salen a Internet. Un cliente sólo ve los nombres de su propia red.
   2. Lista blanca del cliente -> se resuelve normalmente.
   3. Lista negra del cliente o dominio en una categoría activa (y no exceptuado
      por la propia lista con @@) -> respuesta 0.0.0.0 / :: (bloqueado).
@@ -36,10 +39,10 @@ from collections import Counter, OrderedDict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from dnslib import AAAA, CNAME, QTYPE, RCODE, RR, A, DNSRecord
+from dnslib import AAAA, CNAME, PTR, QTYPE, RCODE, RR, A, DNSRecord
 
 from .config import Settings
-from .db import Database
+from .db import Database, get_setting
 
 log = logging.getLogger("wgp.dns")
 
@@ -302,6 +305,9 @@ class Policy:
     allow: frozenset[str]
     deny: frozenset[str]
     exempt: frozenset[str]  # IPs de dispositivos sin filtrado
+    zone: dict = field(default_factory=dict)        # nombre relativo -> IPv4
+    reverse: dict = field(default_factory=dict)     # IPv4 -> nombre relativo
+    upstreams: tuple[str, ...] = ()                 # DNS de reenvío propios del cliente
 
     @property
     def active(self) -> bool:
@@ -318,6 +324,10 @@ def parse_filters(raw: str | None) -> dict[str, bool]:
 
 def split_domains(raw: str | None) -> list[str]:
     return [d for d in (raw or "").split() if d]
+
+
+def parse_suffixes(raw: str | None) -> list[str]:
+    return [x for x in (raw or "").replace(",", " ").split() if x]
 
 
 def tenant_filtering_active(row: sqlite3.Row) -> bool:
@@ -404,6 +414,7 @@ class DnsFilter:
         self.bind = (str(settings.server_address.ip) if settings.dns_bind == "auto" else settings.dns_bind)
         self.port = settings.dns_port
         self.policies: dict[int, Policy] = {}
+        self.suffixes: list[str] = ["vpn"]
         self.stats: dict[int, TenantStats] = {}
         self.cache: OrderedDict[tuple, tuple[float, bytes]] = OrderedDict()
         self.running = False
@@ -418,12 +429,23 @@ class DnsFilter:
     def reload_policies(self) -> None:
         with self.db.conn() as c:
             tenants = c.execute(
-                "SELECT id, net_index, enabled, dns_filters, dns_allow, dns_deny FROM tenants"
+                "SELECT id, net_index, enabled, dns_filters, dns_allow, dns_deny, dns_upstream FROM tenants"
             ).fetchall()
-            exempt_rows = c.execute("SELECT tenant_id, ip FROM devices WHERE dns_filter = 0").fetchall()
+            device_rows = c.execute("SELECT tenant_id, ip, hostname, dns_filter, enabled FROM devices").fetchall()
+            record_rows = c.execute("SELECT tenant_id, name, ip FROM dns_records").fetchall()
+            self.suffixes = parse_suffixes(get_setting(c, "dns_suffixes"))
         exempt: dict[int, set[str]] = {}
-        for r in exempt_rows:
-            exempt.setdefault(r["tenant_id"], set()).add(r["ip"])
+        zones: dict[int, dict[str, str]] = {}
+        reverse: dict[int, dict[str, str]] = {}
+        for r in device_rows:
+            if not r["dns_filter"]:
+                exempt.setdefault(r["tenant_id"], set()).add(r["ip"])
+            if r["hostname"]:
+                zones.setdefault(r["tenant_id"], {})[r["hostname"]] = r["ip"]
+                reverse.setdefault(r["tenant_id"], {})[r["ip"]] = r["hostname"]
+        for r in record_rows:
+            zones.setdefault(r["tenant_id"], {})[r["name"]] = r["ip"]
+            reverse.setdefault(r["tenant_id"], {}).setdefault(r["ip"], r["name"])
         policies = {}
         for t in tenants:
             if not t["enabled"]:
@@ -436,6 +458,9 @@ class DnsFilter:
                 allow=frozenset(split_domains(t["dns_allow"])),
                 deny=frozenset(split_domains(t["dns_deny"])),
                 exempt=frozenset(exempt.get(t["id"], ())),
+                zone=zones.get(t["id"], {}),
+                reverse=reverse.get(t["id"], {}),
+                upstreams=tuple(parse_suffixes(t["dns_upstream"])),
             )
         self.policies = policies
 
@@ -468,6 +493,44 @@ class DnsFilter:
                 return "safesearch", target
         return "forward", None
 
+    def local_answer(self, req: DNSRecord, name: str, policy: Policy | None) -> bytes | None:
+        """Zona propia del cliente. None = no es un nombre local (seguir el flujo normal)."""
+        q = req.q
+        reply = req.reply()
+        if name.endswith(".in-addr.arpa"):
+            parts = name[: -len(".in-addr.arpa")].split(".")
+            try:
+                ip = str(ipaddress.IPv4Address(".".join(reversed(parts))))
+            except ValueError:
+                return None
+            if ipaddress.IPv4Address(ip) not in self.settings.wg_subnet:
+                return None  # inversas públicas: al DNS de subida
+            host = policy.reverse.get(ip) if policy else None
+            if host and q.qtype in (QTYPE.PTR, QTYPE.ANY):
+                fqdn = f"{host}.{self.suffixes[0]}" if self.suffixes else host
+                reply.add_answer(RR(q.qname, QTYPE.PTR, rdata=PTR(fqdn + "."), ttl=60))
+            elif not host:
+                reply.header.rcode = RCODE.NXDOMAIN
+            return reply.pack()
+
+        rel = None
+        for suffix in self.suffixes:
+            if name == suffix:
+                return reply.pack()  # el propio sufijo: NOERROR sin datos
+            if name.endswith("." + suffix):
+                rel = name[: -len(suffix) - 1]
+                break
+        if rel is None and "." not in name:
+            rel = name  # nombre corto («nas»)
+        if rel is None:
+            return None
+        ip = policy.zone.get(rel) if policy else None
+        if ip is None:
+            reply.header.rcode = RCODE.NXDOMAIN  # los sufijos internos nunca salen a Internet
+        elif q.qtype in (QTYPE.A, QTYPE.ANY):
+            reply.add_answer(RR(q.qname, QTYPE.A, rdata=A(ip), ttl=60))
+        return reply.pack()
+
     def tenant_stats(self, tenant_id: int) -> dict:
         st = self.stats.get(tenant_id)
         return st.summary() if st else TenantStats().summary()
@@ -483,6 +546,9 @@ class DnsFilter:
         q = req.q
         name = str(q.qname).rstrip(".").lower()
         policy = self.policy_for(client_ip)
+        local = self.local_answer(req, name, policy)
+        if local is not None:
+            return local
         action, target = self.decide(name, policy, client_ip)
 
         if policy is not None:
@@ -491,7 +557,7 @@ class DnsFilter:
             st.record(action == "block", name, client_ip)
 
         if action == "forward":
-            return await self.forward(data)
+            return await self.forward(data, policy.upstreams if policy else ())
         reply = req.reply()
         if action == "nxdomain":
             reply.header.rcode = RCODE.NXDOMAIN
@@ -503,7 +569,8 @@ class DnsFilter:
         elif action == "safesearch":
             reply.add_answer(RR(q.qname, QTYPE.CNAME, rdata=CNAME(target), ttl=300))
             if q.qtype in (QTYPE.A, QTYPE.AAAA):
-                upstream = await self.forward(DNSRecord.question(target, QTYPE[q.qtype]).pack())
+                upstream = await self.forward(DNSRecord.question(target, QTYPE[q.qtype]).pack(),
+                                              policy.upstreams if policy else ())
                 try:
                     for rr in DNSRecord.parse(upstream).rr:
                         reply.add_answer(rr)
@@ -511,10 +578,11 @@ class DnsFilter:
                     reply.header.rcode = RCODE.SERVFAIL
         return reply.pack()
 
-    async def forward(self, data: bytes) -> bytes:
+    async def forward(self, data: bytes, upstreams: tuple[str, ...] = ()) -> bytes:
+        servers = tuple(upstreams) or tuple(self.upstreams)
         try:
             req = DNSRecord.parse(data)
-            key = (str(req.q.qname).lower(), req.q.qtype, req.q.qclass)
+            key = (str(req.q.qname).lower(), req.q.qtype, req.q.qclass, servers)
         except Exception:  # noqa: BLE001
             key = None
         if key is not None:
@@ -522,7 +590,7 @@ class DnsFilter:
             if hit and hit[0] > time.monotonic():
                 self.cache.move_to_end(key)
                 return data[:2] + hit[1][2:]
-        for server in self.upstreams:
+        for server in servers:
             try:
                 resp = await self._udp_query(server, data)
                 if resp[2] & 0x02:  # TC: respuesta truncada -> TCP
