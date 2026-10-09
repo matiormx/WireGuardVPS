@@ -91,7 +91,7 @@ def test_web_push_encryption_and_vapid():
 
 def test_config_channels_and_delivery(admin, sent):
     st = admin.get("/api/alerts").json()
-    assert st["available"]["telegram"] is False and st["prefs"] == {"devices_all": True, "backup": True}
+    assert st["available"]["telegram"] is False and st["prefs"] == {"devices_all": True, "backup": True, "billing": True}
     assert len(alerts.b64u_decode(st["available"]["push_key"])) == 65
     assert admin.post("/api/alerts/telegram/link", headers=H).status_code == 409
     assert admin.put("/api/admin/alerts-config", json={"telegram_token": "malo"}, headers=H).status_code == 422

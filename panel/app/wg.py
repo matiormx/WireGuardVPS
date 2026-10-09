@@ -307,6 +307,8 @@ class WireGuardManager:
             all_lans = {lan for lans in lans_by_tenant.values() for lan in lans}
             with self.db.conn() as c:
                 fwd_lines = forward_lines(c)
+                from . import exits  # import local: exits no depende de este módulo
+                self.exit_usable = exits.write_files(c, self.settings, _atomic_write)
 
             _atomic_write(self.conf_path, render_server_conf(self.settings, private, peers), 0o600)
             _atomic_write(self.tenants_list, "".join(f"{g}\n" for g in groups), 0o644)
@@ -319,6 +321,26 @@ class WireGuardManager:
             # `wg syncconf` no toca la tabla de rutas: las LAN de los routers se enrutan aquí.
             self._sync_routes(all_lans)
             return applied
+
+    def refresh_exits(self) -> tuple[set[int], set[int]] | None:
+        """Si una salida cae o vuelve, reaplica (sus dispositivos cambian de salida).
+
+        Devuelve (caídas, recuperadas) o None si no hubo cambios."""
+        from . import exits
+        with self.db.conn() as c:
+            rows = c.execute("SELECT id, idx, failover FROM exits WHERE enabled = 1").fetchall()
+        health = {r["id"]: exits.tunnel_stats(r["idx"])["healthy"] for r in rows}
+        prev = getattr(self, "exit_health", None)
+        self.exit_health = health
+        usable = {r["id"] for r in rows if not r["failover"] or health[r["id"]]}
+        if usable != getattr(self, "exit_usable", None):
+            log.info("Cambio en las salidas disponibles: %s", sorted(usable))
+            self.apply()
+        if prev is None:
+            return None
+        down = {i for i, ok in health.items() if not ok and prev.get(i)}
+        up = {i for i, ok in health.items() if ok and prev.get(i) is False}
+        return (down, up) if down or up else None
 
     def _ip(self, *args: str) -> subprocess.CompletedProcess | None:
         if shutil.which("ip") is None:

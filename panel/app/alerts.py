@@ -53,7 +53,7 @@ EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 TOKEN_RE = re.compile(r"^\d{5,15}:[A-Za-z0-9_-]{30,64}$")
 PUSH_HOSTS = (".googleapis.com", ".push.services.mozilla.com", ".push.apple.com", ".notify.windows.com")
 DEFAULT_PREFS = {
-    "admin": {"devices_all": True, "backup": True},
+    "admin": {"devices_all": True, "backup": True, "billing": True},
     "tenant": {"devices": True},
     "member": {"devices": True},
 }
@@ -135,6 +135,7 @@ class PrefsIn(BaseModel):
     devices: bool | None = None
     devices_all: bool | None = None
     backup: bool | None = None
+    billing: bool | None = None
 
 
 class EmailIn(BaseModel):
@@ -310,6 +311,39 @@ class Notifier:
             with self.db.conn() as c:
                 to = self.recipients_for_device(c, e.tenant_id, e.member_id)
             self.deliver(to, title, body, "/#/activity")
+
+    def on_exit_change(self, down: set[int], up: set[int]) -> None:
+        with self.db.conn() as c:
+            names = {r["id"]: (r["name"], r["failover"]) for r in c.execute("SELECT id, name, failover FROM exits")}
+            to = {("admin", r["id"]) for r in c.execute("SELECT id FROM admins") if prefs(c, "admin", r["id"]).get("backup")}
+        for i in down:
+            name, failover = names.get(i, ("?", 1))
+            extra = "Sus dispositivos salen ahora por el servidor principal." if failover else "Sus dispositivos se han quedado sin Internet."
+            self.deliver(to, f"🔴 Salida «{name}» sin conexión", extra, "/#/settings")
+        for i in up:
+            self.deliver(to, f"🟢 Salida «{names.get(i, ('?',))[0]}» conectada de nuevo", "Sus dispositivos vuelven a salir por ella.", "/#/settings")
+
+    def notify_tenant(self, t, title: str, body: str, url: str = "/#/plan") -> None:
+        """Avisos de facturación al responsable: sus canales y, si no tiene ese email, su email de facturación."""
+        self.deliver({("tenant", t["id"])}, title, body, url)
+        email = (t["billing_email"] or "").strip().lower()
+        if email and self.smtp_ready():
+            with self.db.conn() as c:
+                has = c.execute("""SELECT 1 FROM alert_channels WHERE role = 'tenant' AND user_id = ? AND kind = 'email'
+                                   AND target = ?""", (t["id"], email)).fetchone()
+            if not has:
+                self.pool.submit(self._email_safe, email, title, body)
+
+    def _email_safe(self, to: str, title: str, body: str) -> None:
+        try:
+            self.email(to, title, body)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Email de facturación a %s fallido: %s", to, exc)
+
+    def notify_admins(self, title: str, body: str) -> None:
+        with self.db.conn() as c:
+            to = {("admin", r["id"]) for r in c.execute("SELECT id FROM admins") if prefs(c, "admin", r["id"]).get("billing")}
+        self.deliver(to, title, body, "/#/billing")
 
     def on_backup_failed(self, error: str) -> None:
         with self.db.conn() as c:

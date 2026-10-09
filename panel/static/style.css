@@ -582,3 +582,33 @@ button.rank:hover .name { color: var(--accent); }
 .auth-card.wide { max-width: 460px; }
 .auth-card .steps { text-align: left; margin: 0 0 16px; }
 .auth-card .qr-box { max-width: 280px; margin: 0 auto 16px; }
+
+/* salidas por país */
+.flag { font-size: 24px; line-height: 1; width: 34px; text-align: center; flex: none; }
+
+/* planes y facturación */
+.banner.warn { border-color: var(--warning); background: var(--warning-soft); }
+.banner.danger { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+.banner a { color: inherit; font-weight: 600; }
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 16px; }
+.plan-grid > .card { margin: 0; }
+.plan-card { display: flex; flex-direction: column; gap: 10px; }
+.plan-card.current { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.plan-name { font-weight: 700; font-size: 17px; }
+.plan-price { font-size: 28px; font-weight: 700; letter-spacing: -.02em; }
+.plan-price span { font-size: 14px; font-weight: 500; color: var(--muted); }
+.plan-features { list-style: none; padding: 0; margin: 0 0 6px; display: grid; align-content: start; gap: 6px; font-size: 13.5px; flex: 1; }
+.plan-features li { display: flex; gap: 8px; align-items: flex-start; }
+.plan-features svg { width: 15px; height: 15px; color: var(--success); flex: none; margin-top: 2px; }
+.plan-current { justify-self: start; align-self: flex-start; }
+.usage-head { display: flex; justify-content: space-between; font-size: 13.5px; margin-bottom: 6px; }
+.blocked-row.muted { opacity: .6; }
+.blocked-row.link { cursor: pointer; }
+.plan-pick { display: grid; gap: 8px; }
+.plan-option { display: block; cursor: pointer; }
+.plan-option input { position: absolute; opacity: 0; pointer-events: none; }
+.plan-option > span { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-elev); }
+.plan-option small { grid-column: 1 / -1; color: var(--muted); font-size: 12.5px; }
+.plan-option em { font-style: normal; font-weight: 700; }
+.plan-option input:checked + span { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.plan-option input:focus-visible + span { box-shadow: 0 0 0 3px var(--accent-soft); }

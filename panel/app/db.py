@@ -85,6 +85,50 @@ CREATE TABLE IF NOT EXISTS forwards (
     enabled     INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS plans (
+    id                INTEGER PRIMARY KEY,
+    name              TEXT NOT NULL,
+    description       TEXT NOT NULL DEFAULT '',
+    price_cents       INTEGER NOT NULL,
+    currency          TEXT NOT NULL DEFAULT 'eur',
+    interval          TEXT NOT NULL DEFAULT 'month',
+    trial_days        INTEGER NOT NULL DEFAULT 0,
+    max_devices       INTEGER NOT NULL,
+    max_forwards      INTEGER NOT NULL DEFAULT 0,
+    max_services      INTEGER NOT NULL DEFAULT 0,
+    max_members       INTEGER NOT NULL DEFAULT 0,
+    allow_exits       INTEGER NOT NULL DEFAULT 0,
+    public            INTEGER NOT NULL DEFAULT 1,
+    active            INTEGER NOT NULL DEFAULT 1,
+    sort              INTEGER NOT NULL DEFAULT 0,
+    stripe_product_id TEXT,
+    stripe_price_id   TEXT,
+    created_at        INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS plan_prices (
+    price_id TEXT PRIMARY KEY,
+    plan_id  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stripe_events (
+    id         TEXT PRIMARY KEY,
+    type       TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS exits (
+    id           INTEGER PRIMARY KEY,
+    name         TEXT NOT NULL,
+    country      TEXT NOT NULL,
+    host         TEXT NOT NULL,
+    port         INTEGER NOT NULL,
+    idx          INTEGER NOT NULL UNIQUE,
+    hub_private  TEXT NOT NULL,
+    hub_public   TEXT NOT NULL,
+    exit_private TEXT NOT NULL,
+    exit_public  TEXT NOT NULL,
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    failover     INTEGER NOT NULL DEFAULT 1,
+    created_at   INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS members (
     id            INTEGER PRIMARY KEY,
     tenant_id     INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -273,6 +317,17 @@ def _migrate(c: sqlite3.Connection) -> None:
     _ensure_column(c, "devices", "kind", "TEXT NOT NULL DEFAULT 'device'")
     _ensure_column(c, "devices", "lan_networks", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(c, "tenants", "max_forwards", "INTEGER NOT NULL DEFAULT 5")
+    _ensure_column(c, "devices", "exit_id", "INTEGER")          # NULL = la del cliente, 0 = principal
+    _ensure_column(c, "tenants", "exit_id", "INTEGER")
+    _ensure_column(c, "tenants", "allow_exits", "INTEGER NOT NULL DEFAULT 1")
+    for column, ddl in (("plan_id", "INTEGER"), ("billing_status", "TEXT NOT NULL DEFAULT 'none'"),
+                        ("stripe_customer_id", "TEXT"), ("stripe_subscription_id", "TEXT"),
+                        ("current_period_end", "INTEGER"), ("cancel_at_period_end", "INTEGER NOT NULL DEFAULT 0"),
+                        ("past_due_since", "INTEGER"), ("suspended_reason", "TEXT NOT NULL DEFAULT ''"),
+                        ("billing_email", "TEXT"), ("max_services", "INTEGER NOT NULL DEFAULT 20"),
+                        ("max_members", "INTEGER NOT NULL DEFAULT 50"), ("subscription_cents", "INTEGER"),
+                        ("subscription_interval", "TEXT")):
+        _ensure_column(c, "tenants", column, ddl)
     _ensure_column(c, "devices", "member_id", "INTEGER REFERENCES members(id) ON DELETE SET NULL")
     if "monitor" not in {r["name"] for r in c.execute("PRAGMA table_info(devices)")}:
         # Avisar si se desconecta: activado por defecto en los routers existentes.

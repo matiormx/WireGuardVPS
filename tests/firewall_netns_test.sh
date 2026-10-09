@@ -8,7 +8,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-NS=(srv a1 a2 b1 inet sw r1 lan1)
+NS=(srv a1 a2 b1 inet sw r1 lan1 x1)
 netns_cleanup() {
     for p in "${PIDS[@]+"${PIDS[@]}"}"; do kill "$p" 2>/dev/null; done
     for n in "${NS[@]}"; do ip netns del "$n" 2>/dev/null; done
@@ -29,6 +29,8 @@ trap netns_cleanup EXIT   # tras el source, que define sus propios traps
 LIST=/etc/wireguard/wgp/tenants.list
 DNS_LIST=/etc/wireguard/wgp/dns.list
 FWD_LIST=/etc/wireguard/wgp/forwards.list
+EXITS=/etc/wireguard/wgp/exits.list
+EXIT_ROUTES=/etc/wireguard/wgp/exit_routes.list
 PIDS=()
 
 for n in "${NS[@]}"; do ip netns add "$n"; ip -n "$n" link set lo up; done
@@ -61,6 +63,21 @@ ip -n srv route add default via 198.51.100.2
 ip netns exec srv sysctl -qw net.ipv4.ip_forward=1 net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.wg0.send_redirects=0
 ip netns exec srv iptables -P FORWARD DROP
 
+# Nodo de salida x1 (otro país): en producción es un túnel WireGuard wgx1; aquí un
+# enlace punto a punto con proxy_arp. Sale a Internet con su propia IP 203.0.113.1.
+ip link add wgx1 netns srv type veth peer name wgexit netns x1
+ip -n srv addr add 169.254.252.5/30 dev wgx1 && ip -n srv link set wgx1 up
+ip -n x1 addr add 169.254.252.6/30 dev wgexit && ip -n x1 link set wgexit up
+ip netns exec x1 sysctl -qw net.ipv4.ip_forward=1 net.ipv4.conf.wgexit.proxy_arp=1
+ip -n x1 route add 10.252.0.0/16 via 169.254.252.5 dev wgexit
+ip link add eth1 netns x1 type veth peer name eth1 netns inet
+ip -n x1 addr add 203.0.113.1/24 dev eth1 && ip -n x1 link set eth1 up
+ip -n inet addr add 203.0.113.2/24 dev eth1 && ip -n inet link set eth1 up
+ip -n x1 route add default via 203.0.113.2
+ip netns exec x1 iptables -t nat -A POSTROUTING -s 10.252.0.0/16 -o eth1 -j MASQUERADE
+printf 'wgx1 201\n' >"$EXITS"
+printf '10.252.1.2 wgx1\n10.252.1.5 wgx1\n999.1.1.1 wgx1\n10.252.2.2 wgx9\n' >"$EXIT_ROUTES"
+
 printf '10.252.1.0/24 192.168.88.0/24\n10.252.2.0/24\n; iptables -F\n' >"$LIST"
 printf '10.252.1.0/24\n' >"$DNS_LIST"          # sólo el cliente 1 tiene filtros DNS
 ip netns exec srv iptables -P INPUT DROP          # el resolver sólo es accesible por la regla propia
@@ -85,6 +102,10 @@ import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(('0.0.
 while True:
     d, a = s.recvfrom(512); s.sendto(('$3 ' + a[0]).encode(), a)" & PIDS+=($!); }
 tcp_srv a1 80 web-a1
+ip netns exec inet python3 -c "
+import socket; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('8.8.8.8', 8080)); s.listen()
+while True:
+    c, a = s.accept(); c.sendall(a[0].encode()); c.close()" & PIDS+=($!)
 tcp_srv a1 22 ssh-a1
 tcp_srv lan1 8000 nas-lan1
 udp_echo b1 7777 udp-b1
@@ -148,6 +169,30 @@ fwd_check tcp 8081 cerrado "línea inválida ignorada"
 fwd_check tcp 80   cerrado "puerto no publicado"
 check inet 10.252.1.2 block "Internet -> cliente directo sigue bloqueado"
 
+exit_check() { # exit_check <ns> <IP pública esperada> <descripción>
+    local got
+    got=$(ip netns exec "$1" python3 -c "
+import socket; s=socket.socket(); s.settimeout(2)
+try: s.connect(('8.8.8.8', 8080)); print(s.recv(64).decode())
+except Exception: print('sin-conexion')")
+    if [[ "$got" == "$2" ]]; then echo "ok    $1 sale a Internet como $got  ($3)"; else echo "FALLO $1 sale como $got  ($3, esperado $2)"; fail=1; fi
+}
+exit_check a1 203.0.113.1  "dispositivo con salida por otro país"
+exit_check a2 198.51.100.1 "dispositivo sin salida asignada: servidor principal"
+exit_check b1 198.51.100.1 "salida inexistente ignorada"
+check a1 10.252.1.3 pass  "con salida, la red privada sigue funcionando"
+check a1 192.168.88.10 pass "con salida, la LAN del router sigue funcionando"
+check a1 10.252.2.2 block "con salida, el aislamiento entre clientes se mantiene"
+fwd_check tcp 8080 "web-a1 10.252.0.1" "puerto abierto hacia un dispositivo con salida"
+dns_check a1 8.8.8.8 resolver "con salida, los filtros DNS se mantienen"
+dot_check a1 block "con salida, DoT sigue bloqueado"
+: >"$EXIT_ROUTES"
+ip netns exec srv /usr/local/sbin/wgp-firewall sync
+exit_check a1 198.51.100.1 "salida retirada: vuelve al servidor principal"
+printf '10.252.1.2 wgx1\n' >"$EXIT_ROUTES"
+ip netns exec srv /usr/local/sbin/wgp-firewall sync
+exit_check a1 203.0.113.1 "salida reasignada"
+
 dns_check a1 8.8.8.8 resolver "cliente con filtros: su DNS se redirige al resolver"
 dns_check a1 10.252.0.1 resolver "cliente con filtros: resolver directo"
 dns_check b1 8.8.8.8 internet "cliente sin filtros: DNS sin tocar"
@@ -155,7 +200,7 @@ dns_check b1 10.252.0.1 resolver "cliente sin filtros puede usar el resolver"
 dot_check a1 block "DNS-over-TLS bloqueado con filtros"
 dot_check b1 pass  "DNS-over-TLS permitido sin filtros"
 
-[[ $(ip netns exec srv iptables -S FORWARD | grep -c wg-manager) -eq 6 ]] || { echo "FALLO reglas duplicadas"; fail=1; }
+[[ $(ip netns exec srv iptables -S FORWARD | grep -c wg-manager) -eq 9 ]] || { echo "FALLO reglas duplicadas"; fail=1; }
 
 printf '10.252.2.0/24\n' >"$LIST"
 printf 'udp 7000 10.252.2.2 7777\n' >"$FWD_LIST"
@@ -167,5 +212,7 @@ fwd_check udp 7000 "udp-b1 10.252.0.1" "los demás puertos siguen"
 
 ip netns exec srv /usr/local/sbin/wgp-firewall down wg0
 [[ $(ip netns exec srv iptables-save | grep -c wg-manager) -eq 0 ]] || { echo "FALLO down no limpió"; fail=1; }
+[[ $(ip netns exec srv ip rule show | grep -c -E '^(1000|1100):') -eq 0 ]] || { echo "FALLO down no retiró las reglas de salida"; fail=1; }
+rm -f "$EXITS" "$EXIT_ROUTES"
 
 exit $fail

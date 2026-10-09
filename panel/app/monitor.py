@@ -69,6 +69,7 @@ class Monitor:
         self.wgm = wgm
         self.dns = dns
         self.listeners: list[Callable[[list[Event]], None]] = []
+        self.exit_listeners: list[Callable[[set[int], set[int]], None]] = []
         self._task: asyncio.Task | None = None
         self._last_prune = 0.0
 
@@ -210,6 +211,10 @@ class Monitor:
             try:
                 pending = self.drain_dns()
                 await asyncio.to_thread(self.store_dns, pending)
+                changed = await asyncio.to_thread(self.wgm.refresh_exits)
+                if changed:
+                    for fn in self.exit_listeners:
+                        fn(*changed)
                 events = await asyncio.to_thread(self.tick)
                 if events:
                     self.emit(events)

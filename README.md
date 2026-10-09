@@ -125,6 +125,35 @@ Para instalar un dispositivo sin dar una cuenta, usa el botón **Enlace de insta
 - **Avisos:** si un dispositivo **vigilado** (los routers, por defecto) deja de conectar unos minutos, llega un aviso, y otro cuando vuelve. Cada persona elige dónde recibirlos: **notificaciones** en el móvil u ordenador (en iPhone, desde la app instalada), **Telegram** o **email**. Los administradores también reciben los fallos de las copias de seguridad.
 - Para Telegram y email, el admin los configura una vez en **Ajustes → Avisos**: un bot creado con [@BotFather](https://t.me/BotFather) (se pega su token) y un servidor SMTP. Cada persona vincula su Telegram con un clic desde **Avisos**.
 
+## Salidas por país
+
+Tus clientes pueden navegar con la IP de otro país sin cambiar nada en sus dispositivos: siguen conectados a este servidor (red privada, DNS y filtros incluidos) y sólo su tráfico de Internet sale por el servidor elegido.
+
+1. **Ajustes → Salidas por país → Añadir salida**: nombre, país e IP del VPS de ese país.
+2. En ese VPS (Debian/Ubuntu, el más pequeño vale) ejecuta el comando que muestra el panel:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/matiormx/WireGuardVps/main/install.sh | sudo bash -s -- exit-node <token>
+   ```
+
+   Si tu proveedor tiene firewall propio, abre el puerto UDP indicado (51821 por defecto).
+3. En menos de un minuto aparece **Conectada**. Cada cliente elige su salida por defecto en *Mi red* y cada dispositivo puede cambiarla al editarlo (sólo con «Enviar todo el tráfico por la VPN»).
+
+Si una salida deja de responder, sus dispositivos vuelven a salir por el servidor principal y recibes un aviso (puedes desactivar ese respaldo en una salida concreta si prefieres que se queden sin Internet antes que salir por otro país).
+
+## Planes y cobros (Stripe)
+
+En **Facturación**:
+
+1. **Conecta Stripe** pegando tu clave secreta (`sk_live_…`, o `sk_test_…` para probar). El panel crea solo el webhook y los productos. Necesita el dominio del panel con HTTPS.
+2. **Crea planes** (precio en €, mensual o anual, días de prueba) con sus límites: dispositivos, usuarios, puertos abiertos, servicios HTTPS y salidas por país. Cambiar un plan aplica los límites al momento a todos sus clientes.
+3. Cada cliente ve su plan, su uso y sus facturas en **Plan**, contrata o cambia de plan (con prorrateo) y gestiona su tarjeta en el portal de Stripe.
+4. **Impagos:** periodo de gracia configurable (7 días por defecto) y después suspensión automática; al pagar se reactiva solo. El cliente suspendido sólo puede entrar a pagar. Tus suspensiones manuales nunca se levantan solas.
+5. **Registro público** (opcional): cualquiera elige un plan en `https://tu-dominio/#/signup`, paga y su red se crea al momento.
+6. Clientes que te pagan por otros medios: en su ficha, **Plan → Asignar plan manual** (límites del plan, sin cobro ni suspensión automática).
+
+Opcional: IVA automático con Stripe Tax. Recibes avisos de nuevas suscripciones, cancelaciones y cobros fallidos, y el cliente de sus problemas de pago.
+
 ## Endpoint y copias de seguridad
 
 - **Ajustes → Endpoint de WireGuard:** usa un nombre (p. ej. `wg.tudominio.com`, nube **gris** en Cloudflare) en lugar de la IP. Si un día cambias de servidor, basta con mover el DNS.
@@ -183,6 +212,7 @@ nat      -s 10.252.0.0/16 -o <WAN>          -> MASQUERADE
 | `sudo wg-manager reset-admin` | Contraseña temporal para el admin si la pierdes |
 | `sudo wg-manager backup` | Copia cifrada inmediata (en `/opt/wg-platform/data/backups`) |
 | `sudo wg-manager restore <copia.wgpb>` | Restaura una copia (pide la frase de paso) |
+| `sudo wg-manager exit-node <token>` | Convierte un VPS en salida por país (el token lo da el panel) |
 
 ## Desarrollo
 

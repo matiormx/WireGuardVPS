@@ -31,7 +31,7 @@ set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 # -----------------------------------------------------------------------------
 # VERSIÓN DEL SCRIPT (se compara con la publicada en GitHub). SemVer.
 # -----------------------------------------------------------------------------
-readonly VERSION="2.7.0"
+readonly VERSION="2.8.0"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
@@ -481,6 +481,8 @@ SERVER_IP="${WG_SERVER_ADDRESS%/*}"
 LIST="${WGP_DIR}/tenants.list"
 DNS_LIST="${WGP_DIR}/dns.list"
 FWD_LIST="${WGP_DIR}/forwards.list"
+EXITS_LIST="${WGP_DIR}/exits.list"
+EXIT_ROUTES="${WGP_DIR}/exit_routes.list"
 RESERVED=" ${reserved} "
 CHAIN="${TENANT_CHAIN}"
 EGRESS="${EGRESS_CHAIN}"
@@ -506,6 +508,9 @@ rule_specs() {
         "filter|FORWARD|4|-i ${WAN} -o ${i} -d ${SUBNET} -m conntrack --ctstate RELATED,ESTABLISHED ${c} -j ACCEPT" \
         "filter|FORWARD|5|-i ${WAN} -o ${i} ${c} -j ${PFWD}" \
         "filter|FORWARD|6|-i ${i} -o ${WAN} -m conntrack --ctstate RELATED,ESTABLISHED ${c} -j ACCEPT" \
+        "filter|FORWARD|7|-i ${i} -o wgx+ ${c} -j ${EGRESS}" \
+        "filter|FORWARD|8|-i ${i} -o wgx+ -s ${SUBNET} ${c} -j ACCEPT" \
+        "filter|FORWARD|9|-i wgx+ -o ${i} -d ${SUBNET} -m conntrack --ctstate RELATED,ESTABLISHED ${c} -j ACCEPT" \
         "nat|PREROUTING|1|-i ${i} ${c} -j ${DNSCHAIN}" \
         "nat|PREROUTING|2|-i ${WAN} -m addrtype --dst-type LOCAL ${c} -j ${PDNAT}" \
         "nat|POSTROUTING|1|-s ${SUBNET} -o ${WAN} ${c} -j MASQUERADE" \
@@ -639,9 +644,69 @@ sync_tenants() {
     logger -t wgp-firewall "Sincronizado: $(wc -w <<<"${groups}") clientes, $(wc -w <<<"${dns}") con filtrado DNS, $(grep -c . <<<"${fwds}") puertos" || true
 }
 
+# --- Salidas por país -----------------------------------------------------------
+# exits.list: "wgxN TABLA" por cada servidor de salida (el panel escribe
+# /etc/wireguard/wgxN.conf con Table = off). exit_routes.list: "IP wgxN" por
+# dispositivo. Cada dispositivo con salida usa la tabla de su túnel para todo
+# lo que no es la red privada (regla suppress_prefixlength 0 sobre main).
+EXIT_PREF=1100
+EXIT_MAIN_PREF=1000
+
+sync_exits() {
+    local iface table ip dev any=0
+    declare -A tables=()
+    if [[ -f "${EXITS_LIST}" ]]; then
+        while read -r iface table _ || [[ -n "${iface}" ]]; do
+            [[ -z "${iface}" ]] && continue
+            if [[ ! "${iface}" =~ ^wgx[0-9]{1,3}$ || ! "${table}" =~ ^[0-9]{3,4}$ ]]; then
+                logger -t wgp-firewall "Salida ignorada: ${iface} ${table}" || true
+                continue
+            fi
+            tables[${iface}]=${table}
+            if [[ -f "/etc/wireguard/${iface}.conf" ]]; then
+                if ip link show "${iface}" >/dev/null 2>&1; then
+                    wg syncconf "${iface}" <(wg-quick strip "${iface}") 2>/dev/null \
+                        || logger -t wgp-firewall "No se pudo actualizar ${iface}" || true
+                else
+                    systemctl enable "wg-quick@${iface}" >/dev/null 2>&1 || true
+                    # En segundo plano: su PostUp vuelve a llamar a este script.
+                    systemctl start --no-block "wg-quick@${iface}" >/dev/null 2>&1 || true
+                fi
+            fi
+            if ip link show "${iface}" >/dev/null 2>&1; then
+                any=1
+                sysctl -qw "net.ipv4.conf.${iface}.rp_filter=2" 2>/dev/null || true
+                ip route replace default dev "${iface}" table "${table}"
+            fi
+        done <"${EXITS_LIST}"
+    fi
+    # Túneles de salida dados de baja en el panel.
+    for iface in /etc/wireguard/wgx*.conf; do
+        [[ -e "${iface}" ]] || continue
+        iface=$(basename "${iface}" .conf)
+        [[ -n "${tables[${iface}]:-}" ]] && continue
+        systemctl disable --now "wg-quick@${iface}" >/dev/null 2>&1 || true
+    done
+    while ip rule del pref "${EXIT_PREF}" 2>/dev/null; do :; done
+    while ip rule del pref "${EXIT_MAIN_PREF}" 2>/dev/null; do :; done
+    (( any )) || return 0
+    # Con salidas, la respuesta llega por wgxN: rp_filter estricto la descartaría.
+    [[ "$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null)" != "1" ]] || sysctl -qw net.ipv4.conf.all.rp_filter=2
+    ip rule add pref "${EXIT_MAIN_PREF}" lookup main suppress_prefixlength 0
+    if [[ -f "${EXIT_ROUTES}" ]]; then
+        while read -r ip dev _ || [[ -n "${ip}" ]]; do
+            [[ -z "${ip}" ]] && continue
+            if valid_ip "${ip}" && [[ -n "${tables[${dev}]:-}" ]] && ip link show "${dev}" >/dev/null 2>&1; then
+                ip rule add pref "${EXIT_PREF}" from "${ip}/32" lookup "${tables[${dev}]}"
+            fi
+        done <"${EXIT_ROUTES}"
+    fi
+}
+
 up() {
     local iface=${1:-${IFACE_DEFAULT}} table chain pos args
     sync_tenants
+    sync_exits
     while IFS='|' read -r table chain pos args; do
         # shellcheck disable=SC2086
         ipt -t "${table}" -C "${chain}" ${args} 2>/dev/null || ipt -t "${table}" -I "${chain}" "${pos}" ${args}
@@ -665,10 +730,13 @@ down() {
         ipt -t nat -F "${t}" 2>/dev/null || true
         ipt -t nat -X "${t}" 2>/dev/null || true
     done
+    while ip rule del pref "${EXIT_PREF}" 2>/dev/null; do :; done
+    while ip rule del pref "${EXIT_MAIN_PREF}" 2>/dev/null; do :; done
 }
 
 apply() {
     sync_tenants
+    sync_exits
     if [[ -s "/etc/wireguard/${IFACE_DEFAULT}.conf" ]] && ! systemctl is-active --quiet "wg-quick@${IFACE_DEFAULT}"; then
         systemctl start "wg-quick@${IFACE_DEFAULT}" || true
     fi
@@ -677,7 +745,7 @@ apply() {
 case "${1:-}" in
     up)    up "${2:-}" ;;
     down)  down "${2:-}" ;;
-    sync)  sync_tenants ;;
+    sync)  sync_tenants; sync_exits ;;
     apply) apply ;;
     *) echo "Uso: $0 {up|down|sync|apply} [iface]" >&2; exit 2 ;;
 esac
@@ -1082,6 +1150,10 @@ cmd_update() {
     touch "${LOG_FILE}" && chmod 600 "${LOG_FILE}"
     banner
     [[ "${skip_self}" == "true" ]] || self_update
+    if [[ ! -f "${COMPOSE_FILE}" && -f "/etc/wireguard/${EXIT_IFACE}.conf" ]]; then
+        success "Nodo de salida: el script está al día (no hay panel que actualizar)."
+        return 0
+    fi
     detect_compose || die "Docker Compose no disponible. Ejecute: $0 install"
     [[ -f "${COMPOSE_FILE}" ]] || die "No existe ${COMPOSE_FILE}. Ejecute: $0 install"
 
@@ -1121,6 +1193,78 @@ cmd_logs() {
     check_root
     detect_compose || die "Docker Compose no disponible."
     compose logs --tail 200 -f
+}
+
+# =============================================================================
+#  NODO DE SALIDA (otro país)
+# -----------------------------------------------------------------------------
+#  Un VPS sencillo (sin panel ni Docker) que da salida a Internet a los
+#  dispositivos que la elijan. El servidor principal se conecta a él por un
+#  túnel WireGuard propio (wgexit); aquí sólo se hace NAT hacia Internet.
+#  El panel genera el token (claves y direcciones del túnel) al darlo de alta.
+# =============================================================================
+EXIT_IFACE="wgexit"
+
+decode_token() {
+    local t=${1//-/+}
+    t=${t//_//}
+    while (( ${#t} % 4 )); do t+="="; done
+    printf '%s' "${t}" | base64 -d 2>/dev/null
+}
+
+cmd_exit_node() {
+    local token="${1:-}" raw version link_iface exit_key hub_pub exit_addr hub_ip subnet port label
+    [[ -n "${token}" ]] || die "Uso: $0 exit-node <token> (cópialo del panel: Ajustes › Salidas por país)"
+    check_root
+    check_os
+    acquire_lock
+    touch "${LOG_FILE}" && chmod 600 "${LOG_FILE}"
+    banner
+    raw="$(decode_token "${token}")" || die "Token no válido."
+    IFS='|' read -r version link_iface exit_key hub_pub exit_addr hub_ip subnet port label <<<"${raw}"
+    [[ "${version}" == "v1" ]] || die "Token no válido o de otra versión: vuelve a copiarlo del panel."
+    [[ "${exit_key}" =~ ^[A-Za-z0-9+/]{43}=$ && "${hub_pub}" =~ ^[A-Za-z0-9+/]{43}=$ ]] || die "Claves del token no válidas."
+    [[ "${exit_addr}" =~ ^169\.254\.252\.[0-9]{1,3}/30$ && "${hub_ip}" =~ ^169\.254\.252\.[0-9]{1,3}$ ]] || die "Direcciones del token no válidas."
+    [[ "${subnet}" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ && "${port}" =~ ^[0-9]{2,5}$ ]] || die "Red o puerto del token no válidos."
+    [[ "${link_iface}" =~ ^wgx[0-9]{1,3}$ ]] || die "Token no válido."
+    label="${label//[^[:alnum:] ._-]/}"
+
+    step "Nodo de salida «${label}»"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq --no-install-recommends ca-certificates curl iptables iproute2 wireguard-tools >/dev/null
+    setup_sysctl
+    detect_wan_iface
+    install -d -m 0700 /etc/wireguard
+    umask 077
+    cat >"/etc/wireguard/${EXIT_IFACE}.conf" <<EOF
+# Generado por wg-manager ${VERSION}: nodo de salida «${label}» (${link_iface} en el servidor principal).
+[Interface]
+Address = ${exit_addr}
+ListenPort = ${port}
+PrivateKey = ${exit_key}
+MTU = ${WG_MTU}
+PostUp = iptables -w -t nat -A POSTROUTING -s ${subnet} -o ${WAN_IFACE} -j MASQUERADE; iptables -w -I FORWARD 1 -i %i -o ${WAN_IFACE} -s ${subnet} -j ACCEPT; iptables -w -I FORWARD 2 -i ${WAN_IFACE} -o %i -d ${subnet} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+PostDown = iptables -w -t nat -D POSTROUTING -s ${subnet} -o ${WAN_IFACE} -j MASQUERADE; iptables -w -D FORWARD -i %i -o ${WAN_IFACE} -s ${subnet} -j ACCEPT; iptables -w -D FORWARD -i ${WAN_IFACE} -o %i -d ${subnet} -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+
+[Peer]
+# Servidor principal (sólo él puede usar esta salida)
+PublicKey = ${hub_pub}
+AllowedIPs = ${hub_ip}/32, ${subnet}
+EOF
+    umask 022
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw allow "${port}/udp" comment 'WireGuard salida' >/dev/null
+        info "UFW: permitido ${port}/udp."
+    fi
+    systemctl enable "wg-quick@${EXIT_IFACE}" >/dev/null 2>&1
+    systemctl restart "wg-quick@${EXIT_IFACE}" || die "wg-quick@${EXIT_IFACE} no arrancó. Ver: journalctl -u wg-quick@${EXIT_IFACE}"
+    if [[ -n "${SCRIPT_PATH}" && "${SCRIPT_PATH}" != "${INSTALL_BIN}" ]]; then
+        install -m 0755 "${SCRIPT_PATH}" "${INSTALL_BIN}"
+    fi
+    success "Nodo de salida listo: escuchando en ${port}/udp."
+    printf '\n  En el panel, la salida «%s» aparecerá conectada en menos de un minuto.\n' "${label}"
+    printf '  IP pública de salida: %s\n\n' "$(detect_public_ip 2>/dev/null || echo '?')"
 }
 
 cmd_backup() {
@@ -1255,6 +1399,7 @@ ${C_BOLD}Uso:${C_RESET}
                                  Contraseña temporal para el administrador
   sudo $0 backup                 Copia cifrada ahora (frase de paso: panel › Ajustes)
   sudo $0 restore <copia.wgpb>   Restaura una copia (p. ej. en un servidor nuevo)
+  sudo $0 exit-node <token>      Convierte este VPS en salida por país (token del panel)
   $0 version | help
 
 ${C_BOLD}Configuración:${C_RESET} ${CONFIG_FILE}
@@ -1272,6 +1417,7 @@ main() {
         logs)                 cmd_logs "$@" ;;
         reset-admin)          cmd_reset_admin "$@" ;;
         backup)               cmd_backup "$@" ;;
+        exit-node)            cmd_exit_node "$@" ;;
         restore)              cmd_restore "$@" ;;
         version|-v|--version) echo "wg-manager v${VERSION}" ;;
         help|-h|--help)       usage ;;

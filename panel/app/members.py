@@ -92,8 +92,10 @@ def register(app: FastAPI, d) -> None:
     def target_tenant(p, c: sqlite3.Connection, tenant_id: int | None) -> int:
         tid = d.scope_tenant(p, tenant_id)
         d.tenant_or_404(c, tid)
-        if c.execute("SELECT COUNT(*) FROM members WHERE tenant_id = ?", (tid,)).fetchone()[0] >= MAX_MEMBERS:
-            raise HTTPException(409, f"Máximo {MAX_MEMBERS} usuarios por cliente")
+        limit = min(MAX_MEMBERS, d.tenant_or_404(c, tid)["max_members"])
+        if c.execute("SELECT COUNT(*) FROM members WHERE tenant_id = ?", (tid,)).fetchone()[0] >= limit:
+            raise HTTPException(409, f"Tu plan incluye {limit} usuarios: amplíalo para invitar a más" if limit
+                                else "Tu plan no incluye usuarios adicionales")
         return tid
 
     def listing(c: sqlite3.Connection, tid: int) -> dict:
