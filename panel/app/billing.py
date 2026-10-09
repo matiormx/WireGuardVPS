@@ -374,6 +374,16 @@ def register(app: FastAPI, d) -> None:
             raise HTTPException(409, "Configura primero el dominio del panel (Ajustes) con HTTPS: Stripe lo necesita")
         return f"https://{main}"
 
+    def return_base(c: sqlite3.Connection, request: Request | None) -> str:
+        """A dónde vuelve el cliente tras pagar: al mismo dominio desde el que vino (la página
+        pública sirve el panel en /app) o, si no, al dominio del panel."""
+        host = d.host_of(request.headers.get("host")) if request is not None else None
+        if host and host in d.doms.site_domains(c, only_enabled=True):
+            return f"https://{host}/app"
+        if host and d.doms.tenant_for_host(c, host) is not None:
+            return f"https://{host}/"
+        return public_base(c) + "/"
+
     def plan_json(p: sqlite3.Row, admin: bool = False, c: sqlite3.Connection | None = None) -> dict:
         out = {k: p[k] for k in ("id", "name", "description", "price_cents", "currency", "interval", "trial_days",
                                  "max_devices", "max_forwards", "max_services", "max_members")}
@@ -622,7 +632,7 @@ def register(app: FastAPI, d) -> None:
         return s.request("POST", "checkout/sessions", params)["url"]
 
     @app.post("/api/billing/checkout")
-    def checkout(body: CheckoutIn, p: d.BillingUser, c: d.Conn, tenant_id: int | None = None):
+    def checkout(body: CheckoutIn, request: Request, p: d.BillingUser, c: d.Conn, tenant_id: int | None = None):
         tid = d.scope_tenant(p, tenant_id)
         t = d.tenant_or_404(c, tid)
         if t["billing_status"] == "free":
@@ -631,7 +641,7 @@ def register(app: FastAPI, d) -> None:
         if plan["price_cents"] <= 0 or (not plan["public"] and not p.is_admin):
             raise HTTPException(422, "Ese plan no se puede contratar desde aquí")
         s = b.require(c)
-        base = public_base(c)
+        base = return_base(c, request)
         try:
             if t["stripe_subscription_id"] and t["billing_status"] in OK_STATUSES | DUE_STATUSES:
                 # Cambio de plan: se prorratea en la siguiente factura.
@@ -647,20 +657,20 @@ def register(app: FastAPI, d) -> None:
                 c.commit()
                 d.apply_wg()
                 return {"changed": True, **tenant_billing(c, tid)}
-            url = checkout_session(c, s, t, plan, base, "/#/plan?pago=ok", "/#/plan")
+            url = checkout_session(c, s, t, plan, base, "#/plan?pago=ok", "#/plan")
         except StripeError as exc:
             raise HTTPException(409, str(exc)) from None
         return {"url": url}
 
     @app.post("/api/billing/portal")
-    def portal(p: d.BillingUser, c: d.Conn, tenant_id: int | None = None):
+    def portal(request: Request, p: d.BillingUser, c: d.Conn, tenant_id: int | None = None):
         tid = d.scope_tenant(p, tenant_id)
         t = d.tenant_or_404(c, tid)
         if not t["stripe_customer_id"]:
             raise HTTPException(409, "Aún no tienes datos de pago")
         try:
             url = b.require(c).request("POST", "billing_portal/sessions", {
-                "customer": t["stripe_customer_id"], "return_url": f"{public_base(c)}/#/plan", "locale": "es"})["url"]
+                "customer": t["stripe_customer_id"], "return_url": f"{return_base(c, request)}#/plan", "locale": "es"})["url"]
         except StripeError as exc:
             raise HTTPException(409, str(exc)) from None
         return {"url": url}
@@ -714,7 +724,7 @@ def register(app: FastAPI, d) -> None:
         b.apply_plan(c, tid, plan["id"])
         t = d.tenant_or_404(c, tid)
         try:
-            url = checkout_session(c, b.require(c), t, plan, public_base(c), "/#/signup/ok", "/#/signup")
+            url = checkout_session(c, b.require(c), t, plan, return_base(c, request), "#/signup/ok", "#/signup")
         except StripeError as exc:
             c.rollback()
             raise HTTPException(409, str(exc)) from None

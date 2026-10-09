@@ -337,3 +337,16 @@ def test_free_tenants(admin):
     assert r["status"] == "manual"
     r = admin.put(f"/api/admin/tenants/{t['id']}/plan", json={"plan_id": None}, headers=H).json()
     assert r["status"] == "none" and len(r["plans"]) == 1
+
+
+def test_checkout_from_public_site_returns_there(admin):
+    setup_stripe(admin)
+    plan = admin.post("/api/admin/plans", json={"name": "Hogar", "price_cents": 499, "max_devices": 5}, headers=H).json()
+    admin.put("/api/admin/site", json={"domains": ["mivpn.com"], "enabled": True}, headers=H)
+    admin.put("/api/admin/billing/settings", json={"signup": True}, headers=H)
+    anon = TestClient(admin.app)
+    r = anon.post("/api/signup", json={"name": "Nuevo", "email": "n@x.com", "username": "nuevo", "password": "Clave12345",
+                                       "plan_id": plan["id"]}, headers={**H, "Host": "mivpn.com"})
+    assert r.status_code == 200
+    cs = [f for m, p, f in FakeStripe.calls if p == "checkout/sessions"][-1]
+    assert cs["success_url"] == "https://mivpn.com/app#/signup/ok" and cs["cancel_url"] == "https://mivpn.com/app#/signup"

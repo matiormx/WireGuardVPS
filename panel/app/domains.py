@@ -63,6 +63,13 @@ class Domains:
     def main_domain(self, c: sqlite3.Connection) -> str | None:
         return get_setting(c, "main_domain") or None
 
+    @staticmethod
+    def site_domains(c: sqlite3.Connection, only_enabled: bool = False) -> list[str]:
+        """Dominios de la página pública (presentación del servicio y planes)."""
+        if only_enabled and get_setting(c, "site_enabled") != "1":
+            return []
+        return (get_setting(c, "site_domains") or "").split()
+
     def force_https(self, c: sqlite3.Connection) -> bool:
         return get_setting(c, "force_https") == "1" and bool(self.main_domain(c))
 
@@ -78,7 +85,7 @@ class Domains:
     def taken(self, c: sqlite3.Connection, host: str, exclude_tenant: int | None = None,
               exclude_service: int | None = None) -> bool:
         """Un nombre sólo puede ser el del panel, el de un cliente o el de un servicio publicado."""
-        if host == self.main_domain(c):
+        if host == self.main_domain(c) or host in self.site_domains(c):
             return True
         svc = c.execute("SELECT id FROM services WHERE hostname = ?", (host,)).fetchone()
         if svc and svc["id"] != exclude_service:
@@ -87,7 +94,7 @@ class Domains:
         return bool(row) and row["id"] != exclude_tenant
 
     def registered(self, c: sqlite3.Connection, host: str) -> bool:
-        if host and host == self.main_domain(c):
+        if host and (host == self.main_domain(c) or host in self.site_domains(c, only_enabled=True)):
             return True
         row = self.tenant_for_host(c, host)
         if row is not None:

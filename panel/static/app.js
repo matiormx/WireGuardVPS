@@ -925,6 +925,69 @@ function backupCard() {
   return card;
 }
 
+/* Página pública: presentación del servicio y planes en un dominio propio. */
+function siteCard() {
+  const card = h("div", { class: "card" }, spinnerBlock());
+  let cfg = null;
+  let status = null;
+  const check = async () => {
+    try { status = await api("GET", "/api/admin/site/status"); } catch (e) { toast(e.message, "err"); }
+    draw();
+  };
+  const save = async (patch, msg) => {
+    try { cfg = await api("PUT", "/api/admin/site", patch); toast(msg); status = null; draw(); if (cfg.domains.length) check(); }
+    catch (e) { toast(e.message, "err"); }
+  };
+  const editTexts = () => formModal({
+    title: "Textos de la página",
+    fields: [
+      h("div", { class: "full" }, field("Nombre del servicio", input({ name: "title", maxlength: "60", value: cfg.title }))),
+      h("div", { class: "full" }, field("Titular", input({ name: "headline", maxlength: "120", value: cfg.headline }))),
+      h("div", { class: "full" }, field("Descripción", h("textarea", { class: "input", name: "subtitle", maxlength: "400", rows: "3", value: cfg.subtitle }))),
+      h("div", { class: "full" }, field("Email de contacto", input({ name: "email", type: "email", maxlength: "254", value: cfg.email, placeholder: "hola@midominio.com" }),
+        "Aparece en el pie y en «Contactar» si no tienes el registro con pago abierto.")),
+      h("div", { class: "full" }, field("Aviso legal (pie de página)", h("textarea", { class: "input", name: "legal", maxlength: "4000", rows: "4", value: cfg.legal,
+        placeholder: "Razón social, NIF, dirección…" }))),
+    ],
+    onSubmit: async (fd) => {
+      cfg = await api("PUT", "/api/admin/site", { title: fd.get("title"), headline: fd.get("headline"), subtitle: fd.get("subtitle"),
+        email: fd.get("email"), legal: fd.get("legal") });
+      toast("Textos guardados");
+      draw();
+    },
+  });
+  const draw = () => {
+    const ip = cfg.server_ips[0] || "IP del servidor";
+    const domInput = input({ value: cfg.domains.join(", "), placeholder: "midominio.com, www.midominio.com", class: "input mono", autocapitalize: "off", spellcheck: "false" });
+    fill(card,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Página pública" }),
+        h("div", { class: "note", text: "Una web de presentación de tu servicio con tus planes, en tu propio dominio (distinto del de la VPN). Desde ella tus clientes entran a su cuenta o contratan un plan." })),
+        cfg.enabled && cfg.url ? h("a", { class: "btn", href: cfg.url, target: "_blank", rel: "noopener" }, icon("globe"), "Ver página") : null),
+      h("div", { class: "grid", style: { gap: "14px" } },
+        h("div", { class: "input-group" }, domInput,
+          h("button", { class: "btn primary", onClick: () => save({ domains: splitList(domInput.value) }, "Dominio guardado") }, "Guardar")),
+        h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+          h("label", { class: "switch" }, h("input", { type: "checkbox", checked: cfg.enabled, disabled: !cfg.domains.length,
+            onChange: (e) => save({ enabled: e.target.checked }, e.target.checked ? "Página publicada" : "Página desactivada") }),
+            h("span", { class: "track" }), h("span", { text: "Publicar la página" })),
+          h("button", { class: "btn", onClick: editTexts }, icon("edit"), "Textos"),
+          cfg.domains.length ? h("button", { class: "btn", onClick: (e) => { e.currentTarget.disabled = true; check(); } }, icon("refresh"), "Comprobar") : null),
+        cfg.enabled ? domainStatusBlock(status) : null,
+        cfg.has_plans ? null : h("p", { class: "help" }, "Aún no tienes planes visibles: créalos en ", h("a", { href: "#/billing", text: "Facturación" }),
+          " para que aparezcan con su precio."),
+        cfg.has_plans && !cfg.signup ? h("p", { class: "help" }, "Para que los visitantes puedan contratar desde la página, activa el «Registro público» en ",
+          h("a", { href: "#/billing", text: "Facturación" }), ".") : null,
+        h("ol", { class: "steps" },
+          h("li", null, "En tu proveedor de dominios crea un registro ", h("b", { text: "A" }), " de cada dominio (p. ej. ", h("code", { text: cfg.domains[0] || "midominio.com" }),
+            " y www) hacia ", h("code", { text: ip }), "."),
+          h("li", { text: "Escríbelos arriba, guarda y activa «Publicar la página». El certificado HTTPS se emite solo." }),
+          h("li", null, "Tus clientes entran desde el botón «Entrar» (el panel queda en ", h("code", { text: `${cfg.domains[0] || "midominio.com"}/app` }), ")."))));
+  };
+  api("GET", "/api/admin/site").then((d) => { cfg = d; draw(); if (cfg.enabled && cfg.domains.length) check(); })
+    .catch((e) => fill(card, h("p", { class: "note", text: e.message })));
+  return card;
+}
+
 function endpointCard() {
   const card = h("div", { class: "card" }, spinnerBlock());
   const draw = (cfg) => {
@@ -1016,6 +1079,7 @@ async function settingsView(main) {
               h("code", { text: cfg.main_domain || "vpn.tudominio.com" }), " → ", h("code", { text: ip }), "."),
             h("li", { text: "Escríbelo arriba y pulsa Guardar." }),
             h("li", { text: "Pulsa Comprobar. Cuando HTTPS esté activo, abre el panel con el dominio y activa «Forzar HTTPS»." })))),
+      siteCard(),
       endpointCard(),
       exitsCard(),
       alertsConfigCard(),
@@ -2985,7 +3049,8 @@ async function signupView(step) {
   let info;
   try { info = await api("GET", "/api/signup"); } catch (e) { info = { enabled: false }; }
   if (!info.enabled) return publicShell(h("p", { class: "lead", text: "El registro no está abierto." }), h("a", { class: "btn block", href: "#/" }, "Volver"));
-  let chosen = info.plans[0] ? info.plans[0].id : null;
+  const wanted = Number(hashParam("plan"));
+  let chosen = info.plans.some((p) => p.id === wanted) ? wanted : (info.plans[0] ? info.plans[0].id : null);
   const err = h("div", { class: "help", style: { color: "var(--danger)", minHeight: "18px" } });
   const btn = h("button", { class: "btn primary block", type: "submit" }, "Continuar al pago");
   const cards = h("div", { class: "plan-pick" }, info.plans.map((p) => h("label", { class: "plan-option" },

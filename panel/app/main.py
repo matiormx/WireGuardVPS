@@ -21,13 +21,13 @@ from typing import Annotated
 
 import segno
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 import bcrypt
 
-from . import alerts, backup, billing, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, passkeys, security, wg
+from . import alerts, backup, billing, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, wg
 from .config import Settings, load_settings
 from .db import (LABEL_RE, Database, get_setting, make_hostname, name_in_use, set_setting,
                  unique_hostname, username_taken)
@@ -1415,6 +1415,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         owner = doms.tenant_for_host(c, domains.host_of(request.headers.get("host")))
         if owner is not None:
             return {"title": owner["name"], "tenant": True}
+        if domains.host_of(request.headers.get("host")) in doms.site_domains(c, only_enabled=True):
+            return {"title": site.config(c)["title"], "tenant": False, "site": True}
         return {"title": "WireGuard Cloud", "tenant": False}
 
     @app.get("/api/branding")
@@ -1499,9 +1501,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     members.register(app, deps)
     bill = billing.Billing(settings, database, apply_wg, notifier.notify_tenant)
     app.state.billing = bill
-    vars(deps).update(billing=bill, BillingUser=BillingUser, next_net=lambda c: wg.next_free_net_index(c, settings),
+    vars(deps).update(host_of=domains.host_of, billing=bill, BillingUser=BillingUser, next_net=lambda c: wg.next_free_net_index(c, settings),
                       notify_admins=notifier.notify_admins)
     billing.register(app, deps)
+    deps.clean_host = _clean_host
+    deps.host_of = domains.host_of
+    site.register(app, deps)
 
     # ------------------------------------------------------------------ SPA
     @app.get("/healthz", include_in_schema=False)
@@ -1511,8 +1516,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     sw_source = (STATIC_DIR / "sw.js").read_text().replace("__VERSION__", _static_version())
 
+    def is_site(c: sqlite3.Connection, request: Request) -> bool:
+        return domains.host_of(request.headers.get("host")) in doms.site_domains(c, only_enabled=True)
+
     @app.get("/", include_in_schema=False)
-    def index():
+    def index(request: Request, c: Conn):
+        # En el dominio de la página pública, la presentación; el panel queda en /app.
+        if is_site(c, request):
+            return HTMLResponse(site.render(c, proxy.enabled), headers={"Cache-Control": "no-cache"})
+        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/app", include_in_schema=False)
+    def panel_app():
         return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
     # PWA: el service worker y el manifest se sirven desde la raíz para que su
@@ -1526,9 +1541,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def manifest(request: Request, c: Conn):
         data = json.loads((STATIC_DIR / "manifest.webmanifest").read_text())
         brand = branding_for(c, request)
-        if brand["tenant"]:
+        if brand["tenant"] or is_site(c, request):
             data["name"] = brand["title"]
             data["short_name"] = brand["title"][:12]
+        if is_site(c, request):
+            data["start_url"] = "/app?source=pwa"   # la app instalada abre el panel, no la presentación
         return JSONResponse(data, media_type="application/manifest+json", headers={"Cache-Control": "no-cache"})
 
     return app
