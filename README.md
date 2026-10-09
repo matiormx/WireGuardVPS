@@ -163,12 +163,14 @@ Opcional: IVA automático con Stripe Tax. Recibes avisos de nuevas suscripciones
 
 - **Ajustes → Endpoint de WireGuard:** usa un nombre (p. ej. `wg.tudominio.com`, nube **gris** en Cloudflare) en lugar de la IP. Si un día cambias de servidor, basta con mover el DNS.
 - **Ajustes → Copias de seguridad:** define una **frase de paso** (cifra las copias con AES-256; sin ella no se pueden restaurar) y activa la copia diaria. Se guardan en el servidor (con retención) y, opcionalmente, en cualquier almacenamiento **S3** (Amazon S3, Cloudflare R2, Backblaze B2, MinIO…). También puedes descargarlas desde el panel.
-- **Restaurar en un servidor nuevo:**
+- **Restaurar en un servidor nuevo:** instala la plataforma, entra al panel nuevo y pulsa **Restaura una copia de seguridad** (en el Panel) o **Ajustes › Copias de seguridad › Restaurar una copia**: elige el archivo `.wgpb`, escribe su frase de paso, revisa el resumen y confirma. Después entra con el usuario y la contraseña del servidor anterior. También por consola:
 
   ```bash
   curl -fsSL https://raw.githubusercontent.com/matiormx/WireGuardVps/main/install.sh | sudo bash
   sudo wg-manager restore wgp-20261009-030000.wgpb
   ```
+
+  (por consola, si la red de la copia es distinta, se ajusta también la configuración del servidor).
 
   Se recuperan clientes, dispositivos y sus claves, la clave del servidor, dominios, DNS, servicios y ajustes. Después apunta el DNS del endpoint (y de los dominios) al nuevo servidor: los dispositivos se reconectan solos.
 

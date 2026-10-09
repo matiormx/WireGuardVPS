@@ -576,6 +576,76 @@ async function downloadBackup(name) {
   } catch (e) { toast(e.message, "err"); }
 }
 
+/* Restaurar una copia (p. ej. tras instalar en un servidor nuevo). */
+function restoreModal() {
+  const fileInp = h("input", { type: "file", accept: ".wgpb", class: "input", required: true });
+  const passInp = input({ type: "password", autocomplete: "off", placeholder: "Frase de paso de la copia" });
+  const result = h("div");
+  const err = h("div", { class: "help", style: { color: "var(--danger)" } });
+  let passphrase = "";
+  const checkBtn = h("button", { class: "btn primary", onClick: async () => {
+    err.textContent = "";
+    const file = fileInp.files[0];
+    if (!file) { err.textContent = "Elige el archivo .wgpb"; return; }
+    if (!passInp.value) { err.textContent = "Escribe la frase de paso"; return; }
+    checkBtn.disabled = true;
+    checkBtn.lastChild.textContent = "Comprobando…";
+    try {
+      const res = await fetch("/api/admin/backup/upload", { method: "POST", credentials: "same-origin", body: file,
+        headers: { "X-WGP": "1", "Content-Type": "application/octet-stream", "X-Passphrase": encodeURIComponent(passInp.value) } });
+      const info = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(errorMessage(info, res.status));
+      passphrase = passInp.value;
+      showInfo(info);
+    } catch (e) { err.textContent = e.message; }
+    checkBtn.disabled = false;
+    checkBtn.lastChild.textContent = "Comprobar";
+  } }, icon("check"), "Comprobar");
+  const showInfo = (info) => {
+    fill(result, h("div", { class: "domain-status" },
+      checkLine(true, `Copia del ${new Date(info.created_at * 1000).toLocaleString()} descifrada correctamente`, ""),
+      h("dl", { class: "kv" },
+        h("dt", { text: "Clientes" }), h("dd", { text: String(info.tenants) }),
+        h("dt", { text: "Dispositivos" }), h("dd", { text: String(info.devices) }),
+        h("dt", { text: "Endpoint de los dispositivos" }), h("dd", { class: "mono", text: info.device_endpoint || "(IP del servidor anterior)" }),
+        h("dt", { text: "Dominio del panel" }), h("dd", { class: "mono", text: info.main_domain || "—" })),
+      info.network_ok ? null : checkLine(false, "", info.network_error)),
+      info.network_ok ? h("div", { class: "banner warn", style: { marginTop: "12px" } }, icon("alert"),
+        "Se reemplazarán TODOS los datos de este panel (clientes, dispositivos, ajustes y cuentas) por los de la copia. Después entrarás con el usuario y la contraseña del servidor anterior.") : null,
+      info.network_ok ? h("button", { class: "btn danger", style: { marginTop: "12px" }, onClick: async (e) => {
+        const b = e.currentTarget;
+        b.disabled = true;
+        b.textContent = "Restaurando…";
+        try {
+          const r = await api("POST", "/api/admin/backup/restore", { passphrase });
+          m.close();
+          const done = modal({
+            title: "Copia restaurada",
+            body: [
+              checkLine(true, `${r.tenants} clientes y ${r.devices} dispositivos recuperados.`, ""),
+              r.warnings.length ? h("ul", { class: "steps" }, r.warnings.map((w) => h("li", { text: w }))) : null,
+              h("p", { class: "note", style: { margin: 0 }, text: "Entra ahora con el usuario y la contraseña que usabas en el servidor anterior." }),
+            ],
+            actions: [h("button", { class: "btn primary", onClick: () => { done.close(); state.me = null; location.hash = "#/"; render(); } }, "Iniciar sesión")],
+          });
+        } catch (ex) { err.textContent = ex.message; b.disabled = false; b.textContent = "Restaurar ahora"; }
+      } }, "Restaurar ahora") : null);
+  };
+  const m = modal({
+    title: "Restaurar una copia",
+    wide: true,
+    body: [
+      h("p", { class: "note", style: { marginTop: 0 }, text: "Recupera la plataforma de otro servidor (o de una fecha anterior): elige el archivo .wgpb que descargaste y su frase de paso." }),
+      field("Archivo de la copia", fileInp),
+      field("Frase de paso", passInp),
+      h("div", { class: "cell-flex" }, checkBtn),
+      err,
+      result,
+    ],
+    actions: [h("button", { class: "btn", onClick: () => { api("DELETE", "/api/admin/backup/upload").catch(() => {}); m.close(); } }, "Cancelar")],
+  });
+}
+
 function backupCard() {
   const card = h("div", { class: "card" }, spinnerBlock());
   let st = null;
@@ -651,6 +721,7 @@ function backupCard() {
         h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
           runBtn,
           h("button", { class: "btn", onClick: passModal }, icon("key"), st.has_passphrase ? "Cambiar frase de paso" : "Definir frase de paso"),
+          h("button", { class: "btn", onClick: restoreModal }, icon("refresh"), "Restaurar una copia"),
           h("button", { class: "btn", onClick: s3Modal }, icon("server"), st.s3.configured ? `S3: ${st.s3.bucket}` : "Copia externa (S3)")),
         h("div", { class: "backup-opts" },
           h("label", { class: "switch" },
@@ -808,6 +879,9 @@ async function dashboardView(main) {
     const content = h("div", null,
       pageHead("Panel", "Estado de la plataforma WireGuard",
         h("a", { class: "btn primary", href: "#/clients" }, icon("users"), "Gestionar clientes")),
+      o.tenants === 0 ? h("div", { class: "banner" }, icon("refresh"),
+        h("span", null, "¿Vienes de otro servidor? ", h("a", { href: "#", onClick: (e) => { e.preventDefault(); restoreModal(); }, text: "Restaura una copia de seguridad" }),
+          " y recupera clientes, dispositivos y ajustes.")) : null,
       o.server.interface_up ? null : h("div", { class: "banner" }, icon("alert"),
         `La interfaz ${o.server.interface} no está activa en el servidor. Revisa: systemctl status wg-quick@${o.server.interface}`),
       h("div", { class: "grid stats" },

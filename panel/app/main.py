@@ -165,6 +165,10 @@ class BackupIn(BaseModel):
     clear_s3: bool = False
 
 
+class RestoreIn(BaseModel):
+    passphrase: str = Field(min_length=1, max_length=256)
+
+
 class EndpointIn(BaseModel):
     endpoint: str | None = Field(default=None, max_length=253)
 
@@ -916,6 +920,93 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if body.keep is not None:
             backups.prune(body.keep)
         return backup_state()
+
+    # Restaurar desde el panel (p. ej. en un servidor recién instalado): 1) se sube la copia y se
+    # comprueba con la frase de paso; 2) se confirma y se restaura sobre la base en uso.
+    restore_file = settings.data_dir / "restore-upload.wgpb"
+    max_upload = 512 * 1024 * 1024
+
+    def passphrase_header(request: Request) -> str:
+        raw = urllib.parse.unquote(request.headers.get("x-passphrase", ""))
+        if not raw:
+            raise HTTPException(422, "Indica la frase de paso de la copia")
+        return raw
+
+    @app.post("/api/admin/backup/upload")
+    async def upload_backup(request: Request, _: Admin):
+        if int(request.headers.get("content-length") or 0) > max_upload:
+            raise HTTPException(413, "Archivo demasiado grande")
+        passphrase = passphrase_header(request)
+        blob = await request.body()
+        if len(blob) > max_upload:
+            raise HTTPException(413, "Archivo demasiado grande")
+        try:
+            info = await asyncio.to_thread(backup.inspect, settings, blob, passphrase)
+        except backup.BackupError as exc:
+            raise HTTPException(422, str(exc)) from None
+        tmp = restore_file.with_suffix(".tmp")
+        tmp.write_bytes(blob)
+        tmp.chmod(0o600)
+        tmp.replace(restore_file)
+        if not info["network_ok"]:
+            info["network_error"] = ("La red de la copia ({}) no es la de este servidor ({}). Restaura por consola: "
+                                     "sudo wg-manager restore <archivo>, que ajusta el servidor.").format(
+                info["network"]["WG_SUBNET"], settings.wg_subnet)
+        return info
+
+    @app.post("/api/admin/backup/restore")
+    async def restore_backup(body: RestoreIn, request: Request, response: Response, _: Admin):
+        if not restore_file.exists():
+            raise HTTPException(409, "Sube primero la copia")
+        blob = restore_file.read_bytes()
+        try:
+            result = await asyncio.to_thread(backup.restore_live, settings, blob, body.passphrase)
+        except backup.BackupError as exc:
+            raise HTTPException(422, str(exc)) from None
+        restore_file.unlink(missing_ok=True)
+        # Migraciones (la copia puede ser de una versión anterior) y aplicar todo lo restaurado.
+        database.init(settings.admin_user, settings.admin_password, wg.generate_keypair)
+        warnings = []
+        with database.conn() as c:
+            main = doms.main_domain(c)
+            if main and not doms.dns_status(main)["ok"]:
+                # Si el dominio aún apunta al servidor anterior, «Forzar HTTPS» llevaría allí.
+                set_setting(c, "force_https", "0")
+                warnings.append(f"Apunta el dominio {main} a este servidor; mientras tanto se ha desactivado «Forzar HTTPS».")
+            endpoint = wg.endpoint_host(c, settings)
+            saved_name = get_setting(c, "wg_endpoint") or ""
+        # Dirección que tienen los dispositivos en su configuración (guardada en las copias nuevas).
+        old = result["meta"].get("endpoint") or saved_name or None
+        is_ip = True
+        if old:
+            try:
+                ipaddress.ip_address(old)
+            except ValueError:
+                is_ip = False
+        if old and not is_ip:
+            warnings.append(f"Cambia el DNS de {old} a la IP de este servidor ({settings.endpoint}): "
+                            "los dispositivos se reconectarán solos, sin tocar nada.")
+            if saved_name and saved_name != endpoint:
+                warnings.append(f"En Ajustes › Endpoint de WireGuard figura {endpoint}; revísalo.")
+        elif old:
+            if old != endpoint:
+                warnings.append(f"Los dispositivos se configuraron con la IP del servidor anterior ({old}): hay que volver a "
+                                "importar su configuración (QR o «Enlace de instalación»). Para no tener que repetirlo en el "
+                                "futuro, pon antes un nombre en Ajustes › Endpoint de WireGuard (p. ej. wg.tudominio.com).")
+        else:
+            warnings.append("Si los dispositivos se configuraron con la IP del servidor anterior, hay que volver a importar su "
+                            "configuración (QR o «Enlace de instalación»). Si usabas un nombre, apúntalo a este servidor.")
+        await asyncio.to_thread(apply_wg)
+        await asyncio.to_thread(notifier.start_telegram)
+        log.info("Copia restaurada desde el panel: %s clientes, %s dispositivos", result["tenants"], result["devices"])
+        response.delete_cookie(sessions.COOKIE, path="/")  # las cuentas son ahora las de la copia
+        return {"tenants": result["tenants"], "devices": result["devices"], "created_at": result["meta"]["created_at"],
+                "warnings": warnings}
+
+    @app.delete("/api/admin/backup/upload")
+    def cancel_restore(_: Admin):
+        restore_file.unlink(missing_ok=True)
+        return {"ok": True}
 
     @app.post("/api/admin/backup/run")
     async def run_backup(_: Admin):

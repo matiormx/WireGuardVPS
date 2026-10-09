@@ -179,3 +179,95 @@ def test_s3_signature_matches_botocore():
         req.context["timestamp"] = headers["x-amz-date"]
         sts = auth.string_to_sign(req, auth.canonical_request(req))
         assert mine == auth.signature(sts, req), botocore.__version__
+
+
+def test_restore_from_panel_on_new_server(tmp_path, monkeypatch):
+    for k, v in {"WG_ENDPOINT": "203.0.113.10", "SESSION_SECRET": "x", "DNS_ENABLED": "false", "CADDY_ADMIN": ""}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr("app.wg.WireGuardManager.host_networks", lambda self: [])
+    # Servidor anterior: datos y copia
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "old"))
+    monkeypatch.setenv("WG_CONF_DIR", str(tmp_path / "old-wg"))
+    with TestClient(create_app()) as old:
+        old.post("/api/auth/login", json={"username": "admin", "password": "admin"}, headers=H)
+        old.post("/api/me/password", json={"current": "admin", "new": "ClaveAntigua1"}, headers=H)
+        t = old.post("/api/admin/tenants", json={"name": "Acme", "username": "acme", "password": "Password1"}, headers=H).json()
+        old.post("/api/devices", json={"name": "Router", "tenant_id": t["id"], "kind": "router",
+                                       "lan_networks": ["192.168.88.0/24"]}, headers=H)
+        old.put("/api/admin/wg-settings", json={"endpoint": "wg.ejemplo.com"}, headers=H)
+        old.put("/api/admin/settings", json={"main_domain": "vpn.ejemplo.com"}, headers=H)
+        old.put("/api/admin/backup", json={"passphrase": PASS}, headers=H)
+        name = old.post("/api/admin/backup/run", headers=H).json()["result"]["name"]
+        blob = old.get(f"/api/admin/backups/{name}").content
+    old_key = next(l for l in (tmp_path / "old-wg" / "wg0.conf").read_text().splitlines() if l.startswith("PrivateKey"))
+
+    # Servidor nuevo recién instalado
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "new"))
+    monkeypatch.setenv("WG_CONF_DIR", str(tmp_path / "new-wg"))
+    monkeypatch.setattr("app.domains.Domains.resolve", staticmethod(lambda host: ["198.51.100.99"]))
+    with TestClient(create_app()) as new:
+        new.post("/api/auth/login", json={"username": "admin", "password": "admin"}, headers=H)
+        new.post("/api/me/password", json={"current": "admin", "new": "ClaveNueva11"}, headers=H)
+        up = lambda data, pw: new.post("/api/admin/backup/upload", content=data,  # noqa: E731
+                                       headers={**H, "Content-Type": "application/octet-stream", "X-Passphrase": pw})
+        assert up(blob, "mala frase de paso").status_code == 422
+        assert up(b"no es una copia", PASS).status_code == 422
+        assert new.post("/api/admin/backup/restore", json={"passphrase": PASS}, headers=H).status_code == 409
+        info = up(blob, "frase%20de%20paso%20larga").json()   # la frase viaja codificada (admite acentos)
+        assert info["tenants"] == 1 and info["devices"] == 1 and info["network_ok"] and info["device_endpoint"] == "wg.ejemplo.com"
+        r = new.post("/api/admin/backup/restore", json={"passphrase": PASS}, headers=H)
+        assert r.status_code == 200, r.text
+        res = r.json()
+        assert res["tenants"] == 1 and any("vpn.ejemplo.com" in w for w in res["warnings"])
+        assert any("Cambia el DNS de wg.ejemplo.com" in w for w in res["warnings"])
+        assert new.get("/api/me").status_code == 401             # sesión cerrada: las cuentas son las de la copia
+        assert new.post("/api/auth/login", json={"username": "admin", "password": "ClaveNueva11"}, headers=H).status_code == 401
+        assert new.post("/api/auth/login", json={"username": "admin", "password": "ClaveAntigua1"}, headers=H).status_code == 200
+        assert [x["name"] for x in new.get("/api/admin/tenants").json()] == ["Acme"]
+        assert new.get("/api/admin/settings").json()["force_https"] is False
+        conf = (tmp_path / "new-wg" / "wg0.conf").read_text()
+        assert old_key in conf and "192.168.88.0/24" in conf      # clave del servidor y peers restaurados
+        assert list((tmp_path / "new").glob("panel.db.pre-restore-*"))
+        assert not (tmp_path / "new" / "restore-upload.wgpb").exists()
+
+    # Red distinta: hay que restaurar por consola
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "other"))
+    monkeypatch.setenv("WG_CONF_DIR", str(tmp_path / "other-wg"))
+    monkeypatch.setenv("WG_SUBNET", "10.99.0.0/16")
+    monkeypatch.setenv("WG_SERVER_ADDRESS", "10.99.0.1/16")
+    with TestClient(create_app()) as other:
+        other.post("/api/auth/login", json={"username": "admin", "password": "admin"}, headers=H)
+        other.post("/api/me/password", json={"current": "admin", "new": "ClaveNueva11"}, headers=H)
+        info = other.post("/api/admin/backup/upload", content=blob,
+                          headers={**H, "Content-Type": "application/octet-stream", "X-Passphrase": PASS}).json()
+        assert not info["network_ok"] and "wg-manager restore" in info["network_error"]
+        r = other.post("/api/admin/backup/restore", json={"passphrase": PASS}, headers=H)
+        assert r.status_code == 422 and "wg-manager restore" in r.json()["detail"]
+        assert [x["name"] for x in other.get("/api/admin/tenants").json()] == []
+
+
+
+def test_restore_warns_when_devices_use_old_ip(tmp_path, monkeypatch):
+    for k, v in {"SESSION_SECRET": "x", "DNS_ENABLED": "false", "CADDY_ADMIN": ""}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setattr("app.wg.WireGuardManager.host_networks", lambda self: [])
+    monkeypatch.setenv("WG_ENDPOINT", "203.0.113.10")          # servidor anterior, sin nombre de endpoint
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "old"))
+    monkeypatch.setenv("WG_CONF_DIR", str(tmp_path / "old-wg"))
+    with TestClient(create_app()) as old:
+        old.post("/api/auth/login", json={"username": "admin", "password": "admin"}, headers=H)
+        old.post("/api/me/password", json={"current": "admin", "new": "ClaveAntigua1"}, headers=H)
+        old.put("/api/admin/backup", json={"passphrase": PASS}, headers=H)
+        name = old.post("/api/admin/backup/run", headers=H).json()["result"]["name"]
+        blob = old.get(f"/api/admin/backups/{name}").content
+    monkeypatch.setenv("WG_ENDPOINT", "198.51.100.20")         # servidor nuevo
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "new"))
+    monkeypatch.setenv("WG_CONF_DIR", str(tmp_path / "new-wg"))
+    with TestClient(create_app()) as new:
+        new.post("/api/auth/login", json={"username": "admin", "password": "admin"}, headers=H)
+        new.post("/api/me/password", json={"current": "admin", "new": "ClaveNueva11"}, headers=H)
+        info = new.post("/api/admin/backup/upload", content=blob,
+                        headers={**H, "Content-Type": "application/octet-stream", "X-Passphrase": PASS}).json()
+        assert info["device_endpoint"] == "203.0.113.10"
+        res = new.post("/api/admin/backup/restore", json={"passphrase": PASS}, headers=H).json()
+        assert any("IP del servidor anterior (203.0.113.10)" in w for w in res["warnings"])

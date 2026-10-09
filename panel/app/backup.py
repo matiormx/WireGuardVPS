@@ -253,7 +253,12 @@ class Backups:
         if len(cfg["passphrase"]) < 12:
             raise BackupError("Define primero la frase de paso de las copias (mínimo 12 caracteres)")
         now = dt.datetime.now(dt.timezone.utc)
-        meta = {"format": FORMAT, "created_at": int(now.timestamp()), "reason": reason, "network": network_meta(self.settings)}
+        from .wg import endpoint_host  # import local: wg no depende de este módulo
+        with self.db.conn() as c:
+            endpoint = endpoint_host(c, self.settings)
+        # endpoint: la dirección que tienen los dispositivos en su configuración (para avisar al restaurar).
+        meta = {"format": FORMAT, "created_at": int(now.timestamp()), "reason": reason, "network": network_meta(self.settings),
+                "endpoint": endpoint}
         blob = encrypt(build_archive(snapshot(self.settings.data_dir / "panel.db"), meta), cfg["passphrase"])
         name = now.strftime("wgp-%Y%m%d-%H%M%S.wgpb")
         self.dir.mkdir(mode=0o700, exist_ok=True)
@@ -367,4 +372,55 @@ def restore(settings: Settings, blob: bytes, passphrase: str, force: bool = Fals
     for suffix in ("-wal", "-shm"):
         Path(str(db_path) + suffix).unlink(missing_ok=True)
     tmp.replace(db_path)
+    return {"meta": meta, **summarize(db_bytes)}
+
+
+class NetworkMismatch(BackupError):
+    """La red de la copia no es la de este servidor: hay que restaurar con wg-manager (ajusta el host)."""
+
+
+def network_diff(settings: Settings, meta: dict) -> dict:
+    current = network_meta(settings)
+    return {k: (meta["network"].get(k), current[k]) for k in NETWORK_KEYS if meta["network"].get(k) != current[k]}
+
+
+def inspect(settings: Settings, blob: bytes, passphrase: str) -> dict:
+    meta, db_bytes = open_archive(blob, passphrase)
+    info = summarize(db_bytes)
+    return {"created_at": meta["created_at"], "reason": meta.get("reason", ""), "network": meta["network"],
+            "network_ok": not network_diff(settings, meta), **info,
+            "device_endpoint": meta.get("endpoint") or info["endpoint"] or None}
+
+
+def restore_live(settings: Settings, blob: bytes, passphrase: str) -> dict:
+    """Restaura con el panel en marcha: copia la base de la copia sobre la base en uso (API de backup
+    de SQLite, que respeta los bloqueos y el WAL). Guarda antes la base actual."""
+    meta, db_bytes = open_archive(blob, passphrase)
+    diff = network_diff(settings, meta)
+    if diff:
+        raise NetworkMismatch("La red de la copia no coincide con la de este servidor (" +
+                              ", ".join(f"{k}={a}, aquí {b}" for k, (a, b) in diff.items()) +
+                              "). Restaura por consola: sudo wg-manager restore <archivo>, que ajusta la red del servidor.")
+    db_path = settings.data_dir / "panel.db"
+    keep = db_path.with_name(f"panel.db.pre-restore-{int(time.time())}")
+    live = sqlite3.connect(db_path, timeout=30)
+    try:
+        out = sqlite3.connect(keep)
+        with out:
+            live.backup(out)
+        out.close()
+        os.chmod(keep, 0o600)
+        with tempfile.NamedTemporaryFile(dir=settings.data_dir, suffix=".db", delete=False) as f:
+            f.write(db_bytes)
+            tmp = Path(f.name)
+        try:
+            src = sqlite3.connect(tmp)
+            try:
+                src.backup(live)
+            finally:
+                src.close()
+        finally:
+            tmp.unlink(missing_ok=True)
+    finally:
+        live.close()
     return {"meta": meta, **summarize(db_bytes)}
