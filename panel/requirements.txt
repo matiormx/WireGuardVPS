@@ -9,3 +9,4 @@ webauthn==2.5.2
 pyOpenSSL==26.4.0
 cbor2==6.1.5
 asn1crypto==1.5.1
+bcrypt==4.2.1

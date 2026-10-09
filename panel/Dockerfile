@@ -7,8 +7,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # wireguard-tools: `wg syncconf` (altas/bajas de peers en caliente) y `wg show dump` (estado).
+# iproute2: rutas hacia las LAN de los routers de los clientes (`ip route`).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends wireguard-tools \
+ && apt-get install -y --no-install-recommends wireguard-tools iproute2 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

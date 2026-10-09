@@ -24,7 +24,7 @@ def env(tmp_path, monkeypatch):
                         staticmethod(lambda host: ["203.0.113.10"] if host.endswith("ok.test") else ["198.51.100.7"]))
     state = {"https": False}
     monkeypatch.setattr(domains.Domains, "https_status",
-                        staticmethod(lambda host: {"ok": state["https"], "error": None if state["https"] else "sin certificado"}))
+                        staticmethod(lambda host, any_status=False: {"ok": state["https"], "error": None if state["https"] else "sin certificado"}))
     return state
 
 

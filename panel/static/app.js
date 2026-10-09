@@ -43,6 +43,7 @@ const ICONS = {
   heart: '<path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1 1.1L12 21l7.8-7.5 1-1.1a5.5 5.5 0 0 0 0-7.8z"/>',
   dice: '<rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8" cy="8" r="1.2"/><circle cx="16" cy="16" r="1.2"/><circle cx="12" cy="12" r="1.2"/>',
   check: '<path d="M20 6L9 17l-5-5"/>',
+  router: '<rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 17h.01M10 17h.01M15 13V7M12 4.5a4.5 4.5 0 0 1 6 0M10 2.5a7.5 7.5 0 0 1 10 0"/>',
   share: '<path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><path d="M16 6l-4-4-4 4"/><path d="M12 2v13"/>',
   fingerprint: '<path d="M2 12C2 6.5 6.5 2 12 2a10 10 0 0 1 8 4"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M9 6.8a6 6 0 0 1 9 5.2c0 .47 0 1.17-.02 2"/>',
 };
@@ -284,12 +285,14 @@ async function render() {
     if (isAdmin) {
       if (section === "clients" && id && sub === "filters") return await filtersView(main, Number(id));
       if (section === "clients" && id && sub === "dns") return await zoneView(main, Number(id));
+      if (section === "clients" && id && sub === "services") return await servicesView(main, Number(id));
       if (section === "clients" && id) return await clientDetailView(main, Number(id));
       if (section === "clients") return await clientsView(main);
       return await dashboardView(main);
     }
     if (section === "filters") return await filtersView(main, state.me.id);
     if (section === "dns") return await zoneView(main, state.me.id);
+    if (section === "services") return await servicesView(main, state.me.id);
     return await tenantHomeView(main);
   } catch (err) {
     if (err.status !== 401) {
@@ -307,7 +310,8 @@ function shell(active) {
   const isAdmin = state.me.role === "admin";
   const links = isAdmin
     ? [["home", "#/", "dashboard", "Panel"], ["clients", "#/clients", "users", "Clientes"], ["settings", "#/settings", "globe", "Ajustes"], ["account", "#/account", "key", "Cuenta"]]
-    : [["home", "#/", "network", "Mi red"], ["dns", "#/dns", "server", "DNS"], ["filters", "#/filters", "shield", "Filtros"],
+    : [["home", "#/", "network", "Mi red"], ["dns", "#/dns", "server", "DNS"], ["services", "#/services", "globe", "Servicios"],
+      ["filters", "#/filters", "shield", "Filtros"],
       ["account", "#/account", "key", "Cuenta"]];
   const sidebar = h("aside", { class: "sidebar" },
     brand(),
@@ -514,6 +518,146 @@ function domainEditor({ load, save, statusUrl, example, onChange }) {
   return box;
 }
 
+/* ------------------------------------------------------------------ copias de seguridad */
+async function downloadBackup(name) {
+  try {
+    const res = await fetch(`/api/admin/backups/${encodeURIComponent(name)}`, { credentials: "same-origin" });
+    if (!res.ok) throw new Error(`No se pudo descargar (${res.status})`);
+    const file = new File([await res.blob()], name, { type: "application/octet-stream" });
+    if ((isIOS() || isStandalone()) && navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: name }); return; } catch (ex) { if (ex.name === "AbortError") return; }
+    }
+    const url = URL.createObjectURL(file);
+    const a = h("a", { href: url, download: name, style: { display: "none" } });
+    document.body.append(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function backupCard() {
+  const card = h("div", { class: "card" }, spinnerBlock());
+  let st = null;
+  const save = async (patch, msg) => {
+    try { st = await api("PUT", "/api/admin/backup", patch); toast(msg); draw(); } catch (e) { toast(e.message, "err"); }
+  };
+  const passModal = () => formModal({
+    title: st.has_passphrase ? "Cambiar frase de paso" : "Frase de paso de las copias",
+    fields: [
+      passwordField("passphrase", "Frase de paso",
+        "Mínimo 12 caracteres. Cifra las copias: sin ella NO se pueden restaurar. Cópiala ahora y guárdala en tu gestor de contraseñas."),
+      st.has_passphrase ? h("p", { class: "note full", style: { margin: 0 }, text: "Las copias anteriores seguirán necesitando la frase con la que se hicieron." }) : null,
+    ],
+    onSubmit: async (fd) => {
+      if (fd.get("passphrase").length < 12) throw new Error("Mínimo 12 caracteres");
+      st = await api("PUT", "/api/admin/backup", { passphrase: fd.get("passphrase") });
+      toast("Frase de paso guardada");
+      draw();
+    },
+  });
+  const s3Modal = () => {
+    const s3 = st.s3;
+    const read = (fd) => ({ s3_endpoint: fd.get("s3_endpoint"), s3_region: fd.get("s3_region"), s3_bucket: fd.get("s3_bucket"),
+      s3_prefix: fd.get("s3_prefix"), s3_access_key: fd.get("s3_access_key"), s3_secret_key: fd.get("s3_secret_key") });
+    const mono = (props) => input({ class: "input mono", autocapitalize: "off", spellcheck: "false", autocomplete: "off", ...props });
+    const testBtn = h("button", { class: "btn", type: "button", onClick: async () => {
+      testBtn.disabled = true;
+      try { await api("POST", "/api/admin/backup/test-s3", read(new FormData(m.box.querySelector("form")))); toast("Conexión correcta: se puede escribir en el bucket"); }
+      catch (e) { toast(e.message, "err"); }
+      testBtn.disabled = false;
+    } }, icon("refresh"), "Probar conexión");
+    const m = formModal({
+      title: "Copia externa (S3)",
+      fields: [
+        h("p", { class: "note full", style: { margin: 0 }, text: "Cualquier almacenamiento compatible con S3: Amazon S3, Cloudflare R2, Backblaze B2, Wasabi, MinIO… Usa una clave con permiso sólo de escritura en ese bucket. Allí las copias no se borran solas: si quieres limitarlas, crea una regla de ciclo de vida en el bucket." }),
+        h("div", { class: "full" }, field("Endpoint", mono({ name: "s3_endpoint", required: true, value: s3.endpoint, placeholder: "https://<cuenta>.r2.cloudflarestorage.com", inputmode: "url" }))),
+        field("Bucket", mono({ name: "s3_bucket", required: true, value: s3.bucket, placeholder: "copias-vpn" })),
+        field("Región", mono({ name: "s3_region", value: s3.region, placeholder: "auto" }), "auto en R2; p. ej. eu-west-1 en AWS."),
+        h("div", { class: "full" }, field("Carpeta (prefijo)", mono({ name: "s3_prefix", value: s3.prefix, placeholder: "wireguard-cloud/" }))),
+        field("Access key", mono({ name: "s3_access_key", required: true, value: s3.access_key })),
+        field("Secret key", mono({ name: "s3_secret_key", type: "password", required: !s3.secret_set, placeholder: s3.secret_set ? "(guardada)" : "" }),
+          s3.secret_set ? "Déjalo vacío para conservarla." : null),
+        h("div", { class: "full cell-flex", style: { flexWrap: "wrap" } }, testBtn,
+          s3.configured ? h("button", { class: "btn ghost", type: "button", onClick: async () => {
+            await save({ clear_s3: true }, "Copia externa desactivada"); m.close();
+          } }, icon("trash"), "Quitar") : null),
+      ],
+      onSubmit: async (fd) => { st = await api("PUT", "/api/admin/backup", read(fd)); toast("Copia externa guardada"); draw(); },
+    });
+  };
+
+  const draw = () => {
+    const last = st.last;
+    const hours = Array.from({ length: 24 }, (_, i) => h("option", { value: String(i), selected: i === st.hour, text: `${String(i).padStart(2, "0")}:00` }));
+    const keeps = [3, 7, 14, 30, 60].map((n) => h("option", { value: String(n), selected: n === st.keep, text: `${n} copias` }));
+    if (![3, 7, 14, 30, 60].includes(st.keep)) keeps.push(h("option", { value: String(st.keep), selected: true, text: `${st.keep} copias` }));
+    const runBtn = h("button", { class: "btn primary", disabled: !st.has_passphrase, onClick: async () => {
+      runBtn.disabled = true;
+      runBtn.lastChild.textContent = "Creando…";
+      try {
+        const r = await api("POST", "/api/admin/backup/run");
+        st = r;
+        if (r.result.ok) toast(r.result.s3 ? "Copia creada y subida a S3" : "Copia creada");
+        else toast(r.result.error, "err");
+      } catch (e) { toast(e.message, "err"); }
+      draw();
+    } }, icon("download"), "Hacer copia ahora");
+    fill(card,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Copias de seguridad" }),
+        h("div", { class: "note", text: "Copia cifrada de todo: clientes, dispositivos y sus claves, dominios, DNS, servicios y ajustes. Con ella puedes restaurar la plataforma en otro servidor sin que nadie reconfigure nada." }))),
+      h("div", { class: "grid", style: { gap: "14px" } },
+        st.has_passphrase ? null : h("div", { class: "banner" }, icon("alert"), "Define una frase de paso para empezar a hacer copias."),
+        h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+          runBtn,
+          h("button", { class: "btn", onClick: passModal }, icon("key"), st.has_passphrase ? "Cambiar frase de paso" : "Definir frase de paso"),
+          h("button", { class: "btn", onClick: s3Modal }, icon("server"), st.s3.configured ? `S3: ${st.s3.bucket}` : "Copia externa (S3)")),
+        h("div", { class: "backup-opts" },
+          h("label", { class: "switch" },
+            h("input", { type: "checkbox", checked: st.enabled, disabled: !st.has_passphrase,
+              onChange: (e) => save({ enabled: e.target.checked }, e.target.checked ? "Copias automáticas activadas" : "Copias automáticas desactivadas") }),
+            h("span", { class: "track" }), h("span", { text: "Copia automática diaria" })),
+          h("label", { class: "inline-field" }, "a las", h("select", { class: "input", onChange: (e) => save({ hour: Number(e.target.value) }, "Hora guardada") }, hours),
+            h("span", { class: "note", text: st.timezone })),
+          h("label", { class: "inline-field" }, "guardar", h("select", { class: "input", onChange: (e) => save({ keep: Number(e.target.value) }, "Retención guardada") }, keeps))),
+        last ? checkLine(last.ok, `Última copia: ${new Date(last.at * 1000).toLocaleString()} · ${fmtBytes(last.size)}${last.s3 ? " · subida a S3" : ""}`,
+          `${last.name ? `Última copia: ${fmtDate(last.at)}. ` : ""}${last.error}`) : null,
+        st.backups.length ? h("div", { class: "blocked-list" }, st.backups.map((b) => h("div", { class: "blocked-row" },
+          h("div", { class: "grow" }, h("div", { class: "mono name", text: b.name }), h("div", { class: "meta", text: `${new Date(b.created_at * 1000).toLocaleString()} · ${fmtBytes(b.size)}` })),
+          h("button", { class: "btn ghost icon", title: "Descargar", onClick: () => downloadBackup(b.name) }, icon("download")),
+          h("button", { class: "btn ghost icon", title: "Eliminar", onClick: async () => {
+            if (!(await confirmDialog({ title: "Eliminar copia", message: `Se borrará ${b.name} de este servidor.`, confirmLabel: "Eliminar" }))) return;
+            try { st = await api("DELETE", `/api/admin/backups/${b.name}`); toast("Copia eliminada"); draw(); } catch (e) { toast(e.message, "err"); }
+          } }, icon("trash")))))
+          : h("p", { class: "note", style: { margin: 0 }, text: "Aún no hay copias en este servidor." }),
+        h("div", { class: "help" }, "Restaurar (en el servidor nuevo, tras instalar): ",
+          h("code", { text: "sudo wg-manager restore copia.wgpb" }),
+          ". Guarda copias fuera del servidor (S3 o descargándolas): si el servidor se pierde, las copias locales también.")),
+    );
+  };
+  api("GET", "/api/admin/backup").then((d) => { st = d; draw(); }).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
+  return card;
+}
+
+function endpointCard() {
+  const card = h("div", { class: "card" }, spinnerBlock());
+  const draw = (cfg) => {
+    const inp = input({ value: cfg.endpoint, placeholder: cfg.default, class: "input mono", autocapitalize: "off", spellcheck: "false", inputmode: "url" });
+    fill(card,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Endpoint de WireGuard" }),
+        h("div", { class: "note", text: "La dirección a la que se conectan los dispositivos. Recomendado: un nombre (p. ej. wg.tudominio.com, nube gris en Cloudflare). Así, si cambias de servidor, basta con actualizar el DNS y nadie tiene que reconfigurar nada." }))),
+      h("div", { class: "grid", style: { gap: "12px" } },
+        h("div", { class: "input-group" }, inp,
+          h("button", { class: "btn primary", onClick: async () => {
+            try { draw(await api("PUT", "/api/admin/wg-settings", { endpoint: inp.value.trim() || null })); toast("Endpoint guardado"); }
+            catch (e) { toast(e.message, "err"); }
+          } }, "Guardar")),
+        h("div", { class: "help", text: `En uso: ${cfg.effective}:${cfg.port}. Vacío = la IP del servidor (${cfg.default}). ` +
+          "Los dispositivos existentes deben reimportar su configuración para usar el nuevo endpoint." })));
+  };
+  api("GET", "/api/admin/wg-settings").then(draw).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
+  return card;
+}
+
 function dnsSettingsCard() {
   const card = h("div", { class: "card" }, spinnerBlock());
   const draw = (cfg) => {
@@ -585,6 +729,8 @@ async function settingsView(main) {
               h("code", { text: cfg.main_domain || "vpn.tudominio.com" }), " → ", h("code", { text: ip }), "."),
             h("li", { text: "Escríbelo arriba y pulsa Guardar." }),
             h("li", { text: "Pulsa Comprobar. Cuando HTTPS esté activo, abre el panel con el dominio y activa «Forzar HTTPS»." })))),
+      endpointCard(),
+      backupCard(),
       dnsSettingsCard(),
       h("div", { class: "card" },
         h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dominios de clientes" }),
@@ -746,6 +892,7 @@ async function clientDetailView(main, id) {
       [
         h("a", { class: "btn", href: `#/clients/${t.id}/filters` }, icon("shield"), "Filtros"),
         h("a", { class: "btn", href: `#/clients/${t.id}/dns` }, icon("server"), "DNS"),
+        h("a", { class: "btn", href: `#/clients/${t.id}/services` }, icon("globe"), "Servicios"),
         h("button", { class: "btn", onClick: () => {
           const m = modal({ title: `Dominio de ${t.name}`, wide: true,
             body: domainEditor({
@@ -838,7 +985,9 @@ function deviceRow(d, onChange) {
     h("td", { class: "mono", "data-label": "IP", text: d.ip }),
     h("td", { class: "hide-sm", "data-label": "Último contacto", text: ago(d.last_handshake) }),
     h("td", { class: "hide-sm", "data-label": "Tráfico", text: `↓ ${fmtBytes(d.tx)} · ↑ ${fmtBytes(d.rx)}` }),
-    h("td", { class: "hide-sm", "data-label": "Modo" }, h("span", { class: `badge ${d.full_tunnel ? "accent" : ""}` }, icon(d.full_tunnel ? "globe" : "network"), d.full_tunnel ? "Todo el tráfico" : "Solo red privada")),
+    h("td", { class: "hide-sm", "data-label": "Modo" }, d.kind === "router"
+      ? h("span", { class: "badge accent", title: d.lan_networks.join(", ") }, icon("router"), `Router · ${d.lan_networks.join(", ")}`)
+      : h("span", { class: `badge ${d.full_tunnel ? "accent" : ""}` }, icon(d.full_tunnel ? "globe" : "network"), d.full_tunnel ? "Todo el tráfico" : "Solo red privada")),
     h("td", { class: "actions aside" },
       h("button", { class: "btn ghost icon", title: "Configuración y QR", onClick: () => deviceConfigModal(d) }, icon("qr")),
       h("button", { class: "btn ghost icon", title: "Editar", onClick: () => editDeviceModal(d, onChange) }, icon("edit")),
@@ -857,16 +1006,42 @@ function tunnelField(checked) {
     h("div", { class: "help", text: "Activado: navega por Internet con la IP del servidor. Desactivado: solo accede a la red privada del cliente." }));
 }
 
+function lanField(value) {
+  return h("div", { class: "full" }, field("Redes de la LAN del router",
+    input({ name: "lan_networks", required: true, value: value || "", placeholder: "192.168.88.0/24", class: "input mono",
+      autocapitalize: "off", spellcheck: "false" }),
+    "La red (o redes, separadas por comas) que hay detrás del router. Debe ser única en la plataforma: si es 192.168.1.0/24 o similar, mejor cámbiala por una menos común (p. ej. 192.168.123.0/24)."));
+}
+function splitList(text) { return String(text || "").split(/[\s,;]+/).filter(Boolean); }
+
 function newDeviceModal(tenantId, onDone) {
+  const tunnel = tunnelField(true);
+  const lan = lanField("");
+  lan.hidden = true;
+  lan.querySelector("input").required = false;
+  const kindSel = h("div", { class: "segmented full" },
+    ["device", "router"].map((k) => h("label", null,
+      h("input", { type: "radio", name: "kind", value: k, checked: k === "device", onChange: () => {
+        const router = k === "router";
+        tunnel.hidden = router;
+        lan.hidden = !router;
+        lan.querySelector("input").required = router;
+      } }),
+      h("span", null, icon(k === "router" ? "router" : "devices"), k === "router" ? "Router (red completa)" : "Dispositivo"))));
   formModal({
     title: "Añadir dispositivo",
     submitLabel: "Crear",
     fields: [
-      h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "48", placeholder: "Portátil de Ana, iPhone, NAS…" }))),
-      tunnelField(true),
+      kindSel,
+      h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "48", placeholder: "Portátil de Ana, iPhone, MikroTik oficina…" }))),
+      tunnel,
+      lan,
     ],
     onSubmit: async (fd) => {
-      const body = { name: fd.get("name"), full_tunnel: fd.get("full_tunnel") === "on" };
+      const router = fd.get("kind") === "router";
+      const body = router
+        ? { name: fd.get("name"), kind: "router", lan_networks: splitList(fd.get("lan_networks")), full_tunnel: false }
+        : { name: fd.get("name"), full_tunnel: fd.get("full_tunnel") === "on" };
       if (state.me.role === "admin") body.tenant_id = tenantId;
       const d = await api("POST", "/api/devices", body);
       onDone();
@@ -884,7 +1059,7 @@ function editDeviceModal(d, onDone) {
         input({ name: "hostname", required: true, maxlength: "63", value: d.hostname || "", pattern: "[a-zA-Z0-9]([a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?",
           autocapitalize: "off", spellcheck: false, class: "input mono" }),
         "Los demás dispositivos del cliente lo encuentran por este nombre (p. ej. portatil-ana o portatil-ana.vpn).")),
-      tunnelField(d.full_tunnel),
+      d.kind === "router" ? lanField(d.lan_networks.join(", ")) : tunnelField(d.full_tunnel),
       h("div", { class: "full field" },
         switchEl("dns_filter", d.dns_filter, "Aplicar los filtros de navegación"),
         h("div", { class: "help", text: "Desactívalo para que este dispositivo (p. ej. el de un adulto) navegue sin los filtros del cliente." })),
@@ -892,8 +1067,8 @@ function editDeviceModal(d, onDone) {
     ],
     onSubmit: async (fd) => {
       await api("PATCH", `/api/devices/${d.id}`, {
-        name: fd.get("name"), full_tunnel: fd.get("full_tunnel") === "on", dns_filter: fd.get("dns_filter") === "on",
-        hostname: fd.get("hostname"),
+        name: fd.get("name"), dns_filter: fd.get("dns_filter") === "on", hostname: fd.get("hostname"),
+        ...(d.kind === "router" ? { lan_networks: splitList(fd.get("lan_networks")) } : { full_tunnel: fd.get("full_tunnel") === "on" }),
       });
       toast("Dispositivo actualizado");
       onDone();
@@ -905,8 +1080,8 @@ function editDeviceModal(d, onDone) {
    un enlace de descarga sustituye la app por una vista previa sin botón de
    volver; por eso allí se usa la hoja de compartir del sistema, que ofrece
    «WireGuard» directamente. En el resto, descarga generada en memoria. */
-async function saveConfig(d, conf) {
-  const name = `${d.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 15) || `wg${d.id}`}.conf`;
+async function saveConfig(d, conf, ext = "conf") {
+  const name = `${d.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 15) || `wg${d.id}`}.${ext}`;
   const file = new File([conf], name, { type: "text/plain" });
   if ((isIOS() || isStandalone()) && navigator.canShare && navigator.canShare({ files: [file] })) {
     try {
@@ -924,7 +1099,43 @@ async function saveConfig(d, conf) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
+async function routerConfigModal(d, fresh) {
+  let conf = "";
+  let rsc = "";
+  try {
+    [conf, rsc] = await Promise.all([api("GET", `/api/devices/${d.id}/config`), api("GET", `/api/devices/${d.id}/mikrotik`)]);
+  } catch (e) { return toast(e.message, "err"); }
+  const tabs = [["mikrotik", "MikroTik (RouterOS 7)", rsc], ["conf", "Linux / OpenWrt (.conf)", conf]];
+  const pre = h("pre", { class: "conf", text: rsc });
+  let current = "mikrotik";
+  const tabBar = h("div", { class: "segmented" }, tabs.map(([key, label, text]) => h("label", null,
+    h("input", { type: "radio", name: "cfgtab", checked: key === current, onChange: () => { current = key; pre.textContent = text; } }),
+    h("span", { text: label }))));
+  const m = modal({
+    title: fresh ? `${d.name} listo` : d.name,
+    wide: true,
+    body: [
+      h("dl", { class: "kv" },
+        h("dt", { text: "IP en la VPN" }), h("dd", { class: "mono", text: d.ip }),
+        h("dt", { text: "LAN publicada" }), h("dd", { class: "mono", text: d.lan_networks.join(", ") }),
+        h("dt", { text: "Cliente" }), h("dd", { text: d.tenant_name })),
+      h("p", { class: "note", style: { margin: 0 } },
+        "Copia el script y pégalo en el Terminal del router (Winbox › New Terminal o SSH). Después, los dispositivos de este cliente llegarán a su LAN y la LAN a ellos. ",
+        "El tráfico de Internet de la LAN sigue saliendo por su propia conexión."),
+      tabBar,
+      pre,
+      h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+        h("button", { class: "btn primary", onClick: () => copyText(current === "mikrotik" ? rsc : conf, "Configuración copiada") }, icon("copy"), "Copiar"),
+        h("button", { class: "btn", onClick: () => (current === "mikrotik" ? saveConfig(d, rsc, "rsc") : saveConfig(d, conf)) }, icon("download"), "Guardar archivo")),
+      h("p", { class: "note", style: { margin: 0 } }, icon("shield"), " Contiene la clave privada del router: no la compartas."),
+    ],
+    actions: [h("button", { class: "btn", onClick: () => m.close() }, "Cerrar")],
+  });
+  m.box.querySelectorAll(".note > svg").forEach((svg) => Object.assign(svg.style, { width: "14px", height: "14px", verticalAlign: "-2px" }));
+}
+
 async function deviceConfigModal(d, fresh = false) {
+  if (d.kind === "router") return routerConfigModal(d, fresh);
   let conf = "";
   try { conf = await api("GET", `/api/devices/${d.id}/config`); } catch (e) { return toast(e.message, "err"); }
   const pre = h("pre", { class: "conf", text: conf, hidden: true });
@@ -1166,6 +1377,132 @@ async function zoneView(main, tenantId) {
 
   const crumbs = isAdmin ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / DNS"] : null;
   fill(main, pageHead("DNS de la red", `Nombres para los dispositivos de ${tenant.name} (${zone.network})`, null, crumbs), body);
+  draw();
+}
+
+/* ------------------------------------------------------------------ servicios publicados */
+function serviceStatusBlock(st) {
+  if (!st) return null;
+  const el = domainStatusBlock(st);
+  el.insertBefore(checkLine(st.target.ok, "El equipo de destino responde", `Sin respuesta del equipo: ${st.target.error}`), el.querySelector(".btn"));
+  return el;
+}
+
+function serviceModal(ctx, svc, onDone) {
+  const isNew = !svc;
+  const targets = ctx.devices.filter((d) => d.kind !== "router");
+  const listId = "svc-targets";
+  const fields = [
+    isNew ? h("div", { class: "full" }, field("Nombre público",
+      input({ name: "hostname", required: true, maxlength: "253", placeholder: "nas.tuempresa.com", class: "input mono", autocapitalize: "off", spellcheck: "false", inputmode: "url" }),
+      `Un nombre de tu dominio. Crea en tu DNS un registro A hacia ${ctx.ip}.`)) : null,
+    field("IP del equipo", input({ name: "target_ip", required: true, maxlength: "15", value: svc ? svc.target_ip : "", list: listId,
+      placeholder: ctx.networks[0].replace(/0\/\d+$/, "50"), class: "input mono", inputmode: "decimal" }),
+    `De tu red (${ctx.networks.join(", ")}).`),
+    field("Puerto", input({ name: "target_port", required: true, type: "number", min: "1", max: "65535", value: svc ? svc.target_port : "", placeholder: "5000", inputmode: "numeric" })),
+    h("datalist", { id: listId }, targets.map((d) => h("option", { value: d.ip, text: d.name }))),
+    h("div", { class: "full" }, field("Protocolo del equipo",
+      h("div", { class: "segmented" }, ["http", "https"].map((k) => h("label", null,
+        h("input", { type: "radio", name: "scheme", value: k, checked: (svc ? svc.scheme : "http") === k }),
+        h("span", { text: k === "http" ? "HTTP" : "HTTPS (certificado propio)" })))),
+      "Cómo habla el equipo dentro de tu red. El público siempre entra por HTTPS con certificado válido.")),
+    h("div", { class: "full" }, h("h3", { style: { margin: "6px 0 0" }, text: "Contraseña de acceso (opcional)" }),
+      h("div", { class: "note", text: svc && svc.protected ? `Protegido con el usuario «${svc.auth_user}». Rellena la contraseña sólo si quieres cambiarla.`
+        : "Añade una capa de usuario y contraseña delante del servicio. Recomendado si el equipo no tiene su propio login." })),
+    field("Usuario", input({ name: "auth_user", maxlength: "32", value: svc ? svc.auth_user : "", autocomplete: "off", autocapitalize: "off", spellcheck: "false" })),
+    field("Contraseña", input({ name: "auth_password", type: "password", minlength: "8", maxlength: "128", autocomplete: "new-password" })),
+    svc && svc.protected ? h("div", { class: "full field" }, switchEl("clear_auth", false, "Quitar la contraseña")) : null,
+  ];
+  formModal({
+    title: isNew ? "Publicar servicio" : `Editar ${svc.hostname}`,
+    submitLabel: isNew ? "Publicar" : "Guardar",
+    fields,
+    onSubmit: async (fd) => {
+      const body = { target_ip: fd.get("target_ip").trim(), target_port: Number(fd.get("target_port")), scheme: fd.get("scheme") };
+      const user = (fd.get("auth_user") || "").trim();
+      const pass = fd.get("auth_password") || "";
+      if (fd.get("clear_auth") === "on") body.clear_auth = true;
+      else if (pass) { body.auth_user = user; body.auth_password = pass; }
+      else if (isNew && user) throw new Error("Indica la contraseña del servicio (mínimo 8 caracteres)");
+      let res;
+      if (isNew) {
+        body.hostname = fd.get("hostname").trim();
+        if (ctx.isAdmin) body.tenant_id = ctx.tenantId;
+        res = await api("POST", "/api/services", body);
+        toast("Servicio publicado");
+      } else {
+        res = await api("PATCH", `/api/services/${svc.id}`, body);
+        toast("Servicio actualizado");
+      }
+      onDone(res, isNew);
+    },
+  });
+}
+
+async function servicesView(main, tenantId) {
+  const isAdmin = state.me.role === "admin";
+  const qs = isAdmin ? `?tenant_id=${tenantId}` : "";
+  const [tenant, initialDevices] = await Promise.all([
+    isAdmin ? api("GET", `/api/admin/tenants/${tenantId}`) : Promise.resolve({ name: state.me.name }),
+    api("GET", `/api/devices${qs}`)]);
+  let data = await api("GET", `/api/services${qs}`);
+  const status = {};
+  const body = h("div");
+  const ctx = () => ({ isAdmin, tenantId, devices: initialDevices, networks: data.networks, ip: data.server_ips[0] || "la IP del servidor" });
+
+  const reload = async () => { data = await api("GET", `/api/services${qs}`); draw(); };
+  const check = async (svc) => {
+    status[svc.id] = "loading";
+    draw();
+    try { status[svc.id] = await api("GET", `/api/services/${svc.id}/status`); } catch (e) { delete status[svc.id]; toast(e.message, "err"); }
+    draw();
+  };
+  const run = async (fn, msg) => { try { await fn(); toast(msg); await reload(); } catch (e) { toast(e.message, "err"); } };
+
+  const row = (svc) => h("div", { class: "card service" },
+    h("div", { class: "card-head" },
+      h("div", { class: "grow" },
+        h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+          h("a", { class: "mono svc-name", href: `https://${svc.hostname}`, target: "_blank", rel: "noopener", text: svc.hostname }),
+          h("span", { class: `badge ${svc.enabled ? "ok" : "off"}`, text: svc.enabled ? "Publicado" : "Pausado" }),
+          svc.protected ? h("span", { class: "badge accent", title: `Usuario: ${svc.auth_user}` }, icon("key"), "Con contraseña") : null),
+        h("div", { class: "meta mono", text: `→ ${svc.scheme}://${svc.target_ip}:${svc.target_port}${svc.target_name ? `  (${svc.target_name})` : ""}` })),
+      h("div", { class: "cell-flex" },
+        h("button", { class: "btn sm", disabled: status[svc.id] === "loading", onClick: () => check(svc) }, icon("refresh"), status[svc.id] === "loading" ? "Comprobando…" : "Comprobar"),
+        h("button", { class: "btn ghost icon", title: "Editar", onClick: () => serviceModal(ctx(), svc, () => { delete status[svc.id]; reload(); }) }, icon("edit")),
+        h("button", { class: "btn ghost icon", title: svc.enabled ? "Pausar" : "Publicar", onClick: () =>
+          run(() => api("PATCH", `/api/services/${svc.id}`, { enabled: !svc.enabled }), svc.enabled ? "Servicio pausado" : "Servicio publicado") }, icon("power")),
+        h("button", { class: "btn ghost icon", title: "Eliminar", onClick: async () => {
+          if (await confirmDialog({ title: "Eliminar servicio", message: `${svc.hostname} dejará de estar accesible desde Internet.`, confirmLabel: "Eliminar" })) {
+            run(() => api("DELETE", `/api/services/${svc.id}`), "Servicio eliminado");
+          }
+        } }, icon("trash")))),
+    status[svc.id] && status[svc.id] !== "loading" ? serviceStatusBlock(status[svc.id]) : null);
+
+  const draw = () => {
+    const ip = data.server_ips[0] || "la IP del servidor";
+    fill(body,
+      data.enabled ? null : h("div", { class: "banner" }, icon("alert"), "Los servicios publicados necesitan el HTTPS automático del servidor (ENABLE_HTTPS=true)."),
+      data.error ? h("div", { class: "banner" }, icon("alert"), data.error) : null,
+      data.services.length ? data.services.map(row) : h("div", { class: "card empty" }, icon("globe"),
+        h("h2", { text: "Aún no hay servicios publicados" }),
+        h("p", { text: "Publica en Internet, con HTTPS y un nombre propio, un equipo de tu red: un NAS, una cámara, Home Assistant, un servidor web…" }),
+        data.enabled ? h("button", { class: "btn primary", onClick: () => serviceModal(ctx(), null, (svc) => { reload().then(() => check(svc)); }) }, icon("plus"), "Publicar servicio") : null),
+      h("div", { class: "card" }, h("h3", { text: "Cómo funciona" }),
+        h("ol", { class: "steps" },
+          h("li", null, "En tu proveedor de dominios crea un registro ", h("b", { text: "A" }), " con el nombre del servicio apuntando a ", h("code", { text: ip }), "."),
+          h("li", { text: "Pulsa «Publicar servicio» e indica la IP y el puerto del equipo dentro de tu red." }),
+          h("li", { text: "El certificado HTTPS se emite solo en cuanto el DNS apunta aquí. Pulsa Comprobar para verlo." })),
+        h("p", { class: "note", style: { margin: "10px 0 0" } }, icon("shield"),
+          " El servicio queda accesible desde cualquier lugar de Internet: protégelo con contraseña si el equipo no tiene su propio login. ",
+          "El resto de tu red sigue siendo privada.")),
+    );
+    body.querySelectorAll(".note > svg").forEach((svg) => Object.assign(svg.style, { width: "14px", height: "14px", verticalAlign: "-2px" }));
+  };
+
+  const crumbs = isAdmin ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / Servicios"] : null;
+  const addBtn = data.enabled ? h("button", { class: "btn primary", onClick: () => serviceModal(ctx(), null, (svc) => { reload().then(() => check(svc)); }) }, icon("plus"), "Publicar servicio") : null;
+  fill(main, pageHead("Servicios publicados", `Equipos de la red de ${tenant.name} accesibles con HTTPS desde Internet`, addBtn, crumbs), body);
   draw();
 }
 

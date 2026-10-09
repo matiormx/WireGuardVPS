@@ -488,3 +488,28 @@ html.standalone .modal { max-height: calc(100vh - env(safe-area-inset-top) - var
   html.standalone #toasts { top: calc(env(safe-area-inset-top) + var(--top-gap) + 6px); }
   html.standalone .overlay { padding-top: calc(env(safe-area-inset-top) + var(--top-gap)); }
 }
+
+/* Selector segmentado (tipo de dispositivo, pestañas de configuración) */
+.segmented { display: flex; gap: 4px; padding: 4px; border-radius: var(--radius-sm); background: var(--bg-elev); border: 1px solid var(--border); }
+.segmented label { flex: 1; cursor: pointer; }
+.segmented input { position: absolute; opacity: 0; pointer-events: none; }
+.segmented span {
+  display: flex; align-items: center; justify-content: center; gap: 8px; height: 36px; padding: 0 10px;
+  border-radius: 7px; color: var(--muted); font-weight: 600; font-size: 13.5px; text-align: center;
+}
+.segmented span svg { width: 16px; height: 16px; flex: none; }
+.segmented input:checked + span { background: var(--surface-2); color: var(--text); box-shadow: 0 1px 0 var(--border); }
+.segmented input:focus-visible + span { box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* servicios publicados */
+.card.service .card-head { margin-bottom: 0; }
+.card.service .domain-status { margin-top: 14px; }
+.svc-name { font-weight: 600; font-size: 15px; color: var(--text); text-decoration: none; word-break: break-all; }
+.svc-name:hover { color: var(--accent); }
+.card.service .meta { margin-top: 4px; color: var(--muted); font-size: 13px; }
+.banner + .card, .banner + .banner { margin-top: 14px; }
+
+/* copias de seguridad */
+.backup-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 22px; }
+.inline-field { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
+.inline-field select.input { width: auto; padding-top: 6px; padding-bottom: 6px; }

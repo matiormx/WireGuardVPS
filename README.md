@@ -96,6 +96,32 @@ La app se instala desde el botón **Instalar app** (menú o pantalla de login):
 - **iPhone/iPad:** Safari → Compartir → *Añadir a pantalla de inicio* (funciona también sin HTTPS).
 - **Android/Chrome/Edge:** requieren HTTPS, es decir, un dominio configurado.
 
+## Routers: redes completas (site-to-site)
+
+Un cliente puede conectar **su oficina entera** con un router (MikroTik, OpenWrt, Linux…): al añadir un dispositivo elige **Router (red completa)** e indica la red de su LAN (p. ej. `192.168.88.0/24`). El panel genera:
+
+- un **script para MikroTik (RouterOS 7)** listo para pegar en *Terminal*, y
+- un `.conf` para Linux / OpenWrt.
+
+Después, sus dispositivos móviles llegan a los equipos de la oficina y la oficina a ellos (impresoras, NAS, cámaras…). El tráfico de Internet de la oficina sigue saliendo por su propia conexión. Cada LAN debe ser única en la plataforma (si es `192.168.1.0/24`, mejor cambiarla por una menos común) y sigue aislada de los demás clientes.
+
+## Servicios publicados con HTTPS
+
+Cada cliente puede publicar en Internet un equipo de su red (NAS, cámaras, Home Assistant, un servidor web…) con **un nombre propio y HTTPS**: en **Servicios → Publicar servicio** indica el nombre (`nas.suempresa.com`), la IP del equipo (de su red o de la LAN de su router) y el puerto. Basta con crear un registro **A** de ese nombre hacia la IP del VPS: el certificado se emite solo. Opcionalmente, añade **usuario y contraseña** delante del servicio. El botón *Comprobar* verifica DNS, certificado y que el equipo responde. Requiere `ENABLE_HTTPS=true` (Caddy).
+
+## Endpoint y copias de seguridad
+
+- **Ajustes → Endpoint de WireGuard:** usa un nombre (p. ej. `wg.tudominio.com`, nube **gris** en Cloudflare) en lugar de la IP. Si un día cambias de servidor, basta con mover el DNS.
+- **Ajustes → Copias de seguridad:** define una **frase de paso** (cifra las copias con AES-256; sin ella no se pueden restaurar) y activa la copia diaria. Se guardan en el servidor (con retención) y, opcionalmente, en cualquier almacenamiento **S3** (Amazon S3, Cloudflare R2, Backblaze B2, MinIO…). También puedes descargarlas desde el panel.
+- **Restaurar en un servidor nuevo:**
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/matiormx/WireGuardVps/main/install.sh | sudo bash
+  sudo wg-manager restore wgp-20261009-030000.wgpb
+  ```
+
+  Se recuperan clientes, dispositivos y sus claves, la clave del servidor, dominios, DNS, servicios y ajustes. Después apunta el DNS del endpoint (y de los dominios) al nuevo servidor: los dispositivos se reconectan solos.
+
 ## Cómo funciona
 
 | | Admin | Cliente |
@@ -136,6 +162,8 @@ nat      -s 10.252.0.0/16 -o <WAN>          -> MASQUERADE
 | `sudo wg-manager status` | Panel, interfaz `wg0`, redes de cliente y reglas |
 | `sudo wg-manager logs` | Logs del panel |
 | `sudo wg-manager reset-admin` | Contraseña temporal para el admin si la pierdes |
+| `sudo wg-manager backup` | Copia cifrada inmediata (en `/opt/wg-platform/data/backups`) |
+| `sudo wg-manager restore <copia.wgpb>` | Restaura una copia (pide la frase de paso) |
 
 ## Desarrollo
 

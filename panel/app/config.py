@@ -48,6 +48,8 @@ class Settings:
     dns_bind: str
     dns_port: int
     panel_domain: str
+    caddy_admin: str
+    acme_email: str
 
     @property
     def dns_upstreams(self) -> list[str]:
@@ -111,4 +113,6 @@ def load_settings() -> Settings:
         dns_bind=_env("DNS_BIND", "auto"),
         dns_port=_env_int("DNS_PORT", 53),
         panel_domain=_env("PANEL_DOMAIN", ""),
+        caddy_admin=os.environ.get("CADDY_ADMIN", "http://127.0.0.1:2019").strip(),
+        acme_email=_env("ACME_EMAIL", ""),
     )

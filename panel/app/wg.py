@@ -9,7 +9,8 @@ Dentro de cada bloque la .1 queda reservada y los dispositivos reciben .2-.254.
 
 El panel escribe tres cosas en /etc/wireguard (montado desde el host):
   * wg0.conf             configuración completa (la usa wg-quick@wg0 al arrancar)
-  * wgp/tenants.list     redes de clientes activos, una por línea
+  * wgp/tenants.list     un grupo por cliente activo: su red y las LAN de sus routers
+                         (separadas por espacios); el tráfico sólo se permite dentro del grupo
   * wgp/dns.list         redes de clientes con filtrado DNS: el host redirige su
                          DNS (puerto 53) al resolver y bloquea DNS-over-TLS
   * wgp/apply.stamp      marca temporal; su escritura dispara en el host la
@@ -102,11 +103,30 @@ def _comment(text: str) -> str:
     return _UNSAFE.sub(" ", text)
 
 
-def _endpoint(settings: Settings) -> str:
-    host = settings.endpoint
+def _endpoint(settings: Settings, host: str | None = None) -> str:
+    host = host or settings.endpoint
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"  # IPv6 literal
     return f"{host}:{settings.wg_port}"
+
+
+def parse_lans(text: str | None) -> list[str]:
+    return [x for x in (text or "").split() if x]
+
+
+def endpoint_host(c: sqlite3.Connection, settings: Settings) -> str:
+    """Endpoint de los dispositivos: nombre configurado en Ajustes o, si no, WG_ENDPOINT (IP)."""
+    return get_setting(c, "wg_endpoint") or settings.endpoint
+
+
+def tenant_lans(c: sqlite3.Connection, tenant_id: int, exclude_device: int | None = None) -> list[str]:
+    """LAN de los routers activos de un cliente (para AllowedIPs de sus dispositivos)."""
+    out: list[str] = []
+    for r in c.execute("SELECT id, lan_networks FROM devices WHERE tenant_id = ? AND kind = 'router' AND enabled = 1",
+                       (tenant_id,)):
+        if r["id"] != exclude_device:
+            out += parse_lans(r["lan_networks"])
+    return out
 
 
 @dataclass
@@ -116,6 +136,7 @@ class Peer:
     ip: str
     public_key: str
     preshared_key: str
+    lans: tuple[str, ...] = ()
 
 
 def render_server_conf(settings: Settings, private_key: str, peers: list[Peer], *, full: bool = True) -> str:
@@ -137,30 +158,32 @@ def render_server_conf(settings: Settings, private_key: str, peers: list[Peer], 
             "[Peer]",
             f"PublicKey = {p.public_key}",
             f"PresharedKey = {p.preshared_key}",
-            f"AllowedIPs = {p.ip}/32",
+            f"AllowedIPs = {', '.join([f'{p.ip}/32', *p.lans])}",
             "",
         ]
     return "\n".join(lines)
 
 
 def render_client_conf(settings: Settings, server_public: str, tenant: sqlite3.Row, device: sqlite3.Row,
-                       search: list[str] | tuple[str, ...] = ()) -> str:
+                       search: list[str] | tuple[str, ...] = (), endpoint: str | None = None,
+                       lans: list[str] | tuple[str, ...] = ()) -> str:
+    """`lans`: redes LAN de los routers del cliente (sin las del propio dispositivo)."""
     net = tenant_network(settings, tenant["net_index"])
+    is_router = device["kind"] == "router"
     # full tunnel: todo el tráfico (y ::/0 para evitar fugas IPv6);
-    # split tunnel: sólo la red privada del cliente (+ el resolver DNS del servidor).
-    if device["full_tunnel"]:
+    # split tunnel: la red del cliente, las LAN de sus routers y el servidor (DNS).
+    # Un router siempre va en split: su LAN sale a Internet por su propia conexión.
+    if device["full_tunnel"] and not is_router:
         allowed = "0.0.0.0/0, ::/0"
-    elif settings.dns_enabled:
-        allowed = f"{net}, {settings.server_address.ip}/32"
     else:
-        allowed = str(net)
+        allowed = ", ".join([str(net), f"{settings.server_address.ip}/32", *lans])
     lines = [
         "[Interface]",
         f"# {_comment(tenant['name'])} / {_comment(device['name'])}",
         f"PrivateKey = {device['private_key']}",
         f"Address = {device['ip']}/32",
     ]
-    if device["full_tunnel"] or settings.dns_enabled:
+    if not is_router and (device["full_tunnel"] or settings.dns_enabled):
         # Los sufijos de búsqueda van en la misma línea DNS (wg-quick y las apps
         # oficiales los tratan como dominios de búsqueda): «nas» -> «nas.vpn».
         dns = [settings.client_dns] + (list(search) if settings.dns_enabled else [])
@@ -171,9 +194,36 @@ def render_client_conf(settings: Settings, server_public: str, tenant: sqlite3.R
         "[Peer]",
         f"PublicKey = {server_public}",
         f"PresharedKey = {device['preshared_key']}",
-        f"Endpoint = {_endpoint(settings)}",
+        f"Endpoint = {_endpoint(settings, endpoint)}",
         f"AllowedIPs = {allowed}",
         f"PersistentKeepalive = {settings.keepalive}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_mikrotik(settings: Settings, server_public: str, tenant: sqlite3.Row, device: sqlite3.Row,
+                    endpoint: str | None = None, lans: list[str] | tuple[str, ...] = ()) -> str:
+    """Comandos RouterOS 7 para conectar un MikroTik como router del cliente (site-to-site)."""
+    net = tenant_network(settings, tenant["net_index"])
+    host = endpoint or settings.endpoint
+    own = parse_lans(device["lan_networks"])
+    allowed = ",".join([str(net), f"{settings.server_address.ip}/32", *lans])
+    lines = [
+        f"# WireGuard Cloud - {_comment(tenant['name'])} / {_comment(device['name'])}",
+        "# Pegar en el Terminal de RouterOS 7 (Winbox > New Terminal o SSH).",
+        f"# LAN publicada: {', '.join(own) or '(ninguna)'}",
+        f'/interface wireguard add name=wg-cloud mtu={settings.mtu} private-key="{device["private_key"]}" comment="WireGuard Cloud"',
+        f'/interface wireguard peers add interface=wg-cloud public-key="{server_public}" preshared-key="{device["preshared_key"]}" '
+        f"endpoint-address={host} endpoint-port={settings.wg_port} allowed-address={allowed} "
+        f"persistent-keepalive={settings.keepalive}s comment=\"WireGuard Cloud\"",
+        f"/ip address add address={device['ip']}/{net.prefixlen} interface=wg-cloud comment=\"WireGuard Cloud\"",
+        f"/ip route add dst-address={settings.server_address.ip}/32 gateway=wg-cloud comment=\"WireGuard Cloud\"",
+    ]
+    lines += [f'/ip route add dst-address={lan} gateway=wg-cloud comment="WireGuard Cloud"' for lan in lans]
+    lines += [
+        "# Que el tráfico del túnel se trate como LAN (cortafuegos por defecto de MikroTik):",
+        '/interface list member add interface=wg-cloud list=LAN comment="WireGuard Cloud"',
         "",
     ]
     return "\n".join(lines)
@@ -220,25 +270,86 @@ class WireGuardManager:
             with self.db.conn() as c:
                 private = get_setting(c, "server_private_key") or ""
                 rows = c.execute(
-                    """SELECT d.name, d.ip, d.public_key, d.preshared_key, t.name AS tenant
+                    """SELECT d.name, d.ip, d.public_key, d.preshared_key, d.kind, d.lan_networks,
+                              t.name AS tenant, t.net_index
                        FROM devices d JOIN tenants t ON t.id = d.tenant_id
                        WHERE d.enabled = 1 AND t.enabled = 1 ORDER BY t.net_index, d.id"""
                 ).fetchall()
                 active = c.execute(
                     "SELECT net_index, dns_filters, dns_deny FROM tenants WHERE enabled = 1 ORDER BY net_index"
                 ).fetchall()
-            nets = [tenant_network(self.settings, r["net_index"]) for r in active]
+            lans_by_tenant: dict[int, list[str]] = {}
+            for r in rows:
+                if r["kind"] == "router":
+                    lans_by_tenant.setdefault(r["net_index"], []).extend(parse_lans(r["lan_networks"]))
+            # Un grupo por cliente: su /24 y las LAN de sus routers se ven entre sí.
+            groups = [" ".join([str(tenant_network(self.settings, r["net_index"])), *lans_by_tenant.get(r["net_index"], [])])
+                      for r in active]
             dns_nets = [tenant_network(self.settings, r["net_index"]) for r in active
                         if self.settings.dns_enabled and tenant_filtering_active(r)]
-            peers = [Peer(r["tenant"], r["name"], r["ip"], r["public_key"], r["preshared_key"]) for r in rows]
+            peers = [Peer(r["tenant"], r["name"], r["ip"], r["public_key"], r["preshared_key"],
+                          tuple(parse_lans(r["lan_networks"])) if r["kind"] == "router" else ()) for r in rows]
+            all_lans = {lan for lans in lans_by_tenant.values() for lan in lans}
 
             _atomic_write(self.conf_path, render_server_conf(self.settings, private, peers), 0o600)
-            _atomic_write(self.tenants_list, "".join(f"{n}\n" for n in nets), 0o644)
+            _atomic_write(self.tenants_list, "".join(f"{g}\n" for g in groups), 0o644)
             _atomic_write(self.dns_list, "".join(f"{n}\n" for n in dns_nets), 0o644)
             # Escritura in situ (IN_CLOSE_WRITE) para disparar la unidad .path del host.
             with open(self.stamp, "w") as fh:
                 fh.write(f"{time.time():.3f}\n")
-            return self._syncconf(render_server_conf(self.settings, private, peers, full=False))
+            applied = self._syncconf(render_server_conf(self.settings, private, peers, full=False))
+            # `wg syncconf` no toca la tabla de rutas: las LAN de los routers se enrutan aquí.
+            self._sync_routes(all_lans)
+            return applied
+
+    def _ip(self, *args: str) -> subprocess.CompletedProcess | None:
+        if shutil.which("ip") is None:
+            return None
+        try:
+            return subprocess.run(["ip", *args], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
+    def _sync_routes(self, desired: set[str]) -> None:
+        """Rutas por wg0 hacia las LAN de los routers: añade las nuevas y quita las que sobran."""
+        iface = self.settings.wg_interface
+        if not self.interface_up():
+            return
+        res = self._ip("-4", "route", "show", "dev", iface)
+        if res is None or res.returncode != 0:
+            return
+        current = set()
+        for line in res.stdout.splitlines():
+            parts = line.split()
+            if not parts or parts[0] == "default" or ("proto" in parts and parts[parts.index("proto") + 1] == "kernel"):
+                continue  # la ruta de la propia subred del túnel la gestiona el kernel
+            current.add(parts[0])
+        for dst in sorted(desired):
+            self._ip("route", "replace", dst, "dev", iface)
+        for dst in sorted(current - desired):
+            self._ip("route", "del", dst, "dev", iface)
+
+    def host_networks(self) -> list:
+        """Redes ya usadas por el servidor (proveedor, Docker...) que una LAN no puede pisar."""
+        out = []
+        for args in (("-4", "-o", "addr", "show"), ("-4", "route", "show")):
+            res = self._ip(*args)
+            if res is None or res.returncode != 0:
+                continue
+            for line in res.stdout.splitlines():
+                parts = line.split()
+                if self.settings.wg_interface in parts:
+                    continue
+                token = parts[3] if args[2] == "addr" and len(parts) > 3 else (parts[0] if parts else "")
+                if token == "default":
+                    continue
+                try:
+                    net = ipaddress.ip_network(token, strict=False)
+                except ValueError:
+                    continue
+                if isinstance(net, ipaddress.IPv4Network) and not net.is_loopback:
+                    out.append(net)
+        return out
 
     def _syncconf(self, content: str) -> bool:
         if shutil.which("wg") is None or not self.interface_up():

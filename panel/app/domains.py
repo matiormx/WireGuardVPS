@@ -75,8 +75,13 @@ class Domains:
             return None
         return c.execute("SELECT * FROM tenants WHERE domain = ?", (host,)).fetchone()
 
-    def taken(self, c: sqlite3.Connection, host: str, exclude_tenant: int | None = None) -> bool:
+    def taken(self, c: sqlite3.Connection, host: str, exclude_tenant: int | None = None,
+              exclude_service: int | None = None) -> bool:
+        """Un nombre sólo puede ser el del panel, el de un cliente o el de un servicio publicado."""
         if host == self.main_domain(c):
+            return True
+        svc = c.execute("SELECT id FROM services WHERE hostname = ?", (host,)).fetchone()
+        if svc and svc["id"] != exclude_service:
             return True
         row = c.execute("SELECT id FROM tenants WHERE domain = ?", (host,)).fetchone()
         return bool(row) and row["id"] != exclude_tenant
@@ -85,7 +90,11 @@ class Domains:
         if host and host == self.main_domain(c):
             return True
         row = self.tenant_for_host(c, host)
-        return bool(row) and bool(row["enabled"])
+        if row is not None:
+            return bool(row["enabled"])
+        svc = c.execute("""SELECT 1 FROM services s JOIN tenants t ON t.id = s.tenant_id
+                           WHERE s.hostname = ? AND s.enabled = 1 AND t.enabled = 1""", (host,)).fetchone()
+        return svc is not None
 
     def seed_from_env(self, domain: str | None) -> None:
         """PANEL_DOMAIN (instalaciones anteriores): se usa si aún no hay dominio en el panel."""
@@ -125,7 +134,9 @@ class Domains:
         return {"ok": ok, "resolved": resolved, "expected": expected}
 
     @staticmethod
-    def https_status(host: str) -> dict:
+    def https_status(host: str, any_status: bool = False) -> dict:
+        """Comprueba el certificado. any_status: cualquier respuesta HTTP vale (servicios
+        publicados, donde el equipo de destino puede pedir contraseña o no tener /healthz)."""
         try:
             ctx = ssl.create_default_context()
             req = urllib.request.Request(f"https://{host}/healthz", headers={"User-Agent": "wgp-panel/domain-check"})
@@ -133,6 +144,8 @@ class Domains:
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=ctx))
             with opener.open(req, timeout=12) as res:
                 return {"ok": res.status == 200, "error": None}
+        except urllib.error.HTTPError as exc:
+            return {"ok": any_status, "error": None if any_status else f"HTTP {exc.code}"}
         except ssl.SSLError as exc:
             return {"ok": False, "error": f"Certificado aún no disponible ({exc.reason or exc})"}
         except urllib.error.URLError as exc:
@@ -140,13 +153,13 @@ class Domains:
         except (OSError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
 
-    def status(self, host: str | None) -> dict:
+    def status(self, host: str | None, any_status: bool = False) -> dict:
         if not host:
             return {"domain": None, "dns": None, "https": None, "server_ips": sorted(self.expected_ips())}
         dns = self.dns_status(host)
         # Sólo se prueba HTTPS si el DNS apunta aquí: la petición va a nuestro propio
         # servidor y, de paso, hace que Caddy solicite el certificado.
-        https = self.https_status(host) if dns["ok"] else {"ok": False, "error": "El DNS aún no apunta a este servidor"}
+        https = self.https_status(host, any_status) if dns["ok"] else {"ok": False, "error": "El DNS aún no apunta a este servidor"}
         return {"domain": host, "dns": dns, "https": https, "server_ips": dns["expected"]}
 
     def allow_certificate(self, host: str) -> bool:

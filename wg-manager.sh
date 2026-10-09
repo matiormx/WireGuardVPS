@@ -31,7 +31,7 @@ set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 # -----------------------------------------------------------------------------
 # VERSIÓN DEL SCRIPT (se compara con la publicada en GitHub). SemVer.
 # -----------------------------------------------------------------------------
-readonly VERSION="2.5.0"
+readonly VERSION="2.6.0"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
@@ -518,18 +518,42 @@ ensure_chains() {
     ipt -t nat -N "${DNSCHAIN}" 2>/dev/null || true
 }
 
+# read_groups FICHERO -> un grupo por línea (red del cliente + LAN de sus routers),
+# sólo con las redes válidas. Las redes de un mismo grupo se ven entre sí.
+read_groups() {
+    local file=$1 line net group
+    [[ -f "${file}" ]] || return 0
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        group=""
+        for net in ${line}; do
+            if valid_cidr "${net}"; then
+                group+="${net},"
+            else
+                logger -t wgp-firewall "Red ignorada en ${file}: ${net}" || true
+            fi
+        done
+        if [[ -n "${group}" ]]; then
+            echo "${group%,}"
+        fi
+    done <"${file}"
+}
+
 sync_tenants() {
     ensure_chains
-    local net c="-m comment --comment ${TAG}" tenants dns
-    tenants="$(read_nets "${LIST}")"
+    local net src dst group c="-m comment --comment ${TAG}" groups dns
+    groups="$(read_groups "${LIST}")"
     dns="$(read_nets "${DNS_LIST}")"
     {
         # Con --noflush, declarar una cadena la vacía: el cambio es atómico.
         echo "*filter"
         echo ":${CHAIN} - [0:0]"
         echo ":${EGRESS} - [0:0]"
-        for net in ${tenants}; do
-            echo "-A ${CHAIN} -s ${net} -d ${net} ${c} -j ACCEPT"
+        for group in ${groups}; do
+            for src in ${group//,/ }; do
+                for dst in ${group//,/ }; do
+                    echo "-A ${CHAIN} -s ${src} -d ${dst} ${c} -j ACCEPT"
+                done
+            done
         done
         echo "-A ${CHAIN} ${c} -j DROP"
         for net in ${dns}; do
@@ -545,7 +569,7 @@ sync_tenants() {
         done
         echo "COMMIT"
     } | iptables-restore -w --noflush
-    logger -t wgp-firewall "Sincronizado: $(wc -w <<<"${tenants}") redes de cliente, $(wc -w <<<"${dns}") con filtrado DNS" || true
+    logger -t wgp-firewall "Sincronizado: $(wc -w <<<"${groups}") clientes, $(wc -w <<<"${dns}") con filtrado DNS" || true
 }
 
 up() {
@@ -670,6 +694,8 @@ WG_MTU='${WG_MTU}'
 WG_KEEPALIVE='${WG_KEEPALIVE}'
 FIREWALL_HOOK='${FIREWALL_BIN}'
 DNS_ENABLED='${DNS_ENABLED}'
+CADDY_ADMIN='$([[ "${ENABLE_HTTPS}" == "true" ]] && echo "http://127.0.0.1:2019")'
+ACME_EMAIL='${ACME_EMAIL}'
 COOKIE_SECURE='false'
 LOG_LEVEL='INFO'
 EOF
@@ -696,6 +722,7 @@ services:
     volumes:
       - ./data:/data
       - ${WG_CONF_DIR}:${WG_CONF_DIR}
+      - /etc/localtime:/etc/localtime:ro
     logging:
       driver: json-file
       options:
@@ -708,11 +735,15 @@ EOF
 
   # Proxy HTTPS con certificados automáticos de Let's Encrypt (on-demand TLS):
   # cualquier dominio dado de alta en el panel obtiene su certificado al visitarlo.
+  # El panel envía la configuración completa (panel + servicios publicados) a la
+  # API de administración de Caddy (sólo localhost:2019); --resume la conserva
+  # entre reinicios.
   caddy:
     image: caddy:2-alpine
     container_name: wgp-caddy
     restart: unless-stopped
     network_mode: host
+    command: caddy run --config /etc/caddy/Caddyfile --adapter caddyfile --resume
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./caddy/data:/data
@@ -1019,6 +1050,88 @@ cmd_logs() {
     compose logs --tail 200 -f
 }
 
+cmd_backup() {
+    check_root
+    docker exec "${CONTAINER}" python -m app.cli backup
+}
+
+set_config_value() {
+    # Guarda KEY="valor" en la configuración local (reemplaza o añade).
+    local key=$1 value=$2
+    if grep -q "^${key}=" "${CONFIG_FILE}" 2>/dev/null; then
+        sed -i -E "s|^${key}=.*|${key}=\"${value}\"|" "${CONFIG_FILE}"
+    else
+        printf '%s="%s"\n' "${key}" "${value}" >>"${CONFIG_FILE}"
+    fi
+}
+
+cmd_restore() {
+    local file="${1:-}" net key value changed="false" pass="${WGP_BACKUP_PASSPHRASE:-}"
+    [[ -n "${file}" && -f "${file}" ]] || die "Uso: $0 restore <copia.wgpb>"
+    check_root
+    acquire_lock
+    touch "${LOG_FILE}" && chmod 600 "${LOG_FILE}"
+    banner
+    detect_compose || die "Docker Compose no disponible. Ejecute primero: $0 install"
+    [[ -f "${COMPOSE_FILE}" ]] || die "Instale primero la plataforma (${0} install) y después restaure."
+    step "Restauración de ${file}"
+    if [[ -z "${pass}" ]]; then
+        read -r -s -p "Frase de paso de la copia: " pass </dev/tty
+        echo
+    fi
+    export WGP_BACKUP_PASSPHRASE="${pass}"
+    install -m 0600 "${file}" "${DATA_DIR}/restore.wgpb"
+    # shellcheck disable=SC2329  # se invoca más abajo
+    run_cli() { compose run --rm --no-deps -T -e WGP_BACKUP_PASSPHRASE panel python -m app.cli "$@"; }
+    if ! run_cli inspect /data/restore.wgpb; then
+        rm -f "${DATA_DIR}/restore.wgpb"
+        die "No se pudo leer la copia (¿frase de paso correcta?)."
+    fi
+    net="$(run_cli inspect --env /data/restore.wgpb)"
+    # La red debe ser la de la copia: las claves y configuraciones de los
+    # dispositivos dependen de ella. Se ajusta la configuración local.
+    while IFS='=' read -r key value; do
+        [[ "${key}" =~ ^(WG_SUBNET|WG_SERVER_ADDRESS|TENANT_PREFIX|WG_PORT)$ ]] || continue
+        [[ "${value}" =~ ^[0-9./]+$ ]] || die "Valor no válido en la copia: ${key}=${value}"
+        if [[ "${!key}" != "${value}" ]]; then
+            info "${key}: ${!key} -> ${value}"
+            set_config_value "${key}" "${value}"
+            printf -v "${key}" '%s' "${value}"
+            changed="true"
+        fi
+    done <<<"${net}"
+    if [[ -t 0 ]]; then
+        local answer
+        read -r -p "Se reemplazarán todos los datos actuales del panel. ¿Continuar? [s/N] " answer </dev/tty
+        [[ "${answer}" =~ ^[sSyY]$ ]] || { rm -f "${DATA_DIR}/restore.wgpb"; die "Restauración cancelada."; }
+    fi
+    compose stop panel >/dev/null
+    if ! run_cli restore --force /data/restore.wgpb; then
+        rm -f "${DATA_DIR}/restore.wgpb"
+        compose up -d >/dev/null
+        die "La restauración falló; el panel sigue con los datos anteriores."
+    fi
+    rm -f "${DATA_DIR}/restore.wgpb"
+    unset WGP_BACKUP_PASSPHRASE
+    [[ "${changed}" == "false" ]] || setup_ufw
+    install_firewall_helper
+    deploy_panel
+    # Clave privada, dirección y puerto del servidor vienen de la copia: hay que
+    # recrear la interfaz (los dispositivos reconectan solos en segundos).
+    for _ in $(seq 1 30); do
+        grep -q "Generado por el panel" "${WG_CONF_FILE}" 2>/dev/null && break
+        sleep 1
+    done
+    systemctl restart "wg-quick@${WG_INTERFACE}.service" \
+        || die "wg-quick@${WG_INTERFACE} no arrancó. Ver: journalctl -u wg-quick@${WG_INTERFACE}"
+    persist_installation
+    success "Copia restaurada."
+    printf '  Si el endpoint de WireGuard es un nombre (Ajustes del panel), apúntalo a este servidor:\n'
+    printf '  los dispositivos se reconectarán sin tocar nada. Si era la IP del servidor anterior,\n'
+    printf '  habrá que reimportar las configuraciones.\n'
+    print_summary
+}
+
 cmd_reset_admin() {
     check_root
     docker exec "${CONTAINER}" python -m app.cli reset-admin "$@"
@@ -1067,6 +1180,8 @@ ${C_BOLD}Uso:${C_RESET}
   sudo $0 logs                   Logs del panel (Ctrl+C para salir)
   sudo $0 reset-admin [--username U] [--password P]
                                  Contraseña temporal para el administrador
+  sudo $0 backup                 Copia cifrada ahora (frase de paso: panel › Ajustes)
+  sudo $0 restore <copia.wgpb>   Restaura una copia (p. ej. en un servidor nuevo)
   $0 version | help
 
 ${C_BOLD}Configuración:${C_RESET} ${CONFIG_FILE}
@@ -1083,6 +1198,8 @@ main() {
         status)               cmd_status "$@" ;;
         logs)                 cmd_logs "$@" ;;
         reset-admin)          cmd_reset_admin "$@" ;;
+        backup)               cmd_backup "$@" ;;
+        restore)              cmd_restore "$@" ;;
         version|-v|--version) echo "wg-manager v${VERSION}" ;;
         help|-h|--help)       usage ;;
         *) usage; die "Comando desconocido: ${cmd}" ;;

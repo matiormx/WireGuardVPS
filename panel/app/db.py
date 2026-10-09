@@ -62,6 +62,18 @@ CREATE TABLE IF NOT EXISTS passkeys (
     last_used_at  INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_passkeys_user ON passkeys(role, user_id);
+CREATE TABLE IF NOT EXISTS services (
+    id          INTEGER PRIMARY KEY,
+    tenant_id   INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    hostname    TEXT NOT NULL UNIQUE,
+    target_ip   TEXT NOT NULL,
+    target_port INTEGER NOT NULL,
+    scheme      TEXT NOT NULL DEFAULT 'http',
+    auth_user   TEXT NOT NULL DEFAULT '',
+    auth_hash   TEXT NOT NULL DEFAULT '',
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    created_at  INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS dns_records (
     id         INTEGER PRIMARY KEY,
     tenant_id  INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -131,6 +143,8 @@ def _migrate(c: sqlite3.Connection) -> None:
     for row in c.execute("SELECT id, tenant_id, name FROM devices WHERE hostname IS NULL").fetchall():
         c.execute("UPDATE devices SET hostname = ? WHERE id = ?",
                   (unique_hostname(c, row["tenant_id"], make_hostname(row["name"])), row["id"]))
+    _ensure_column(c, "devices", "kind", "TEXT NOT NULL DEFAULT 'device'")
+    _ensure_column(c, "devices", "lan_networks", "TEXT NOT NULL DEFAULT ''")
     if get_setting(c, "dns_suffixes") is None:
         set_setting(c, "dns_suffixes", "vpn")
 

@@ -414,6 +414,7 @@ class DnsFilter:
         self.bind = (str(settings.server_address.ip) if settings.dns_bind == "auto" else settings.dns_bind)
         self.port = settings.dns_port
         self.policies: dict[int, Policy] = {}
+        self.lan_policies: list[tuple[ipaddress.IPv4Network, int]] = []
         self.suffixes: list[str] = ["vpn"]
         self.stats: dict[int, TenantStats] = {}
         self.cache: OrderedDict[tuple, tuple[float, bytes]] = OrderedDict()
@@ -431,13 +432,16 @@ class DnsFilter:
             tenants = c.execute(
                 "SELECT id, net_index, enabled, dns_filters, dns_allow, dns_deny, dns_upstream FROM tenants"
             ).fetchall()
-            device_rows = c.execute("SELECT tenant_id, ip, hostname, dns_filter, enabled FROM devices").fetchall()
+            device_rows = c.execute("SELECT tenant_id, ip, hostname, dns_filter, enabled, kind, lan_networks FROM devices").fetchall()
             record_rows = c.execute("SELECT tenant_id, name, ip FROM dns_records").fetchall()
             self.suffixes = parse_suffixes(get_setting(c, "dns_suffixes"))
         exempt: dict[int, set[str]] = {}
         zones: dict[int, dict[str, str]] = {}
         reverse: dict[int, dict[str, str]] = {}
+        lan_owner: list[tuple[ipaddress.IPv4Network, int]] = []
         for r in device_rows:
+            if r["kind"] == "router" and r["enabled"]:
+                lan_owner += [(ipaddress.IPv4Network(x), r["tenant_id"]) for x in (r["lan_networks"] or "").split()]
             if not r["dns_filter"]:
                 exempt.setdefault(r["tenant_id"], set()).add(r["ip"])
             if r["hostname"]:
@@ -463,6 +467,9 @@ class DnsFilter:
                 upstreams=tuple(parse_suffixes(t["dns_upstream"])),
             )
         self.policies = policies
+        # Equipos de la LAN de un router: misma política (nombres y filtros) que su cliente.
+        index_of = {t["id"]: t["net_index"] for t in tenants}
+        self.lan_policies = [(net, index_of[tid]) for net, tid in lan_owner if tid in index_of]
 
     def policy_for(self, client_ip: str) -> Policy | None:
         try:
@@ -470,7 +477,13 @@ class DnsFilter:
         except ValueError:
             return None
         idx = (ip - self._base) >> self._host_bits
-        return self.policies.get(idx) if idx > 0 else None
+        if 0 <= ip - self._base < self.settings.wg_subnet.num_addresses:
+            return self.policies.get(idx) if idx > 0 else None
+        addr = ipaddress.IPv4Address(ip)
+        for net, net_index in self.lan_policies:
+            if addr in net:
+                return self.policies.get(net_index)
+        return None
 
     def decide(self, name: str, policy: Policy | None, client_ip: str) -> tuple[str, str | None]:
         """('forward'|'block'|'nxdomain'|'safesearch', destino CNAME)."""

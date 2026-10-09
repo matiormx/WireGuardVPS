@@ -7,9 +7,12 @@ import io
 import json
 import logging
 import re
+import socket
 import sqlite3
+import threading
 import time
 import unicodedata
+import urllib.parse
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +24,9 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import dnsfilter, domains, passkeys, security, wg
+import bcrypt
+
+from . import backup, caddy, dnsfilter, domains, passkeys, security, wg
 from .config import Settings, load_settings
 from .db import (LABEL_RE, Database, get_setting, make_hostname, name_in_use, set_setting,
                  unique_hostname, username_taken)
@@ -93,6 +98,8 @@ class DeviceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=48)
     full_tunnel: bool = True
     tenant_id: int | None = None  # sólo admin
+    kind: str = Field(default="device", pattern="^(device|router)$")
+    lan_networks: list[str] = Field(default_factory=list, max_length=10)
 
     @field_validator("name")
     @classmethod
@@ -106,11 +113,50 @@ class DeviceUpdate(BaseModel):
     full_tunnel: bool | None = None
     dns_filter: bool | None = None
     hostname: str | None = Field(default=None, max_length=63)
+    lan_networks: list[str] | None = Field(default=None, max_length=10)
 
     @field_validator("name")
     @classmethod
     def _name(cls, v: str | None) -> str | None:
         return None if v is None else _clean_name(v)
+
+
+class ServiceIn(BaseModel):
+    hostname: str = Field(min_length=4, max_length=253)
+    target_ip: str = Field(min_length=7, max_length=15)
+    target_port: int = Field(ge=1, le=65535)
+    scheme: str = Field(default="http", pattern="^(http|https)$")
+    auth_user: str = Field(default="", max_length=32)
+    auth_password: str = Field(default="", max_length=128)
+    tenant_id: int | None = None  # sólo admin
+
+
+class ServiceUpdate(BaseModel):
+    enabled: bool | None = None
+    target_ip: str | None = Field(default=None, min_length=7, max_length=15)
+    target_port: int | None = Field(default=None, ge=1, le=65535)
+    scheme: str | None = Field(default=None, pattern="^(http|https)$")
+    auth_user: str | None = Field(default=None, max_length=32)
+    auth_password: str | None = Field(default=None, max_length=128)
+    clear_auth: bool = False
+
+
+class BackupIn(BaseModel):
+    enabled: bool | None = None
+    hour: int | None = Field(default=None, ge=0, le=23)
+    keep: int | None = Field(default=None, ge=1, le=365)
+    passphrase: str | None = Field(default=None, max_length=256)
+    s3_endpoint: str | None = Field(default=None, max_length=300)
+    s3_region: str | None = Field(default=None, max_length=64)
+    s3_bucket: str | None = Field(default=None, max_length=63)
+    s3_prefix: str | None = Field(default=None, max_length=200)
+    s3_access_key: str | None = Field(default=None, max_length=200)
+    s3_secret_key: str | None = Field(default=None, max_length=200)  # vacío = conservar
+    clear_s3: bool = False
+
+
+class EndpointIn(BaseModel):
+    endpoint: str | None = Field(default=None, max_length=253)
 
 
 class FiltersIn(BaseModel):
@@ -177,6 +223,16 @@ class DomainIn(BaseModel):
     domain: str | None = Field(default=None, max_length=253)
 
 
+def _probe(ip: str, port: int) -> dict:
+    """¿Responde el equipo de destino de un servicio publicado? (conexión TCP desde el servidor)."""
+    try:
+        with socket.create_connection((ip, int(port)), timeout=3):
+            return {"ok": True, "error": None}
+    except OSError as exc:
+        reason = "no responde (¿encendido y conectado a la VPN?)" if isinstance(exc, TimeoutError) else (exc.strerror or str(exc))
+        return {"ok": False, "error": f"{ip}:{port} {reason}"}
+
+
 def _clean_host(value: str | None) -> str | None:
     if value is None or not value.strip():
         return None
@@ -210,6 +266,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     dns = dnsfilter.DnsFilter(settings, database)
     doms = domains.Domains(settings, database)
     keys = passkeys.Passkeys()
+    proxy = caddy.CaddySync(settings, database, settings.caddy_admin, settings.acme_email)
+    backups = backup.Backups(settings, database)
     doms.seed_from_env(settings.panel_domain)
 
     @asynccontextmanager
@@ -220,12 +278,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             log.exception("No se pudo aplicar la configuración WireGuard al arrancar")
         if settings.dns_enabled:
             await dns.start()
+        proxy.start()
+        backups.start()
         yield
+        await backups.stop()
+        await proxy.stop()
         await dns.stop()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings, app.state.db, app.state.wg, app.state.dns = settings, database, wgm, dns
     app.state.domains = doms
+    app.state.caddy = proxy
+    app.state.backups = backups
 
     # ------------------------------------------------------------------ middleware
     @app.middleware("http")
@@ -329,6 +393,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "name": d["name"], "ip": d["ip"], "public_key": d["public_key"],
             "full_tunnel": bool(d["full_tunnel"]), "enabled": bool(d["enabled"]),
             "dns_filter": bool(d["dns_filter"]), "hostname": d["hostname"],
+            "kind": d["kind"], "lan_networks": wg.parse_lans(d["lan_networks"]),
             "created_at": d["created_at"],
             "online": bool(st.get("online")) and bool(d["enabled"]) and bool(tenant["enabled"]),
             "last_handshake": st.get("last_handshake"), "endpoint": st.get("endpoint"),
@@ -348,8 +413,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "rx": sum(d["rx"] for d in dj), "tx": sum(d["tx"] for d in dj),
         }
 
+    def clean_lans(c: sqlite3.Connection, values: list[str], device_id: int | None = None) -> list[str]:
+        """Redes LAN de un router: privadas, sin solaparse con el túnel, el servidor ni otros routers.
+
+        Las rutas del servidor son globales, así que dos clientes no pueden publicar la
+        misma LAN (p. ej. 192.168.1.0/24): se rechaza sin revelar quién la usa.
+        """
+        cgnat = ipaddress.ip_network("100.64.0.0/10")
+        taken = []
+        for r in c.execute("SELECT id, lan_networks FROM devices WHERE kind = 'router'"):
+            if r["id"] != device_id:
+                taken += [ipaddress.ip_network(x) for x in wg.parse_lans(r["lan_networks"])]
+        host_nets = wgm.host_networks()
+        out: list[ipaddress.IPv4Network] = []
+        for raw in values:
+            try:
+                net = ipaddress.ip_network(raw.strip(), strict=False)
+            except ValueError:
+                raise HTTPException(422, f"Red no válida: {raw!r} (ejemplo: 192.168.88.0/24)") from None
+            if not isinstance(net, ipaddress.IPv4Network) or not 8 <= net.prefixlen <= 30:
+                raise HTTPException(422, f"{raw}: usa una red IPv4 entre /8 y /30")
+            if not (net.is_private or net.subnet_of(cgnat)) or net.is_loopback or net.is_link_local:
+                raise HTTPException(422, f"{net}: sólo se admiten redes privadas (192.168.x, 172.16-31.x, 10.x)")
+            if net.overlaps(settings.wg_subnet):
+                raise HTTPException(422, f"{net} se solapa con la red de la VPN ({settings.wg_subnet})")
+            if any(net.overlaps(h) for h in host_nets):
+                raise HTTPException(409, f"{net} se solapa con una red del propio servidor; elige otra")
+            if any(net.overlaps(t) for t in taken):
+                raise HTTPException(409, f"{net} ya la usa otra red de la plataforma; elige otro rango "
+                                         "(p. ej. 192.168.123.0/24)")
+            if any(net.overlaps(o) for o in out):
+                raise HTTPException(422, f"{net} está repetida o se solapa con otra de la lista")
+            out.append(net)
+        return [str(n) for n in out]
+
+    def push_caddy() -> None:
+        if proxy.enabled:
+            threading.Thread(target=proxy.push, daemon=True).start()
+
     def apply_wg() -> None:
         dns.reload_policies()
+        push_caddy()
         try:
             wgm.apply()
         except OSError as exc:
@@ -431,7 +535,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "filtering_tenants": sum(any(t["filters"].values()) for t in tj),
             },
             "server": {
-                "endpoint": f"{settings.endpoint}:{settings.wg_port}", "interface": settings.wg_interface,
+                "endpoint": f"{wg.endpoint_host(c, settings)}:{settings.wg_port}", "interface": settings.wg_interface,
                 "interface_up": wgm.interface_up(), "subnet": str(settings.wg_subnet),
                 "address": str(settings.server_address), "public_key": get_setting(c, "server_public_key"),
                 "tenant_prefix": settings.tenant_prefix,
@@ -525,12 +629,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(409, "No quedan IPs libres en la red del cliente")
         private, public = wg.generate_keypair()
         hostname = unique_hostname(c, tenant_id, make_hostname(body.name))
+        is_router = body.kind == "router"
+        lans = clean_lans(c, body.lan_networks) if is_router else []
+        if is_router and not lans:
+            raise HTTPException(422, "Indica al menos una red LAN del router (p. ej. 192.168.88.0/24)")
         cur = c.execute(
             """INSERT INTO devices (tenant_id, name, ip, private_key, public_key, preshared_key, full_tunnel,
-                                    created_at, hostname)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (tenant_id, body.name, ip, private, public, wg.generate_psk(), int(body.full_tunnel), int(time.time()),
-             hostname),
+                                    created_at, hostname, kind, lan_networks)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tenant_id, body.name, ip, private, public, wg.generate_psk(), int(body.full_tunnel and not is_router),
+             int(time.time()), hostname, body.kind, " ".join(lans)),
         )
         c.commit()
         apply_wg()
@@ -540,6 +648,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.patch("/api/devices/{device_id}")
     def update_device(device_id: int, body: DeviceUpdate, p: User, c: Conn):
         d = device_for(c, p, device_id)
+        if body.lan_networks is not None:
+            if d["kind"] != "router":
+                raise HTTPException(422, "Sólo los routers tienen redes LAN")
+            lans = clean_lans(c, body.lan_networks, device_id)
+            if not lans:
+                raise HTTPException(422, "Un router necesita al menos una red LAN")
+            c.execute("UPDATE devices SET lan_networks = ? WHERE id = ?", (" ".join(lans), device_id))
         if body.hostname is not None:
             hostname = _dns_name(body.hostname, "Nombre de red")
             if "." in hostname:
@@ -572,7 +687,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         d = device_for(c, p, device_id)
         t = tenant_or_404(c, d["tenant_id"])
         conf = wg.render_client_conf(settings, get_setting(c, "server_public_key") or "", t, d,
-                                     search=dnsfilter.parse_suffixes(get_setting(c, "dns_suffixes")))
+                                     search=dnsfilter.parse_suffixes(get_setting(c, "dns_suffixes")),
+                                     endpoint=wg.endpoint_host(c, settings),
+                                     lans=wg.tenant_lans(c, t["id"], exclude_device=d["id"]))
         plain = unicodedata.normalize("NFKD", d["name"]).encode("ascii", "ignore").decode()  # «Matías» -> «Matias»
         slug = re.sub(r"[^A-Za-z0-9_-]+", "-", plain).strip("-")[:15] or f"wg{d['id']}"
         return conf, slug
@@ -582,6 +699,133 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         conf, slug = client_config(c, p, device_id)
         return Response(conf, media_type="text/plain; charset=utf-8",
                         headers={"Content-Disposition": f'attachment; filename="{slug}.conf"'})
+
+    @app.get("/api/devices/{device_id}/mikrotik")
+    def device_mikrotik(device_id: int, p: User, c: Conn):
+        d = device_for(c, p, device_id)
+        t = tenant_or_404(c, d["tenant_id"])
+        script = wg.render_mikrotik(settings, get_setting(c, "server_public_key") or "", t, d,
+                                    endpoint=wg.endpoint_host(c, settings),
+                                    lans=wg.tenant_lans(c, t["id"], exclude_device=d["id"]))
+        return Response(script, media_type="text/plain; charset=utf-8")
+
+    # ------------------------------------------------------------------ copias de seguridad
+    def backup_state() -> dict:
+        cfg = backups.config()
+        return {
+            "enabled": cfg["backup_enabled"] == "1", "hour": int(cfg["backup_hour"]), "keep": int(cfg["backup_keep"]),
+            "has_passphrase": len(cfg["passphrase"]) >= 12, "last": cfg["last"], "backups": backups.list(),
+            "timezone": time.strftime("%Z"),
+            "s3": {"endpoint": cfg["s3_endpoint"], "region": cfg["s3_region"], "bucket": cfg["s3_bucket"],
+                   "prefix": cfg["s3_prefix"], "access_key": cfg["s3_access_key"], "secret_set": bool(cfg["s3_secret_key"]),
+                   "configured": backup.s3_configured(cfg)},
+        }
+
+    def clean_s3(body: BackupIn, cfg: dict) -> dict:
+        new = {k: cfg[k] for k in backup.DEFAULTS if k.startswith("s3_")}
+        for k in ("s3_endpoint", "s3_region", "s3_bucket", "s3_prefix", "s3_access_key"):
+            v = getattr(body, k)
+            if v is not None:
+                new[k] = v.strip()
+        if body.s3_secret_key:
+            new["s3_secret_key"] = body.s3_secret_key.strip()
+        if new["s3_endpoint"]:
+            url = urllib.parse.urlsplit(new["s3_endpoint"] if "://" in new["s3_endpoint"] else "https://" + new["s3_endpoint"])
+            if url.scheme not in ("http", "https") or not url.hostname or url.query or url.fragment:
+                raise HTTPException(422, "Endpoint S3 no válido (p. ej. https://s3.eu-west-1.amazonaws.com)")
+            new["s3_endpoint"] = f"{url.scheme}://{url.netloc}{url.path.rstrip('/')}"
+        if new["s3_bucket"] and not re.fullmatch(r"[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]", new["s3_bucket"]):
+            raise HTTPException(422, "Nombre de bucket no válido")
+        if not re.fullmatch(r"[A-Za-z0-9._/\-]{0,200}", new["s3_prefix"]):
+            raise HTTPException(422, "Prefijo no válido: letras, números, . _ - /")
+        if not re.fullmatch(r"[a-z0-9\-]{1,64}", new["s3_region"] or "auto"):
+            raise HTTPException(422, "Región no válida (p. ej. eu-west-1 o auto)")
+        new["s3_region"] = new["s3_region"] or "auto"
+        return new
+
+    @app.get("/api/admin/backup")
+    def get_backup(_: Admin):
+        return backup_state()
+
+    @app.put("/api/admin/backup")
+    def put_backup(body: BackupIn, _: Admin):
+        cfg = backups.config()
+        values: dict = {}
+        if body.passphrase is not None:
+            if len(body.passphrase) < 12:
+                raise HTTPException(422, "La frase de paso debe tener al menos 12 caracteres")
+            values["backup_passphrase"] = body.passphrase
+        if body.enabled is not None:
+            if body.enabled and len(cfg["passphrase"]) < 12 and "backup_passphrase" not in values:
+                raise HTTPException(422, "Define primero la frase de paso de las copias")
+            values["backup_enabled"] = "1" if body.enabled else "0"
+        if body.hour is not None:
+            values["backup_hour"] = body.hour
+        if body.keep is not None:
+            values["backup_keep"] = body.keep
+        if body.clear_s3:
+            values.update({k: backup.DEFAULTS[k] for k in backup.DEFAULTS if k.startswith("s3_")})
+        else:
+            values.update(clean_s3(body, cfg))
+        backups.save_config(values)
+        if body.keep is not None:
+            backups.prune(body.keep)
+        return backup_state()
+
+    @app.post("/api/admin/backup/run")
+    async def run_backup(_: Admin):
+        try:
+            result = await backups.run_now("manual")
+        except backup.BackupError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return {**backup_state(), "result": result}
+
+    @app.post("/api/admin/backup/test-s3")
+    async def test_s3(body: BackupIn, _: Admin):
+        cfg = {**backups.config(), **clean_s3(body, backups.config())}
+        if not backup.s3_configured(cfg):
+            raise HTTPException(422, "Completa endpoint, bucket, access key y secret key")
+        try:
+            await asyncio.to_thread(backups.test_s3, cfg)
+        except backup.BackupError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return {"ok": True}
+
+    @app.get("/api/admin/backups/{name}")
+    def download_backup(name: str, _: Admin):
+        try:
+            path = backups.path(name)
+        except backup.BackupError as exc:
+            raise HTTPException(404, str(exc)) from None
+        return FileResponse(path, media_type="application/octet-stream", filename=name)
+
+    @app.delete("/api/admin/backups/{name}")
+    def delete_backup(name: str, _: Admin):
+        try:
+            backups.path(name).unlink()
+        except backup.BackupError as exc:
+            raise HTTPException(404, str(exc)) from None
+        return backup_state()
+
+    @app.get("/api/admin/wg-settings")
+    def get_wg_settings(_: Admin, c: Conn):
+        return {"endpoint": get_setting(c, "wg_endpoint") or "", "default": settings.endpoint,
+                "effective": wg.endpoint_host(c, settings), "port": settings.wg_port}
+
+    @app.put("/api/admin/wg-settings")
+    def put_wg_settings(body: EndpointIn, admin_: Admin, c: Conn):
+        raw = (body.endpoint or "").strip().lower()
+        if raw:
+            try:
+                raw = str(ipaddress.ip_address(raw))
+            except ValueError:
+                host = domains.normalize_host(raw)
+                if host is None:
+                    raise HTTPException(422, f"Endpoint no válido: {body.endpoint!r} (IP o nombre, p. ej. wg.tudominio.com)")
+                raw = host
+        set_setting(c, "wg_endpoint", raw)
+        c.commit()
+        return get_wg_settings(admin_, c)
 
     @app.get("/api/devices/{device_id}/qr.svg")
     def device_qr(device_id: int, p: User, c: Conn):
@@ -708,6 +952,125 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         limiter.reset(key)
         c.commit()  # contador de firmas y último uso
         return finish_login(request, response, c, pk["role"], row)
+
+    # ------------------------------------------------------------------ servicios publicados (Caddy)
+    def service_json(c: sqlite3.Connection, r: sqlite3.Row) -> dict:
+        dev = c.execute("SELECT name, hostname FROM devices WHERE tenant_id = ? AND ip = ?",
+                        (r["tenant_id"], r["target_ip"])).fetchone()
+        return {
+            "id": r["id"], "tenant_id": r["tenant_id"], "hostname": r["hostname"],
+            "target_ip": r["target_ip"], "target_port": r["target_port"], "scheme": r["scheme"],
+            "protected": bool(r["auth_hash"]), "auth_user": r["auth_user"], "enabled": bool(r["enabled"]),
+            "created_at": r["created_at"], "target_name": dev["name"] if dev else None,
+        }
+
+    def service_for(c: sqlite3.Connection, p: Principal, service_id: int) -> sqlite3.Row:
+        row = c.execute("SELECT * FROM services WHERE id = ?", (service_id,)).fetchone()
+        if not row or (not p.is_admin and row["tenant_id"] != p.id):
+            raise HTTPException(404, "Servicio no encontrado")
+        return row
+
+    def clean_target(c: sqlite3.Connection, tenant_id: int, raw: str) -> str:
+        """El destino debe estar en la red del cliente o en la LAN de uno de sus routers."""
+        t = tenant_or_404(c, tenant_id)
+        try:
+            ip = ipaddress.IPv4Address(raw.strip())
+        except ValueError:
+            raise HTTPException(422, f"IP no válida: {raw!r}") from None
+        allowed = [wg.tenant_network(settings, t["net_index"])]
+        for r in c.execute("SELECT lan_networks FROM devices WHERE tenant_id = ? AND kind = 'router'", (tenant_id,)):
+            allowed += [ipaddress.ip_network(x) for x in wg.parse_lans(r["lan_networks"])]
+        if not any(ip in n for n in allowed):
+            nets = ", ".join(str(n) for n in allowed)
+            raise HTTPException(422, f"{ip} no está en tu red ({nets})")
+        return str(ip)
+
+    def clean_auth(user: str, password: str) -> tuple[str, str]:
+        user = user.strip()
+        if not user and not password:
+            return "", ""
+        if not caddy.USER_RE.match(user):
+            raise HTTPException(422, "Usuario no válido: letras, números, . _ - (máx. 32)")
+        if len(password) < 8:
+            raise HTTPException(422, "La contraseña del servicio debe tener al menos 8 caracteres")
+        return user, bcrypt.hashpw(password.encode(), bcrypt.gensalt(12)).decode()
+
+    def services_tenant(p: Principal, tenant_id: int | None) -> int:
+        if p.is_admin:
+            if tenant_id is None:
+                raise HTTPException(400, "tenant_id es obligatorio")
+            return tenant_id
+        return p.id
+
+    @app.get("/api/services")
+    def list_services(p: User, c: Conn, tenant_id: int | None = None):
+        tid = services_tenant(p, tenant_id)
+        t = tenant_or_404(c, tid)
+        rows = c.execute("SELECT * FROM services WHERE tenant_id = ? ORDER BY hostname", (tid,)).fetchall()
+        lans = [str(wg.tenant_network(settings, t["net_index"]))] + wg.tenant_lans(c, tid)
+        return {"enabled": proxy.enabled, "error": proxy.last_error, "server_ips": sorted(doms.expected_ips()),
+                "networks": lans, "services": [service_json(c, r) for r in rows]}
+
+    @app.post("/api/services", status_code=201)
+    def create_service(body: ServiceIn, p: User, c: Conn):
+        if not proxy.enabled:
+            raise HTTPException(409, "Los servicios publicados requieren el HTTPS automático (ENABLE_HTTPS=true)")
+        tid = body.tenant_id if p.is_admin else p.id
+        if tid is None:
+            raise HTTPException(400, "tenant_id es obligatorio")
+        tenant_or_404(c, tid)
+        host = _clean_host(body.hostname)
+        if not host:
+            raise HTTPException(422, "Indica el nombre del servicio (p. ej. nas.tuempresa.com)")
+        if doms.taken(c, host):
+            raise HTTPException(409, "Ese nombre ya está en uso")
+        if c.execute("SELECT COUNT(*) FROM services WHERE tenant_id = ?", (tid,)).fetchone()[0] >= 20:
+            raise HTTPException(409, "Máximo 20 servicios por cliente")
+        target = clean_target(c, tid, body.target_ip)
+        user, hashed = clean_auth(body.auth_user, body.auth_password)
+        cur = c.execute(
+            """INSERT INTO services (tenant_id, hostname, target_ip, target_port, scheme, auth_user, auth_hash, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tid, host, target, body.target_port, body.scheme, user, hashed, int(time.time())),
+        )
+        c.commit()
+        push_caddy()
+        return service_json(c, c.execute("SELECT * FROM services WHERE id = ?", (cur.lastrowid,)).fetchone())
+
+    @app.patch("/api/services/{service_id}")
+    def update_service(service_id: int, body: ServiceUpdate, p: User, c: Conn):
+        r = service_for(c, p, service_id)
+        if body.target_ip is not None:
+            c.execute("UPDATE services SET target_ip = ? WHERE id = ?", (clean_target(c, r["tenant_id"], body.target_ip), service_id))
+        if body.target_port is not None:
+            c.execute("UPDATE services SET target_port = ? WHERE id = ?", (body.target_port, service_id))
+        if body.scheme is not None:
+            c.execute("UPDATE services SET scheme = ? WHERE id = ?", (body.scheme, service_id))
+        if body.enabled is not None:
+            c.execute("UPDATE services SET enabled = ? WHERE id = ?", (int(body.enabled), service_id))
+        if body.clear_auth:
+            c.execute("UPDATE services SET auth_user = '', auth_hash = '' WHERE id = ?", (service_id,))
+        elif body.auth_password:
+            user, hashed = clean_auth(body.auth_user if body.auth_user is not None else r["auth_user"], body.auth_password)
+            c.execute("UPDATE services SET auth_user = ?, auth_hash = ? WHERE id = ?", (user, hashed, service_id))
+        c.commit()
+        push_caddy()
+        return service_json(c, c.execute("SELECT * FROM services WHERE id = ?", (service_id,)).fetchone())
+
+    @app.delete("/api/services/{service_id}")
+    def delete_service(service_id: int, p: User, c: Conn):
+        service_for(c, p, service_id)
+        c.execute("DELETE FROM services WHERE id = ?", (service_id,))
+        c.commit()
+        push_caddy()
+        return {"ok": True}
+
+    @app.get("/api/services/{service_id}/status")
+    async def service_status(service_id: int, p: User, c: Conn):
+        r = service_for(c, p, service_id)
+        st = await asyncio.to_thread(doms.status, r["hostname"], True)
+        st["target"] = await asyncio.to_thread(_probe, r["target_ip"], r["target_port"])
+        return st
 
     # ------------------------------------------------------------------ DNS propio de cada cliente
     def zone_json(c: sqlite3.Connection, tenant_id: int) -> dict:

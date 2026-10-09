@@ -8,7 +8,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-NS=(srv a1 a2 b1 inet sw)
+NS=(srv a1 a2 b1 inet sw r1 lan1)
 netns_cleanup() {
     for p in "${PIDS[@]+"${PIDS[@]}"}"; do kill "$p" 2>/dev/null; done
     for n in "${NS[@]}"; do ip netns del "$n" 2>/dev/null; done
@@ -42,7 +42,17 @@ for d in a1:10.252.1.2 a2:10.252.1.3 b1:10.252.2.2; do
     ip -n "$n" addr add "$a/32" dev eth0 && ip -n "$n" link set eth0 up
     ip -n "$n" route add 10.252.0.1 dev eth0 && ip -n "$n" route add default via 10.252.0.1 dev eth0
 done
+# Router del cliente 1 (r1, 10.252.1.5) con su LAN 192.168.88.0/24 detrás (lan1 = 192.168.88.10).
+ip -n sw link add r1-br type veth peer name eth0 netns r1 && ip -n sw link set r1-br master br-sim up
+ip -n r1 addr add 10.252.1.5/32 dev eth0 && ip -n r1 link set eth0 up
+ip -n r1 route add 10.252.0.1 dev eth0 && ip -n r1 route add 10.252.0.0/16 via 10.252.0.1 dev eth0
+ip -n r1 link add lan type veth peer name eth0 netns lan1
+ip -n r1 addr add 192.168.88.1/24 dev lan && ip -n r1 link set lan up
+ip -n lan1 addr add 192.168.88.10/24 dev eth0 && ip -n lan1 link set eth0 up && ip -n lan1 route add default via 192.168.88.1
+ip netns exec r1 sysctl -qw net.ipv4.ip_forward=1
 ip -n srv addr add 10.252.0.1/16 dev wg0 && ip -n srv link set wg0 up
+# En WireGuard la ruta a la LAN va por wg0 (AllowedIPs del router); en la simulación, vía r1.
+ip -n srv route add 192.168.88.0/24 via 10.252.1.5 dev wg0
 ip link add eth0 netns srv type veth peer name eth0 netns inet
 ip -n srv addr add 198.51.100.1/24 dev eth0 && ip -n srv link set eth0 up
 ip -n inet addr add 198.51.100.2/24 dev eth0 && ip -n inet addr add 8.8.8.8/32 dev lo && ip -n inet link set eth0 up
@@ -50,7 +60,7 @@ ip -n srv route add default via 198.51.100.2
 ip netns exec srv sysctl -qw net.ipv4.ip_forward=1 net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.wg0.send_redirects=0
 ip netns exec srv iptables -P FORWARD DROP
 
-printf '10.252.1.0/24\n10.252.2.0/24\n; iptables -F\n' >"$LIST"
+printf '10.252.1.0/24 192.168.88.0/24\n10.252.2.0/24\n; iptables -F\n' >"$LIST"
 printf '10.252.1.0/24\n' >"$DNS_LIST"          # sólo el cliente 1 tiene filtros DNS
 ip netns exec srv iptables -P INPUT DROP          # el resolver sólo es accesible por la regla propia
 
@@ -96,6 +106,10 @@ check b1 10.252.1.2 block "entre clientes"
 check a1 8.8.8.8    pass  "Internet por NAT"
 check b1 8.8.8.8    pass  "Internet por NAT"
 check inet 10.252.1.2 block "Internet -> cliente"
+check a1 192.168.88.10 pass "site-to-site: dispositivo -> LAN del router de su cliente"
+check lan1 10.252.1.2 pass  "site-to-site: LAN del router -> dispositivo de su cliente"
+check b1 192.168.88.10 block "site-to-site: otro cliente -> LAN ajena"
+check lan1 10.252.2.2 block "site-to-site: LAN -> dispositivo de otro cliente"
 
 dns_check a1 8.8.8.8 resolver "cliente con filtros: su DNS se redirige al resolver"
 dns_check a1 10.252.0.1 resolver "cliente con filtros: resolver directo"
