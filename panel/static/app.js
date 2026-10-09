@@ -1351,6 +1351,9 @@ document.addEventListener("touchmove", (e) => { if (e.touches.length > 1) e.prev
 function isStandalone() {
   return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
 }
+// Marca la app instalada para los márgenes de la barra de estado (ver style.css).
+if (isStandalone()) document.documentElement.classList.add("standalone");
+
 function isIOS() {
   return /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }

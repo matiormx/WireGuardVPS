@@ -471,3 +471,20 @@ ol.steps code { color: var(--text); background: var(--surface-2); padding: 1px 6
   /* Los avisos arriba: las ventanas salen desde abajo y no deben quedar tapadas. */
   #toasts { top: max(12px, env(safe-area-inset-top)); bottom: auto; z-index: 70; }
 }
+
+/* ==========================================================================
+   App instalada (PWA) en iOS: la barra de estado translúcida añade un degradado
+   difuminado que llega más abajo que la zona segura declarada. Se deja un margen
+   extra bajo ella para que nada quede tapado. La clase .standalone la pone app.js
+   (iOS antiguos no soportan la media query display-mode).
+   ========================================================================== */
+:root { --top-gap: 0px; }
+html.standalone { --top-gap: 14px; }
+html.standalone .sidebar { padding-top: calc(env(safe-area-inset-top) + var(--top-gap) + 18px); }
+html.standalone .auth { padding-top: calc(env(safe-area-inset-top) + var(--top-gap) + 24px); }
+html.standalone .modal { max-height: calc(100vh - env(safe-area-inset-top) - var(--top-gap) - 24px); }
+@media (max-width: 760px) {
+  html.standalone .topbar { padding-top: calc(env(safe-area-inset-top) + var(--top-gap)); }
+  html.standalone #toasts { top: calc(env(safe-area-inset-top) + var(--top-gap) + 6px); }
+  html.standalone .overlay { padding-top: calc(env(safe-area-inset-top) + var(--top-gap)); }
+}
