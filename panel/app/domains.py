@@ -23,6 +23,7 @@ import time
 import urllib.error
 import urllib.request
 
+from . import cfdns
 from .config import Settings
 from .db import Database, get_setting, set_setting
 
@@ -78,9 +79,11 @@ class Domains:
         set_setting(c, "force_https", "1" if (force and domain) else "0")
 
     def tenant_for_host(self, c: sqlite3.Connection, host: str) -> sqlite3.Row | None:
+        """El cliente de un dominio: su dominio propio o su dirección por defecto (acme.<dominio de Cloudflare>)."""
         if not host:
             return None
-        return c.execute("SELECT * FROM tenants WHERE domain = ?", (host,)).fetchone()
+        row = c.execute("SELECT * FROM tenants WHERE domain = ?", (host,)).fetchone()
+        return row if row is not None else cfdns.tenant_by_host(c, host)
 
     def taken(self, c: sqlite3.Connection, host: str, exclude_tenant: int | None = None,
               exclude_service: int | None = None) -> bool:
@@ -90,7 +93,7 @@ class Domains:
         svc = c.execute("SELECT id FROM services WHERE hostname = ?", (host,)).fetchone()
         if svc and svc["id"] != exclude_service:
             return True
-        row = c.execute("SELECT id FROM tenants WHERE domain = ?", (host,)).fetchone()
+        row = c.execute("SELECT id FROM tenants WHERE domain = ?", (host,)).fetchone() or cfdns.tenant_by_host(c, host)
         return bool(row) and row["id"] != exclude_tenant
 
     def registered(self, c: sqlite3.Connection, host: str) -> bool:
@@ -138,7 +141,10 @@ class Domains:
         resolved = self.resolve(host)
         expected = sorted(self.expected_ips())
         ok = bool(resolved) and (not expected or bool(set(resolved) & set(expected)))
-        return {"ok": ok, "resolved": resolved, "expected": expected}
+        with self.db.conn() as c:
+            proxied = cfdns.is_proxied(c, host)
+        # Con la nube naranja el DNS devuelve IPs de Cloudflare: es lo esperado.
+        return {"ok": ok or (proxied and bool(resolved)), "resolved": resolved, "expected": expected, "proxied": proxied}
 
     @staticmethod
     def https_status(host: str, any_status: bool = False) -> dict:

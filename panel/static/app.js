@@ -820,8 +820,9 @@ function accountView(main) {
     passkeysCard(),
     securityCard(),
     h("div", { class: "card", style: { maxWidth: "720px" } }, h("div", { class: "card-head" }, h("h2", { text: "Cambiar contraseña" })), passwordForm()),
+    state.me.role === "tenant" && state.me.public_host ? myAddressCard() : null,
     state.me.role === "tenant" ? h("div", { class: "card", style: { maxWidth: "720px" } },
-      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dominio personalizado" }),
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: state.me.public_host ? "Dominio propio (opcional)" : "Dominio personalizado" }),
         h("div", { class: "note", text: "Accede a tu panel con tu propio dominio y HTTPS, por ejemplo vpn.tuempresa.com." }))),
       domainEditor({
         load: () => api("GET", "/api/tenant-domain"),
@@ -830,6 +831,32 @@ function accountView(main) {
         example: "vpn.tuempresa.com",
       })) : null,
   );
+}
+
+/* Cuenta del cliente: su dirección incluida (usuario.<dominio>), operativa desde el alta. */
+function myAddressCard() {
+  const host = state.me.public_host;
+  const [label, ...rest] = host.split(".");
+  const zone = rest.join(".");
+  return h("div", { class: "card", style: { maxWidth: "720px" } },
+    h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Tu dirección" }),
+      h("div", { class: "note", text: "Incluida y lista desde el primer día: tu panel con tu nombre, tus puertos abiertos y tus servicios HTTPS (p. ej. nas." + host + ")." }))),
+    h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+      h("a", { class: "badge accent", href: `https://${host}`, target: "_blank", rel: "noopener" }, icon("globe"), host),
+      h("button", { class: "btn ghost icon", title: "Copiar", onClick: () => copyText(host) }, icon("copy")),
+      h("button", { class: "btn sm", onClick: () => formModal({
+        title: "Cambiar tu dirección",
+        fields: [h("div", { class: "full" }, field("Dirección", h("div", { class: "input-group" },
+          input({ name: "subdomain", value: label, class: "input mono", maxlength: "63", autocapitalize: "off", spellcheck: "false", required: true }),
+          h("span", { class: "input-prefix mono", text: `.${zone}` })),
+          "Minúsculas, números y guiones. La dirección anterior dejará de funcionar: actualiza tus accesos y la app instalada."))],
+        onSubmit: async (fd) => {
+          const r = await api("PUT", "/api/me/subdomain", { subdomain: fd.get("subdomain") });
+          state.me = await api("GET", "/api/me");
+          toast(`Tu dirección ahora es ${r.host}`);
+          render();
+        },
+      }) }, "Cambiar")));
 }
 
 /* ------------------------------------------------------------------ dominios */
@@ -1337,6 +1364,17 @@ function cloudflareCard() {
         h("label", { class: "switch" }, h("input", { type: "checkbox", checked: st.wildcard, disabled: !st.enabled,
           onChange: (e) => save({ wildcard: e.target.checked }, "Guardado") }),
           h("span", { class: "track" }), h("span", { text: `También *.${st.example} para sus servicios HTTPS (nas.${st.example})` })),
+        h("label", { class: "switch" }, h("input", { type: "checkbox", checked: st.proxy_default, disabled: !st.enabled,
+          onChange: (e) => save({ proxy_default: e.target.checked }, e.target.checked ? "Nube naranja activada por defecto" : "Nube naranja desactivada por defecto") }),
+          h("span", { class: "track" }), h("span", { text: "Nube naranja por defecto en las direcciones de clientes (cada cliente se puede cambiar en su ficha)" })),
+        st.enabled && st.proxy_hosts.length ? h("div", { class: "blocked-list" }, st.proxy_hosts.map((x) => h("div", { class: "blocked-row" },
+          h("div", { class: "grow" }, h("div", { class: "mono name", text: x.host }),
+            h("div", { class: "meta", text: x.endpoint ? "Es el endpoint de WireGuard: no puede ir por el proxy (UDP)" : x.kind === "panel" ? "Dominio del panel" : "Página pública" })),
+          h("label", { class: "switch", title: "Nube naranja" }, h("input", { type: "checkbox", checked: x.proxied, disabled: x.endpoint, onChange: async (e) => {
+            try { st = await api("PUT", "/api/admin/cloudflare/proxy", { host: x.host, proxied: e.target.checked }); toast(e.target.checked ? `${x.host}: nube naranja` : `${x.host}: sólo DNS`); }
+            catch (err) { toast(err.message, "err"); }
+            draw();
+          } }), h("span", { class: "track" }))))) : null,
         st.enabled && s.at ? checkLine(s.ok, `${s.records} registros al día en Cloudflare → ${st.ip || "?"} · comprobado ${ago(s.at)}`, s.error || "Error al sincronizar") : null,
         h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
           st.enabled ? h("button", { class: "btn", onClick: async (e) => {
@@ -1348,7 +1386,7 @@ function cloudflareCard() {
             if (!(await confirmDialog({ title: "Desconectar Cloudflare", message: "Se borrarán los registros que creó el panel y se olvidará el token. Las direcciones de los clientes dejarán de funcionar.", confirmLabel: "Desconectar" }))) return;
             try { st = await api("DELETE", "/api/admin/cloudflare"); toast("Cloudflare desconectado"); draw(); } catch (err) { toast(err.message, "err"); }
           } }, icon("trash"), "Desconectar")),
-        h("p", { class: "help", text: "Los registros son «solo DNS» (nube gris): los puertos TCP/UDP no pasan por el proxy de Cloudflare. El panel sólo toca los registros que crea; cambia el subdominio de un cliente desde su ficha." })));
+        h("p", { class: "help", text: "Nube gris (sólo DNS): todo funciona, también los puertos TCP/UDP. Nube naranja: la web pasa por Cloudflare (oculta la IP del servidor, caché y protección), pero los puertos TCP/UDP de ese nombre dejan de funcionar. En Cloudflare › SSL/TLS usa el modo «Completo (estricto)». El panel sólo crea y borra sus propios registros." })));
   };
   api("GET", "/api/admin/cloudflare").then((d) => { st = d; draw(); }).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
   return card;
@@ -1687,14 +1725,26 @@ async function clientDetailView(main, id) {
         h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : t.suspended_reason === "billing" ? "Suspendido por impago" : "Suspendido" }),
         t.billing_status && t.billing_status !== "none" ? statusBadge(t.billing_status) : null,
         h("span", { class: "mono", text: t.network }),
-        t.public_host ? h("button", { class: "badge accent badge-btn", title: "Cambiar subdominio", onClick: () => formModal({
-          title: "Subdominio del cliente",
-          fields: [h("div", { class: "full" }, field("Subdominio", h("div", { class: "input-group" },
-            input({ name: "subdomain", value: t.subdomain, class: "input mono", maxlength: "63", autocapitalize: "off", spellcheck: "false", required: true }),
-            h("span", { class: "input-prefix mono", text: `.${t.public_host.split(".").slice(1).join(".")}` })),
-            "Sus puertos abiertos y servicios usan esta dirección. Al cambiarla, la anterior deja de funcionar."))],
-          onSubmit: async (fd) => { await api("PUT", `/api/admin/tenants/${t.id}/subdomain`, { subdomain: fd.get("subdomain") }); toast("Subdominio cambiado"); reload(); },
-        }) }, icon("globe"), t.public_host) : null,
+        t.public_host ? h("button", { class: `badge accent badge-btn${t.cf_proxied ? " proxied" : ""}`, title: "Dirección y nube naranja", onClick: () => formModal({
+          title: "Dirección del cliente",
+          fields: [
+            h("div", { class: "full" }, field("Subdominio", h("div", { class: "input-group" },
+              input({ name: "subdomain", value: t.subdomain, class: "input mono", maxlength: "63", autocapitalize: "off", spellcheck: "false", required: true }),
+              h("span", { class: "input-prefix mono", text: `.${t.public_host.split(".").slice(1).join(".")}` })),
+              "Su panel, sus puertos abiertos y sus servicios usan esta dirección. Al cambiarla, la anterior deja de funcionar.")),
+            h("div", { class: "full" }, field("Nube naranja (proxy de Cloudflare)", h("div", { class: "segmented" },
+              [["default", "Por defecto"], ["on", "Activada"], ["off", "Desactivada"]].map(([k, l]) => h("label", null,
+                h("input", { type: "radio", name: "proxy", value: k, checked: k === (t.cf_proxy_custom ? (t.cf_proxied ? "on" : "off") : "default") }), h("span", { text: l })))),
+              "Con la nube naranja su web y sus servicios HTTPS pasan por Cloudflare (oculta la IP, caché, protección), pero sus puertos TCP/UDP dejan de funcionar con este nombre.")),
+          ],
+          onSubmit: async (fd) => {
+            if (fd.get("subdomain") !== t.subdomain) await api("PUT", `/api/admin/tenants/${t.id}/subdomain`, { subdomain: fd.get("subdomain") });
+            const proxy = fd.get("proxy");
+            await api("PUT", `/api/admin/tenants/${t.id}/proxy`, { proxied: proxy === "default" ? null : proxy === "on" });
+            toast("Dirección guardada");
+            reload();
+          },
+        }) }, icon(t.cf_proxied ? "shield" : "globe"), t.public_host) : null,
         t.must_change ? h("span", { class: "badge warn", text: "Pendiente de primer acceso" }) : null,
         filterBadges(t.filters)),
       [

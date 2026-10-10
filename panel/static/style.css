@@ -682,3 +682,4 @@ button.rank:hover .name { color: var(--accent); }
 .forgot-link a:hover { color: var(--accent); }
 .code-input { letter-spacing: .4em; font-size: 20px; text-align: center; }
 .pending-code { display: grid; gap: 10px; padding: 14px; border-radius: var(--radius-sm); background: var(--accent-soft); }
+.badge-btn.proxied { background: rgba(244, 129, 32, .16); color: #f48120; }

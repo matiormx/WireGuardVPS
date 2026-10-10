@@ -17,6 +17,8 @@ import time
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from . import cfdns
+
 BASE_RESERVED = {53, 80, 443, 2019}
 TENANT_MIN_PORT = 1024
 SUGGEST_RANGE = (20000, 29999)
@@ -86,7 +88,7 @@ def register(app: FastAPI, d) -> None:
         t = d.tenant_or_404(c, tid)
         rows = c.execute("SELECT * FROM forwards WHERE tenant_id = ? ORDER BY public_port", (tid,)).fetchall()
         return {
-            "max": t["max_forwards"], "public_host": d.tenant_host(c, t) or d.endpoint_host(c), "server_ips": sorted(d.doms.expected_ips()),
+            "max": t["max_forwards"], "public_host": (d.tenant_host(c, t) if not cfdns.tenant_proxied(c, t) else None) or d.endpoint_host(c), "server_ips": sorted(d.doms.expected_ips()),
             "min_port": 1 if p.is_admin else TENANT_MIN_PORT, "suggested_port": suggest(c),
             "networks": d.tenant_networks(c, tid), "forwards": [forward_json(c, r) for r in rows],
         }

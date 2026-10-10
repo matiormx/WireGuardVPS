@@ -21,6 +21,7 @@ class FakeCF:
         self.zones = [{"id": "z1", "name": "wgcloud.app", "account": {"id": "a" * 32}},
                       {"id": "z2", "name": "otro.com", "account": {"id": "b" * 32}}]
         self.mails = []
+        self.patches = []
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -82,8 +83,12 @@ class FakeCF:
                 if self.command == "DELETE":
                     fake.records.pop(rid)
                     return self.reply(200, {"success": True, "result": {"id": rid}})
+                if self.command == "PATCH":
+                    fake.records[rid].update(body)
+                    fake.patches.append((fake.records[rid]["name"], body))
+                    return self.reply(200, {"success": True, "result": fake.records[rid]})
 
-            do_GET = do_POST = do_PUT = do_DELETE = handle_any
+            do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = handle_any
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
@@ -231,3 +236,89 @@ def test_account_token(env):
     # el email por Cloudflare usa esa misma cuenta
     cfg = c.put("/api/admin/alerts-config", json={"email_provider": "cloudflare", "cf_from": "avisos@wgcloud.app"}, headers=H).json()
     assert cfg["cloudflare"]["account"] == "a" * 32 and cfg["email"]["ready"]
+
+
+def rec(fake, name):
+    return next(r for r in fake.records.values() if r["name"] == name)
+
+
+def test_default_address_works_from_creation(env):
+    c, fake = env
+    c.put("/api/admin/settings", json={"main_domain": "vpn.wgcloud.app"}, headers=H)
+    c.put("/api/admin/cloudflare", json={"token": "buen-token", "zone": "wgcloud.app", "enabled": True}, headers=H)
+    a = tenant(c, "Acme", "acme")
+    b = tenant(c, "Vpn SL", "vpn")                                              # «vpn» lo usa el panel
+    assert b["subdomain"] == f"vpn-{b['id']}"
+    c.post("/api/admin/cloudflare/sync", headers=H)
+    assert "acme.wgcloud.app" in fake.names()
+    host = {"Host": "acme.wgcloud.app"}
+    # operativa desde el alta: su panel con su marca, certificado permitido
+    assert c.get("/api/branding", headers=host).json()["title"] == "Acme"
+    assert c.app.state.domains.allow_certificate("acme.wgcloud.app")
+    assert not c.app.state.domains.allow_certificate("nadie.wgcloud.app")
+    assert c.get(f"/api/tenant-domain?tenant_id={a['id']}").json()["default_domain"] == "acme.wgcloud.app"
+    # nadie más puede usarla como dominio propio
+    r = c.put(f"/api/tenant-domain?tenant_id={b['id']}", json={"domain": "acme.wgcloud.app"}, headers=H)
+    assert r.status_code == 409
+    # sólo ese cliente entra por ahí
+    c.post("/api/auth/logout", headers=H)
+    assert c.post("/api/auth/login", json={"username": "vpn", "password": "Password1"}, headers={**H, **host}).status_code == 403
+    assert c.post("/api/auth/login", json={"username": "acme", "password": "Password1"}, headers={**H, **host}).status_code == 200
+    # el cliente la cambia
+    c.post("/api/me/password", json={"current": "Password1", "new": "Password22"}, headers={**H, **host})
+    assert c.put("/api/me/subdomain", json={"subdomain": "vpn"}, headers=H).status_code == 422
+    assert c.put("/api/me/subdomain", json={"subdomain": f"vpn-{b['id']}"}, headers=H).status_code == 409
+    r = c.put("/api/me/subdomain", json={"subdomain": "acme-sl"}, headers=H).json()
+    assert r["host"] == "acme-sl.wgcloud.app" and "acme-sl.wgcloud.app" in fake.names() and "acme.wgcloud.app" not in fake.names()
+    assert c.get("/api/branding", headers={"Host": "acme-sl.wgcloud.app"}).json()["title"] == "Acme"
+    assert c.get("/api/branding", headers=host).json()["tenant"] is False          # la antigua ya no es suya
+
+
+def test_orange_cloud(env):
+    c, fake = env
+    c.put("/api/admin/settings", json={"main_domain": "vpn.wgcloud.app"}, headers=H)
+    a, b = tenant(c, "Acme", "acme"), tenant(c, "Beta", "beta")
+    fake.records["panel"] = {"id": "panel", "zone": "z1", "type": "A", "name": "vpn.wgcloud.app", "content": "203.0.113.10", "proxied": False}
+    v = c.put("/api/admin/cloudflare", json={"token": "buen-token", "zone": "wgcloud.app", "enabled": True}, headers=H).json()
+    assert not rec(fake, "acme.wgcloud.app")["proxied"] and v["proxy_default"] is False
+    assert v["proxy_hosts"] == [{"host": "vpn.wgcloud.app", "kind": "panel", "proxied": False, "known": False, "endpoint": False}]
+    # por defecto naranja: todos los clientes (y su comodín)
+    c.put("/api/admin/cloudflare", json={"proxy_default": True}, headers=H)
+    assert rec(fake, "acme.wgcloud.app")["proxied"] and rec(fake, "*.beta.wgcloud.app")["proxied"]
+    assert rec(fake, "acme.wgcloud.app")["ttl"] == 1
+    # un cliente en gris
+    r = c.put(f"/api/admin/tenants/{b['id']}/proxy", json={"proxied": False}, headers=H).json()
+    assert r == {"proxied": False, "custom": True, "state": r["state"]}
+    assert not rec(fake, "beta.wgcloud.app")["proxied"] and rec(fake, "acme.wgcloud.app")["proxied"]
+    t = c.get(f"/api/admin/tenants/{a['id']}").json()
+    assert t["cf_proxied"] is True and t["cf_proxy_custom"] is False
+    # puertos: con nube naranja se usa la dirección del servidor; en gris, la del cliente
+    assert c.get(f"/api/forwards?tenant_id={a['id']}").json()["public_host"] == "203.0.113.10"
+    assert c.get(f"/api/forwards?tenant_id={b['id']}").json()["public_host"] == "beta.wgcloud.app"
+    # con proxy, el DNS apunta a Cloudflare y aun así se da por bueno (y se emite el certificado)
+    doms = c.app.state.domains
+    from app import domains as dmod
+    orig = dmod.Domains.resolve
+    try:
+        dmod.Domains.resolve = staticmethod(lambda host: ["104.16.1.1"])
+        assert doms.dns_status("acme.wgcloud.app")["ok"] and doms.dns_status("acme.wgcloud.app")["proxied"]
+        assert doms.dns_status("nas.acme.wgcloud.app")["proxied"]
+        assert not doms.dns_status("beta.wgcloud.app")["ok"]                       # gris: debe apuntar aquí
+    finally:
+        dmod.Domains.resolve = orig
+    # dominio del panel: sólo se cambia la nube del registro existente
+    v = c.put("/api/admin/cloudflare/proxy", json={"host": "vpn.wgcloud.app", "proxied": True}, headers=H).json()
+    assert fake.records["panel"]["proxied"] is True and fake.records["panel"]["content"] == "203.0.113.10"
+    assert v["proxy_hosts"][0]["proxied"] is True
+    assert c.put("/api/admin/cloudflare/proxy", json={"host": "otro.com", "proxied": True}, headers=H).status_code == 422
+    # el endpoint de WireGuard nunca por el proxy
+    c.put("/api/admin/cloudflare/proxy", json={"host": "vpn.wgcloud.app", "proxied": False}, headers=H)
+    assert c.put("/api/admin/wg-settings", json={"endpoint": "vpn.wgcloud.app"}, headers=H).status_code == 200
+    assert c.get("/api/admin/cloudflare").json()["proxy_hosts"][0]["endpoint"] is True
+    r = c.put("/api/admin/cloudflare/proxy", json={"host": "vpn.wgcloud.app", "proxied": True}, headers=H)
+    assert r.status_code == 409 and "WireGuard" in r.json()["detail"]
+
+    # y al revés: un nombre con nube naranja no puede ser el endpoint
+    c.put("/api/admin/wg-settings", json={"endpoint": ""}, headers=H)
+    r = c.put("/api/admin/wg-settings", json={"endpoint": "acme.wgcloud.app"}, headers=H)
+    assert r.status_code == 409 and "nube naranja" in r.json()["detail"]

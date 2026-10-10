@@ -516,6 +516,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "billing_status": t["billing_status"], "suspended_reason": t["suspended_reason"],
             "enabled": bool(t["enabled"]), "notes": t["notes"],
             "subdomain": t["subdomain"], "public_host": cf.host_for(c, t),
+            "cf_proxied": cfdns.tenant_proxied(c, t) if cf.active(c) else False, "cf_proxy_custom": t["cf_proxied"] is not None,
             "created_at": t["created_at"], "must_change": bool(t["must_change"]),
             "filters": dnsfilter.parse_filters(t["dns_filters"]),
             "device_count": len(dj), "online_count": sum(d["online"] for d in dj),
@@ -1078,6 +1079,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 host = domains.normalize_host(raw)
                 if host is None:
                     raise HTTPException(422, f"Endpoint no válido: {body.endpoint!r} (IP o nombre, p. ej. wg.tudominio.com)")
+                if cfdns.is_proxied(c, host):
+                    raise HTTPException(409, f"{host} tiene la nube naranja de Cloudflare: WireGuard (UDP) no pasa por el proxy. "
+                                             "Usa un nombre en gris (sólo DNS), p. ej. wg.tudominio.com.")
                 raw = host
         set_setting(c, "wg_endpoint", raw)
         c.commit()
@@ -1509,7 +1513,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/tenant-domain")
     def get_tenant_domain(p: User, c: Conn, tenant_id: int | None = None):
         t = tenant_or_404(c, domain_tenant(p, tenant_id))
-        return {"tenant_id": t["id"], "domain": t["domain"], "server_ips": sorted(doms.expected_ips())}
+        return {"tenant_id": t["id"], "domain": t["domain"], "server_ips": sorted(doms.expected_ips()),
+                "default_domain": cf.host_for(c, t), "subdomain": t["subdomain"], "zone": cf.config(c)["zone"] if cf.active(c) else None,
+                "proxied": cfdns.tenant_proxied(c, t) if cf.active(c) else False}
 
     @app.put("/api/tenant-domain")
     def put_tenant_domain(body: DomainIn, p: User, c: Conn, tenant_id: int | None = None):

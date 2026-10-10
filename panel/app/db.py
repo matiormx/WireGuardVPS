@@ -380,6 +380,7 @@ def _migrate(c: sqlite3.Connection) -> None:
                         ("subscription_interval", "TEXT")):
         _ensure_column(c, "tenants", column, ddl)
     _ensure_column(c, "tenants", "subdomain", "TEXT")   # acme -> acme.<dominio de Cloudflare>
+    _ensure_column(c, "tenants", "cf_proxied", "INTEGER")   # nube naranja: NULL = la de por defecto
     c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tenants_subdomain ON tenants(subdomain) WHERE subdomain IS NOT NULL")
     _ensure_column(c, "devices", "member_id", "INTEGER REFERENCES members(id) ON DELETE SET NULL")
     if "monitor" not in {r["name"] for r in c.execute("PRAGMA table_info(devices)")}:

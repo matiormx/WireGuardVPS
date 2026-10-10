@@ -51,13 +51,70 @@ def dns_label(username: str) -> str:
     return label or "cliente"
 
 
+def zone_of(c: sqlite3.Connection) -> Optional[str]:
+    """Dominio de Cloudflare si los subdominios de clientes están activos."""
+    if get_setting(c, "cf_enabled") == "1" and get_setting(c, "cf_token") and get_setting(c, "cf_zone_id"):
+        return get_setting(c, "cf_zone") or None
+    return None
+
+
+def taken_labels(c: sqlite3.Connection, zone: Optional[str]) -> set:
+    """Etiquetas que ya usan el panel o la página pública dentro del dominio (no pueden ser de un cliente)."""
+    out = set(RESERVED)
+    if zone:
+        hosts = [get_setting(c, "main_domain") or ""] + (get_setting(c, "site_domains") or "").split()
+        out |= {h[: -len(zone) - 1].split(".")[-1] for h in hosts if h.endswith("." + zone)}
+    return out
+
+
 def assign(c: sqlite3.Connection) -> None:
     """Subdominio estable para los clientes que aún no lo tienen (a partir del usuario)."""
+    blocked = taken_labels(c, get_setting(c, "cf_zone"))
     for t in c.execute("SELECT id, username FROM tenants WHERE subdomain IS NULL ORDER BY id").fetchall():
         label = dns_label(t["username"])
-        if label in RESERVED or c.execute("SELECT 1 FROM tenants WHERE subdomain = ?", (label,)).fetchone():
+        if label in blocked or c.execute("SELECT 1 FROM tenants WHERE subdomain = ?", (label,)).fetchone():
             label = f"{label[:55]}-{t['id']}"
         c.execute("UPDATE tenants SET subdomain = ? WHERE id = ?", (label, t["id"]))
+
+
+def tenant_by_host(c: sqlite3.Connection, host: str) -> Optional[sqlite3.Row]:
+    """acme.<dominio> -> el cliente acme (su dirección por defecto)."""
+    zone = zone_of(c)
+    if not zone or not host or not host.endswith("." + zone):
+        return None
+    label = host[: -len(zone) - 1]
+    if "." in label:
+        return None
+    return c.execute("SELECT * FROM tenants WHERE subdomain = ?", (label,)).fetchone()
+
+
+def proxy_default(c: sqlite3.Connection) -> bool:
+    return get_setting(c, "cf_proxy_default") == "1"
+
+
+def tenant_proxied(c: sqlite3.Connection, t: sqlite3.Row) -> bool:
+    value = t["cf_proxied"]
+    return proxy_default(c) if value is None else bool(value)
+
+
+def proxy_hosts(c: sqlite3.Connection) -> dict:
+    """Nube naranja elegida para dominios que no crea el panel (el del panel, la página pública)."""
+    return json.loads(get_setting(c, "cf_proxy_hosts") or "{}")
+
+
+def is_proxied(c: sqlite3.Connection, host: str) -> bool:
+    """¿Pasa por el proxy de Cloudflare? (entonces su DNS apunta a Cloudflare, no a este servidor)."""
+    zone = zone_of(c)
+    if not zone or not host or not (host == zone or host.endswith("." + zone)):
+        return False
+    if host in proxy_hosts(c):
+        return bool(proxy_hosts(c)[host])
+    parts = host[: -len(zone) - 1].split(".") if host != zone else []
+    if parts:
+        t = c.execute("SELECT * FROM tenants WHERE subdomain = ?", (parts[-1],)).fetchone()
+        if t is not None and (len(parts) == 1 or get_setting(c, "cf_wildcard") != "0"):
+            return tenant_proxied(c, t)
+    return False
 
 
 class CloudflareDNS:
@@ -146,21 +203,30 @@ class CloudflareDNS:
         if not ip:
             raise CloudflareError("No se conoce la IPv4 pública del servidor (WG_ENDPOINT)")
         out = {}
-        for t in c.execute("SELECT username, subdomain FROM tenants WHERE subdomain IS NOT NULL ORDER BY id"):
+        for t in c.execute("SELECT * FROM tenants WHERE subdomain IS NOT NULL ORDER BY id").fetchall():
             host = f"{t['subdomain']}.{cfg['zone']}"
-            out[host] = (ip, f"{TAG} cliente {t['username']}")
+            proxied = tenant_proxied(c, t)
+            out[host] = (ip, f"{TAG} cliente {t['username']}", proxied)
             if cfg["wildcard"]:
-                out[f"*.{host}"] = (ip, f"{TAG} servicios de {t['username']}")
+                out[f"*.{host}"] = (ip, f"{TAG} servicios de {t['username']}", proxied)
         return out
+
+    def external(self, c: sqlite3.Connection) -> dict:
+        """Nube naranja de dominios que no crea el panel (sólo los que el admin ha tocado)."""
+        zone = zone_of(c)
+        if not zone:
+            return {}
+        return {h: bool(v) for h, v in proxy_hosts(c).items() if h == zone or h.endswith("." + zone)}
 
     def sync(self, force: bool = False) -> dict:
         with self.db.conn() as c:
             assign(c)
             cfg = self.config(c)
             want = self.desired(c) if self.active(c) else {}
+            extra = self.external(c) if self.active(c) else {}
         if not cfg["token"] or not cfg["zone_id"]:
             return self._record(ok=True, error=None, count=0)
-        digest = hashlib.sha256(json.dumps(sorted(want.items())).encode()).hexdigest()
+        digest = hashlib.sha256(json.dumps([sorted(want.items()), sorted(extra.items())]).encode()).hexdigest()
         if not force and digest == self._applied and time.monotonic() - self._full_at < FULL_EVERY:
             return self.state()
         token, zone = cfg["token"], cfg["zone_id"]
@@ -168,21 +234,27 @@ class CloudflareDNS:
         try:
             ours = {r["name"]: r for r in self.records(token, zone, **{"comment.startswith": TAG})
                     if (r.get("comment") or "").startswith(TAG)}
-            for name, (ip, comment) in want.items():
+            for name, (ip, comment, proxied) in want.items():
                 cur = ours.pop(name, None)
-                body = {"type": "A", "name": name, "content": ip, "ttl": 300, "proxied": False, "comment": comment}
+                # Con proxy el TTL lo fija Cloudflare (1 = automático).
+                body = {"type": "A", "name": name, "content": ip, "ttl": 1 if proxied else 300, "proxied": proxied, "comment": comment}
                 if cur is None:
                     if self.records(token, zone, name=name):
                         conflicts.append(name)   # ya existe un registro que no es nuestro: no se toca
                         continue
                     self.call(token, "POST", f"/zones/{zone}/dns_records", body)
                     changes += 1
-                elif cur.get("content") != ip or cur.get("type") != "A" or cur.get("proxied"):
+                elif cur.get("content") != ip or cur.get("type") != "A" or bool(cur.get("proxied")) != proxied:
                     self.call(token, "PUT", f"/zones/{zone}/dns_records/{cur['id']}", body)
                     changes += 1
             for r in ours.values():   # clientes borrados, subdominio cambiado o desactivado
                 self.call(token, "DELETE", f"/zones/{zone}/dns_records/{r['id']}")
                 changes += 1
+            for name, proxied in extra.items():   # dominio del panel / página pública: sólo la nube
+                for r in self.records(token, zone, name=name):
+                    if r.get("type") in ("A", "AAAA", "CNAME") and bool(r.get("proxied")) != proxied:
+                        self.call(token, "PATCH", f"/zones/{zone}/dns_records/{r['id']}", {"proxied": proxied})
+                        changes += 1
         except CloudflareError as exc:
             log.warning("Sincronización con Cloudflare: %s", exc)
             return self._record(ok=False, error=str(exc), count=len(want))
@@ -238,6 +310,7 @@ def clean_account(value: Optional[str]) -> Optional[str]:
 
 
 class CloudflareIn(BaseModel):
+    proxy_default: Optional[bool] = None
     token: Optional[str] = Field(default=None, max_length=200)
     account: Optional[str] = Field(default=None, max_length=64)
     zone: Optional[str] = Field(default=None, max_length=253)
@@ -248,6 +321,15 @@ class CloudflareIn(BaseModel):
 class TokenIn(BaseModel):
     token: Optional[str] = Field(default=None, max_length=200)
     account: Optional[str] = Field(default=None, max_length=64)
+
+
+class ProxyIn(BaseModel):
+    proxied: Optional[bool] = None   # None = el valor por defecto
+
+
+class HostProxyIn(BaseModel):
+    host: str = Field(min_length=1, max_length=253)
+    proxied: bool
 
 
 class SubdomainIn(BaseModel):
@@ -261,7 +343,8 @@ def register(app, d) -> None:
         cfg = cf.config(c)
         first = c.execute("SELECT subdomain FROM tenants WHERE subdomain IS NOT NULL ORDER BY id LIMIT 1").fetchone()
         return {"enabled": cfg["enabled"], "zone": cfg["zone"], "has_token": bool(cfg["token"]), "wildcard": cfg["wildcard"],
-                "account": cfg["account"],
+                "account": cfg["account"], "proxy_default": proxy_default(c),
+                "proxy_hosts": d.cf_candidates(c) if hasattr(d, "cf_candidates") else [],
                 "ip": cf.server_ip(), "state": cf.state(),
                 "example": f"{first['subdomain'] if first else 'acme'}.{cfg['zone'] or 'tudominio.com'}"}
 
@@ -311,6 +394,8 @@ def register(app, d) -> None:
             set_setting(c, "cf_account", account or match.get("account", ""))
         if body.wildcard is not None:
             set_setting(c, "cf_wildcard", "1" if body.wildcard else "0")
+        if body.proxy_default is not None:
+            set_setting(c, "cf_proxy_default", "1" if body.proxy_default else "0")
         if body.enabled is not None:
             if body.enabled and not (get_setting(c, "cf_token") and get_setting(c, "cf_zone_id")):
                 raise HTTPException(422, "Configura primero el token y el dominio")
@@ -335,20 +420,77 @@ def register(app, d) -> None:
         state = await asyncio.to_thread(cf.sync, True)
         if state.get("ok") is False:
             raise HTTPException(400, f"No se pudieron borrar los registros: {state.get('error')}")
-        for key in ("cf_token", "cf_zone", "cf_zone_id", "cf_account", "cf_state"):
+        for key in ("cf_token", "cf_zone", "cf_zone_id", "cf_account", "cf_state", "cf_proxy_hosts"):
             c.execute("DELETE FROM settings WHERE key = ?", (key,))
         return view(c)
 
-    @app.put("/api/admin/tenants/{tenant_id}/subdomain")
-    async def put_subdomain(tenant_id: int, body: SubdomainIn, _: d.Admin, c: d.Conn):
+    async def change_subdomain(c: sqlite3.Connection, tenant_id: int, raw: str) -> dict:
         d.tenant_or_404(c, tenant_id)
-        label = body.subdomain.strip().lower()
-        if not LABEL_RE.match(label) or label in RESERVED:
+        label = raw.strip().lower()
+        if not LABEL_RE.match(label) or label in taken_labels(c, cf.config(c)["zone"]):
             raise HTTPException(422, "Subdominio no válido: minúsculas, números y guiones")
         other = c.execute("SELECT id FROM tenants WHERE subdomain = ? AND id != ?", (label, tenant_id)).fetchone()
-        if other:
-            raise HTTPException(409, "Ese subdominio ya es de otro cliente")
+        zone = cf.config(c)["zone"]
+        if other or (zone and d.doms.taken(c, f"{label}.{zone}", exclude_tenant=tenant_id)):
+            raise HTTPException(409, "Ese subdominio ya está en uso")
         c.execute("UPDATE tenants SET subdomain = ? WHERE id = ?", (label, tenant_id))
         c.commit()
         await asyncio.to_thread(cf.sync, True)
         return {"subdomain": label, "host": cf.host_for(c, d.tenant_or_404(c, tenant_id))}
+
+    @app.put("/api/admin/tenants/{tenant_id}/subdomain")
+    async def put_subdomain(tenant_id: int, body: SubdomainIn, _: d.Admin, c: d.Conn):
+        return await change_subdomain(c, tenant_id, body.subdomain)
+
+    @app.put("/api/me/subdomain")
+    async def put_my_subdomain(body: SubdomainIn, p: d.User, c: d.Conn):
+        """El cliente cambia su dirección por defecto (acme.<dominio>)."""
+        if p.is_admin:
+            raise HTTPException(400, "Sólo para clientes")
+        if not cf.active(c):
+            raise HTTPException(409, "Las direcciones de cliente no están activas")
+        return await change_subdomain(c, p.id, body.subdomain)
+
+    # ---------------------------------------------------------------- nube naranja (proxy de Cloudflare)
+    def endpoint_host(c: sqlite3.Connection) -> str:
+        return (d.endpoint_host(c) or "").lower()
+
+    @app.put("/api/admin/tenants/{tenant_id}/proxy")
+    async def put_tenant_proxy(tenant_id: int, body: ProxyIn, _: d.Admin, c: d.Conn):
+        t = d.tenant_or_404(c, tenant_id)
+        if body.proxied and cf.host_for(c, t) == endpoint_host(c):
+            raise HTTPException(409, "Ese nombre es el endpoint de WireGuard (UDP): no puede ir por el proxy")
+        c.execute("UPDATE tenants SET cf_proxied = ? WHERE id = ?", (None if body.proxied is None else int(body.proxied), tenant_id))
+        c.commit()
+        cf.reset()
+        await asyncio.to_thread(cf.sync, True)
+        t = d.tenant_or_404(c, tenant_id)
+        return {"proxied": tenant_proxied(c, t), "custom": t["cf_proxied"] is not None, "state": cf.state()}
+
+    @app.put("/api/admin/cloudflare/proxy")
+    async def put_host_proxy(body: HostProxyIn, _: d.Admin, c: d.Conn):
+        host = d.normalize_host(body.host) or ""
+        if host not in {x["host"] for x in candidates(c)}:
+            raise HTTPException(422, "Ese dominio no es del panel ni de la página pública en tu dominio de Cloudflare")
+        if body.proxied and host == endpoint_host(c):
+            raise HTTPException(409, "Ese nombre es el endpoint de WireGuard (UDP): no puede ir por el proxy. "
+                                     "Usa otro nombre para el endpoint en Ajustes › Endpoint de WireGuard.")
+        hosts = proxy_hosts(c)
+        hosts[host] = bool(body.proxied)
+        set_setting(c, "cf_proxy_hosts", json.dumps(hosts))
+        c.commit()
+        cf.reset()
+        await asyncio.to_thread(cf.sync, True)
+        return view(c)
+
+    def candidates(c: sqlite3.Connection) -> list[dict]:
+        """Dominios del panel y de la página pública que están en el dominio de Cloudflare."""
+        zone = cf.config(c)["zone"]
+        if not zone:
+            return []
+        found = [("panel", d.doms.main_domain(c))] + [("site", h) for h in d.doms.site_domains(c)]
+        hosts = proxy_hosts(c)
+        return [{"host": h, "kind": k, "proxied": bool(hosts.get(h, False)), "known": h in hosts, "endpoint": h == endpoint_host(c)}
+                for k, h in found if h and (h == zone or h.endswith("." + zone))]
+
+    d.cf_candidates = candidates
