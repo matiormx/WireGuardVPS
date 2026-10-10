@@ -1145,23 +1145,29 @@ function cloudflareCard() {
   const card = h("div", { class: "card" }, spinnerBlock());
   let st = null, editing = false, zones = null;
   const save = async (patch, msg) => {
-    try { st = await api("PUT", "/api/admin/cloudflare", patch); toast(msg); editing = false; zones = null; draw(); }
+    try { st = await api("PUT", "/api/admin/cloudflare", patch); toast(msg); editing = false; zones = null; delete card.dataset.token; delete card.dataset.account; draw(); }
     catch (e) { toast(e.message, "err"); }
   };
   const connectForm = () => {
     const token = input({ type: "password", class: "input mono", placeholder: st.has_token ? "(guardado; pega otro para cambiarlo)" : "Token de la API", autocomplete: "off" });
+    const account = input({ class: "input mono", value: card.dataset.account ?? st.account ?? "", maxlength: "32", placeholder: "Opcional: 32 caracteres (necesario con tokens de cuenta)",
+      autocapitalize: "off", spellcheck: "false", autocomplete: "off" });
     const zoneSel = zones ? h("select", { class: "input" }, zones.map((z) => h("option", { value: z.name, selected: z.name === st.zone, text: z.name }))) : null;
     return h("div", { class: "grid", style: { gap: "12px" } },
       field("Token de la API de Cloudflare", h("div", { class: "input-group" }, token,
         h("button", { class: "btn", onClick: async (e) => {
           const b = e.currentTarget;
           b.disabled = true;
-          try { zones = (await api("POST", "/api/admin/cloudflare/zones", { token: token.value })).zones; card.dataset.token = token.value; draw(); }
+          try {
+            zones = (await api("POST", "/api/admin/cloudflare/zones", { token: token.value, account: account.value.trim() })).zones;
+            card.dataset.token = token.value; card.dataset.account = account.value.trim(); draw();
+          }
           catch (err) { toast(err.message, "err"); b.disabled = false; }
         } }, zones ? "Comprobado" : "Comprobar")),
         "En Cloudflare: Mi perfil › Tokens de API › Crear token › plantilla «Editar DNS de zona», con tu dominio."),
+      field("ID de cuenta", account, "Cloudflare › tu dominio › Resumen › «ID de cuenta» (columna derecha). Obligatorio si el token se creó en Gestionar cuenta › Tokens de API."),
       zones ? (zones.length ? field("Dominio", h("div", { class: "input-group" }, zoneSel,
-        h("button", { class: "btn primary", onClick: () => save({ token: card.dataset.token || undefined, zone: zoneSel.value }, "Cloudflare conectado") }, "Guardar")))
+        h("button", { class: "btn primary", onClick: () => save({ token: card.dataset.token || undefined, account: card.dataset.account ?? undefined, zone: zoneSel.value }, "Cloudflare conectado") }, "Guardar")))
         : h("p", { class: "note", text: "El token no tiene acceso a ningún dominio." })) : null,
       st.has_token ? h("div", null, h("button", { class: "btn ghost", onClick: () => { editing = false; zones = null; draw(); } }, "Cancelar")) : null);
   };
@@ -1173,6 +1179,7 @@ function cloudflareCard() {
       !st.has_token || editing ? connectForm() : h("div", { class: "grid", style: { gap: "14px" } },
         h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
           h("span", { class: "badge accent" }, icon("globe"), st.zone),
+          st.account ? h("span", { class: "note mono", text: `Cuenta ${st.account.slice(0, 8)}…` }) : null,
           h("button", { class: "btn ghost sm", onClick: () => { editing = true; draw(); } }, "Cambiar token o dominio")),
         h("label", { class: "switch" }, h("input", { type: "checkbox", checked: st.enabled,
           onChange: (e) => save({ enabled: e.target.checked }, e.target.checked ? "Subdominios activados" : "Subdominios desactivados (registros borrados)") }),

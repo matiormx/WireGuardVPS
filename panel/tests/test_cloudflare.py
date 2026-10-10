@@ -36,17 +36,25 @@ class FakeCF:
                 self.wfile.write(body)
 
             def handle_any(self):
-                if self.headers.get("Authorization") != "Bearer buen-token":
-                    return self.reply(403, {"success": False, "errors": [{"message": "Invalid API Token"}]})
+                auth = self.headers.get("Authorization")
                 url = urllib.parse.urlparse(self.path)
                 q = dict(urllib.parse.parse_qsl(url.query))
                 parts = url.path.strip("/").split("/")
+                # «token-cuenta»: token de cuenta (sólo se valida en /accounts/<id>/tokens/verify)
+                if auth == "Bearer token-cuenta":
+                    if parts == ["user", "tokens", "verify"] or (parts[-2:] == ["tokens", "verify"] and parts[1] != "a" * 32):
+                        return self.reply(401, {"success": False, "errors": [{"code": 1000, "message": "Invalid API Token"}]})
+                elif auth != "Bearer buen-token":
+                    return self.reply(403, {"success": False, "errors": [{"message": "Invalid API Token"}]})
+                if parts[0] == "accounts" and parts[2:] == ["tokens", "verify"]:
+                    return self.reply(200, {"success": True, "result": {"status": "active"}})
                 length = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(length)) if length else None
                 if parts == ["user", "tokens", "verify"]:
                     return self.reply(200, {"success": True, "result": {"status": "active"}})
                 if parts == ["zones"]:
-                    return self.reply(200, {"success": True, "result": fake.zones})
+                    zones = [z for z in fake.zones if z["account"]["id"] == q.get("account.id", z["account"]["id"])]
+                    return self.reply(200, {"success": True, "result": zones})
                 if parts[0] == "accounts" and parts[2:] == ["email", "sending", "send"]:
                     if parts[1] != "a" * 32:
                         return self.reply(403, {"success": False, "errors": [{"code": 10102, "message": "Token lacks email sending permission"}]})
@@ -184,6 +192,10 @@ def test_cloudflare_email(env):
     assert r.status_code == 422
     # con el token de Subdominios; la cuenta se deduce del dominio del remitente
     c.put("/api/admin/cloudflare", json={"token": "buen-token", "zone": "wgcloud.app"}, headers=H)
+    # con la cuenta conocida no se exige que el remitente sea de un dominio de DNS (lo valida Cloudflare al enviar);
+    # sin ella, se deduce del dominio y debe verse con el token
+    with c.app.state.db.conn() as db:
+        db.execute("DELETE FROM settings WHERE key = 'cf_account'")
     assert c.put("/api/admin/alerts-config", json={"cf_from": "Avisos <avisos@noesmio.org>"}, headers=H).status_code == 422
     assert c.put("/api/admin/alerts-config", json={"cf_from": "no-es-email"}, headers=H).status_code == 422
     cfg = c.put("/api/admin/alerts-config", json={"email_provider": "cloudflare", "cf_from": "Avisos VPN <avisos@wgcloud.app>"}, headers=H).json()
@@ -204,3 +216,18 @@ def test_cloudflare_email(env):
     assert c.get("/api/alerts").json()["available"]["email"] is True
     # volver a SMTP (sin configurar): el email deja de estar disponible
     assert c.put("/api/admin/alerts-config", json={"email_provider": "smtp"}, headers=H).json()["email"]["ready"] is False
+
+
+def test_account_token(env):
+    c, fake = env
+    tenant(c, "Acme", "acme")
+    r = c.post("/api/admin/cloudflare/zones", json={"token": "token-cuenta"}, headers=H)
+    assert r.status_code == 400 and "ID de cuenta" in r.json()["detail"]
+    assert c.post("/api/admin/cloudflare/zones", json={"token": "token-cuenta", "account": "xyz"}, headers=H).status_code == 422
+    r = c.post("/api/admin/cloudflare/zones", json={"token": "token-cuenta", "account": "A" * 32}, headers=H).json()
+    assert [z["name"] for z in r["zones"]] == ["wgcloud.app"]                 # sólo los de esa cuenta
+    v = c.put("/api/admin/cloudflare", json={"token": "token-cuenta", "account": "a" * 32, "zone": "wgcloud.app", "enabled": True}, headers=H).json()
+    assert v["account"] == "a" * 32 and v["state"]["ok"] and "acme.wgcloud.app" in fake.names()
+    # el email por Cloudflare usa esa misma cuenta
+    cfg = c.put("/api/admin/alerts-config", json={"email_provider": "cloudflare", "cf_from": "avisos@wgcloud.app"}, headers=H).json()
+    assert cfg["cloudflare"]["account"] == "a" * 32 and cfg["email"]["ready"]

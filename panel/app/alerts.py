@@ -679,7 +679,9 @@ def register(app: FastAPI, d) -> None:
             token = get_setting(c, "cfmail_token") or get_setting(c, "cf_token")
             if not token:
                 raise HTTPException(422, "Pega un token de Cloudflare con el permiso «Email Sending: Edit»")
-            account = (body.cf_account or "").strip()
+            account = (body.cf_account or "").strip().lower()
+            if not account and not body.cf_token:
+                account = get_setting(c, "cf_account") or ""   # la de Subdominios de clientes
             if not account:   # la cuenta del dominio del remitente
                 domain = parseaddr(sender)[1].rsplit("@", 1)[1].lower()
                 try:

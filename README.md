@@ -111,7 +111,7 @@ Cada cliente puede publicar en Internet un equipo de su red (NAS, cámaras, Home
 
 ## Subdominio de cada cliente (Cloudflare)
 
-Si tu dominio está en Cloudflare, en **Ajustes › Subdominios de clientes** pega un token de la API (Cloudflare › Mi perfil › Tokens de API › Crear token › plantilla «Editar DNS de zona», limitado a tu dominio), elige el dominio y activa «Un subdominio por cliente». El panel crea y mantiene solo:
+Si tu dominio está en Cloudflare, en **Ajustes › Subdominios de clientes** pega un token de la API (Cloudflare › Mi perfil › Tokens de API › Crear token › plantilla «Editar DNS de zona», limitado a tu dominio), elige el dominio y activa «Un subdominio por cliente». Si el token es **de cuenta** (Gestionar cuenta › Tokens de API), escribe también el **ID de cuenta** (en el Resumen de tu dominio, columna derecha); el email por Cloudflare usa esa misma cuenta. El panel crea y mantiene solo:
 
 - `usuario.tudominio.com` → IP del servidor: los puertos abiertos se usan como `acme.tudominio.com:3389`.
 - `*.usuario.tudominio.com` → IP del servidor (opcional): sus servicios HTTPS funcionan al momento con nombres como `nas.acme.tudominio.com`, sin tocar el DNS.
