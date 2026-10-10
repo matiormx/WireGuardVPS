@@ -1140,6 +1140,63 @@ function brandCard() {
   return card;
 }
 
+/* Subdominios de clientes con la API de Cloudflare: acme.midominio.com -> servidor. */
+function cloudflareCard() {
+  const card = h("div", { class: "card" }, spinnerBlock());
+  let st = null, editing = false, zones = null;
+  const save = async (patch, msg) => {
+    try { st = await api("PUT", "/api/admin/cloudflare", patch); toast(msg); editing = false; zones = null; draw(); }
+    catch (e) { toast(e.message, "err"); }
+  };
+  const connectForm = () => {
+    const token = input({ type: "password", class: "input mono", placeholder: st.has_token ? "(guardado; pega otro para cambiarlo)" : "Token de la API", autocomplete: "off" });
+    const zoneSel = zones ? h("select", { class: "input" }, zones.map((z) => h("option", { value: z.name, selected: z.name === st.zone, text: z.name }))) : null;
+    return h("div", { class: "grid", style: { gap: "12px" } },
+      field("Token de la API de Cloudflare", h("div", { class: "input-group" }, token,
+        h("button", { class: "btn", onClick: async (e) => {
+          const b = e.currentTarget;
+          b.disabled = true;
+          try { zones = (await api("POST", "/api/admin/cloudflare/zones", { token: token.value })).zones; card.dataset.token = token.value; draw(); }
+          catch (err) { toast(err.message, "err"); b.disabled = false; }
+        } }, zones ? "Comprobado" : "Comprobar")),
+        "En Cloudflare: Mi perfil › Tokens de API › Crear token › plantilla «Editar DNS de zona», con tu dominio."),
+      zones ? (zones.length ? field("Dominio", h("div", { class: "input-group" }, zoneSel,
+        h("button", { class: "btn primary", onClick: () => save({ token: card.dataset.token || undefined, zone: zoneSel.value }, "Cloudflare conectado") }, "Guardar")))
+        : h("p", { class: "note", text: "El token no tiene acceso a ningún dominio." })) : null,
+      st.has_token ? h("div", null, h("button", { class: "btn ghost", onClick: () => { editing = false; zones = null; draw(); } }, "Cancelar")) : null);
+  };
+  const draw = () => {
+    const s = st.state || {};
+    fill(card,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Subdominios de clientes" }),
+        h("div", { class: "note", text: "Con tu cuenta de Cloudflare, cada cliente tiene su dirección con su usuario (p. ej. acme.tudominio.com) para sus puertos abiertos y servicios, sin tocar el DNS a mano." }))),
+      !st.has_token || editing ? connectForm() : h("div", { class: "grid", style: { gap: "14px" } },
+        h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+          h("span", { class: "badge accent" }, icon("globe"), st.zone),
+          h("button", { class: "btn ghost sm", onClick: () => { editing = true; draw(); } }, "Cambiar token o dominio")),
+        h("label", { class: "switch" }, h("input", { type: "checkbox", checked: st.enabled,
+          onChange: (e) => save({ enabled: e.target.checked }, e.target.checked ? "Subdominios activados" : "Subdominios desactivados (registros borrados)") }),
+          h("span", { class: "track" }), h("span", { text: `Un subdominio por cliente (${st.example})` })),
+        h("label", { class: "switch" }, h("input", { type: "checkbox", checked: st.wildcard, disabled: !st.enabled,
+          onChange: (e) => save({ wildcard: e.target.checked }, "Guardado") }),
+          h("span", { class: "track" }), h("span", { text: `También *.${st.example} para sus servicios HTTPS (nas.${st.example})` })),
+        st.enabled && s.at ? checkLine(s.ok, `${s.records} registros al día en Cloudflare → ${st.ip || "?"} · comprobado ${ago(s.at)}`, s.error || "Error al sincronizar") : null,
+        h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+          st.enabled ? h("button", { class: "btn", onClick: async (e) => {
+            e.currentTarget.disabled = true;
+            try { st = await api("POST", "/api/admin/cloudflare/sync"); toast(st.state.ok ? "Sincronizado" : st.state.error, st.state.ok ? undefined : "err"); } catch (err) { toast(err.message, "err"); }
+            draw();
+          } }, icon("refresh"), "Sincronizar ahora") : null,
+          h("button", { class: "btn ghost", onClick: async () => {
+            if (!(await confirmDialog({ title: "Desconectar Cloudflare", message: "Se borrarán los registros que creó el panel y se olvidará el token. Las direcciones de los clientes dejarán de funcionar.", confirmLabel: "Desconectar" }))) return;
+            try { st = await api("DELETE", "/api/admin/cloudflare"); toast("Cloudflare desconectado"); draw(); } catch (err) { toast(err.message, "err"); }
+          } }, icon("trash"), "Desconectar")),
+        h("p", { class: "help", text: "Los registros son «solo DNS» (nube gris): los puertos TCP/UDP no pasan por el proxy de Cloudflare. El panel sólo toca los registros que crea; cambia el subdominio de un cliente desde su ficha." })));
+  };
+  api("GET", "/api/admin/cloudflare").then((d) => { st = d; draw(); }).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
+  return card;
+}
+
 /* Página pública: presentación del servicio y planes en un dominio propio. */
 function siteCard() {
   const card = h("div", { class: "card" }, spinnerBlock());
@@ -1301,6 +1358,7 @@ async function settingsView(main) {
             h("li", { text: "Pulsa Comprobar. Cuando HTTPS esté activo, abre el panel con el dominio y activa «Forzar HTTPS»." })))),
       brandCard(),
       siteCard(),
+      cloudflareCard(),
       endpointCard(),
       exitsCard(),
       alertsConfigCard(),
@@ -1472,6 +1530,14 @@ async function clientDetailView(main, id) {
         h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : t.suspended_reason === "billing" ? "Suspendido por impago" : "Suspendido" }),
         t.billing_status && t.billing_status !== "none" ? statusBadge(t.billing_status) : null,
         h("span", { class: "mono", text: t.network }),
+        t.public_host ? h("button", { class: "badge accent badge-btn", title: "Cambiar subdominio", onClick: () => formModal({
+          title: "Subdominio del cliente",
+          fields: [h("div", { class: "full" }, field("Subdominio", h("div", { class: "input-group" },
+            input({ name: "subdomain", value: t.subdomain, class: "input mono", maxlength: "63", autocapitalize: "off", spellcheck: "false", required: true }),
+            h("span", { class: "input-prefix mono", text: `.${t.public_host.split(".").slice(1).join(".")}` })),
+            "Sus puertos abiertos y servicios usan esta dirección. Al cambiarla, la anterior deja de funcionar."))],
+          onSubmit: async (fd) => { await api("PUT", `/api/admin/tenants/${t.id}/subdomain`, { subdomain: fd.get("subdomain") }); toast("Subdominio cambiado"); reload(); },
+        }) }, icon("globe"), t.public_host) : null,
         t.must_change ? h("span", { class: "badge warn", text: "Pendiente de primer acceso" }) : null,
         filterBadges(t.filters)),
       [
@@ -2067,8 +2133,9 @@ function serviceModal(ctx, svc, onDone) {
   const listId = "svc-targets";
   const fields = [
     isNew ? h("div", { class: "full" }, field("Nombre público",
-      input({ name: "hostname", required: true, maxlength: "253", placeholder: "nas.tuempresa.com", class: "input mono", autocapitalize: "off", spellcheck: "false", inputmode: "url" }),
-      `Un nombre de tu dominio. Crea en tu DNS un registro A hacia ${ctx.ip}.`)) : null,
+      input({ name: "hostname", required: true, maxlength: "253", placeholder: ctx.host ? `nas.${ctx.host}` : "nas.tuempresa.com", class: "input mono", autocapitalize: "off", spellcheck: "false", inputmode: "url" }),
+      ctx.host ? `Cualquier nombre terminado en .${ctx.host} funciona al momento (p. ej. nas.${ctx.host}). También puedes usar tu propio dominio con un registro A hacia ${ctx.ip}.`
+        : `Un nombre de tu dominio. Crea en tu DNS un registro A hacia ${ctx.ip}.`)) : null,
     field("IP del equipo", input({ name: "target_ip", required: true, maxlength: "15", value: svc ? svc.target_ip : "", list: listId,
       placeholder: ctx.networks[0].replace(/0\/\d+$/, "50"), class: "input mono", inputmode: "decimal" }),
     `De tu red (${ctx.networks.join(", ")}).`),
@@ -2121,7 +2188,7 @@ async function servicesView(main, tenantId) {
   let data = await api("GET", `/api/services${qs}`);
   const status = {};
   const body = h("div");
-  const ctx = () => ({ isAdmin, tenantId, devices: initialDevices, networks: data.networks, ip: data.server_ips[0] || "la IP del servidor" });
+  const ctx = () => ({ isAdmin, tenantId, devices: initialDevices, networks: data.networks, ip: data.server_ips[0] || "la IP del servidor", host: data.public_host });
 
   const reload = async () => { data = await api("GET", `/api/services${qs}`); draw(); };
   const check = async (svc) => {
@@ -3475,7 +3542,9 @@ async function tenantHomeView(main) {
         h("div", { class: "grow" },
           h("h3", { text: "Tu red" }),
           h("div", { class: "big", text: me.network }),
-          h("div", { class: "note", text: "Tus dispositivos se comunican entre sí dentro de esta red. Ningún otro cliente puede verlos." })),
+          h("div", { class: "note", text: "Tus dispositivos se comunican entre sí dentro de esta red. Ningún otro cliente puede verlos." }),
+          me.public_host ? h("div", { class: "cell-flex public-host" }, icon("globe"), h("span", null, "Tu dirección: ", h("b", { class: "mono", text: me.public_host })),
+            h("button", { class: "btn ghost icon sm", title: "Copiar", onClick: () => copyText(me.public_host) }, icon("copy"))) : null),
         h("div", null, h("h3", { text: "Dispositivos" }), h("div", { class: "big", text: `${devices.length}/${me.max_devices}` }),
           h("div", { class: "progress", style: { marginTop: "8px" } }, h("span", { style: { width: `${Math.min(100, (100 * devices.length) / me.max_devices)}%` } }))),
         h("div", null, h("h3", { text: "En línea" }), h("div", { class: "big", text: String(online) })),

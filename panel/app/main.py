@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import bcrypt
 
-from . import alerts, backup, billing, brand, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, sysmon, updates, wg
+from . import alerts, backup, billing, brand, cfdns, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, sysmon, updates, wg
 from .config import Settings, load_settings
 from .db import (LABEL_RE, Database, get_setting, make_hostname, name_in_use, set_setting,
                  unique_hostname, username_taken)
@@ -307,6 +307,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     backups.on_failure = notifier.on_backup_failed
     upd = updates.Updates(settings, database, notifier.notify_system)
     sysm = sysmon.Sysmon(database, settings.wg_conf_dir, notifier.notify_server)
+    cf = cfdns.CloudflareDNS(database, doms)
     doms.seed_from_env(settings.panel_domain)
 
     @asynccontextmanager
@@ -323,11 +324,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         bill.start()
         upd.start()
         sysm.start()
+        cf.start()
         await asyncio.to_thread(notifier.start_telegram)
         yield
         notifier.stop_telegram()
         await upd.stop()
         await sysm.stop()
+        await cf.stop()
         await bill.stop()
         await mon.stop()
         await backups.stop()
@@ -343,6 +346,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.notifier = notifier
     app.state.updates = upd
     app.state.sysmon = sysm
+    app.state.cloudflare = cf
 
     # ------------------------------------------------------------------ middleware
     @app.middleware("http")
@@ -511,6 +515,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "max_services": t["max_services"], "max_members": t["max_members"], "plan_id": t["plan_id"],
             "billing_status": t["billing_status"], "suspended_reason": t["suspended_reason"],
             "enabled": bool(t["enabled"]), "notes": t["notes"],
+            "subdomain": t["subdomain"], "public_host": cf.host_for(c, t),
             "created_at": t["created_at"], "must_change": bool(t["must_change"]),
             "filters": dnsfilter.parse_filters(t["dns_filters"]),
             "device_count": len(dj), "online_count": sum(d["online"] for d in dj),
@@ -616,7 +621,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             t = tenant_or_404(c, p.tenant_id)
             data.update(network=str(wg.tenant_network(settings, t["net_index"])), max_devices=t["max_devices"],
                         tenant_id=t["id"], tenant_name=t["name"], suspended=p.suspended,
-                        billing_status=t["billing_status"], has_plan=bool(t["plan_id"]))
+                        billing_status=t["billing_status"], has_plan=bool(t["plan_id"]), public_host=cf.host_for(c, t))
         if p.is_member:
             data.update(can_create=p.can_create)
         return data
@@ -682,6 +687,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             (body.name, body.username, security.hash_password(body.password), idx, max_devices,
              body.notes, int(time.time()), "free" if body.free else "none"),
         )
+        cfdns.assign(c)
         c.commit()
         apply_wg()
         return tenant_json(c, tenant_or_404(c, cur.lastrowid), {})
@@ -1242,6 +1248,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, "La contraseña del servicio debe tener al menos 8 caracteres")
         return user, bcrypt.hashpw(password.encode(), bcrypt.gensalt(12)).decode()
 
+    def check_zone_owner(c: sqlite3.Connection, tid: int, host: str) -> None:
+        """Con los subdominios de Cloudflare, x.acme.<dominio> sólo lo puede usar el cliente acme."""
+        zone = cf.config(c)["zone"]
+        if not cf.active(c) or not (host == zone or host.endswith("." + zone)):
+            return
+        own = cf.host_for(c, tenant_or_404(c, tid))
+        if not own or not (host == own or host.endswith("." + own)):
+            raise HTTPException(409, f"En {zone} sólo puedes usar nombres de tu subdominio ({own or 'sin asignar'})")
+
     def services_tenant(p: Principal, tenant_id: int | None) -> int:
         if p.is_admin:
             if tenant_id is None:
@@ -1256,7 +1271,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         rows = c.execute("SELECT * FROM services WHERE tenant_id = ? ORDER BY hostname", (tid,)).fetchall()
         lans = [str(wg.tenant_network(settings, t["net_index"]))] + wg.tenant_lans(c, tid)
         return {"enabled": proxy.enabled, "error": proxy.last_error, "server_ips": sorted(doms.expected_ips()),
-                "networks": lans, "services": [service_json(c, r) for r in rows]}
+                "networks": lans, "public_host": cf.host_for(c, t), "services": [service_json(c, r) for r in rows]}
 
     @app.post("/api/services", status_code=201)
     def create_service(body: ServiceIn, p: User, c: Conn):
@@ -1271,6 +1286,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, "Indica el nombre del servicio (p. ej. nas.tuempresa.com)")
         if doms.taken(c, host):
             raise HTTPException(409, "Ese nombre ya está en uso")
+        check_zone_owner(c, tid, host)
         limit = tenant_or_404(c, tid)["max_services"]
         if c.execute("SELECT COUNT(*) FROM services WHERE tenant_id = ?", (tid,)).fetchone()[0] >= limit:
             raise HTTPException(409, f"Tu plan incluye {limit} servicios publicados: amplíalo para añadir más" if limit
@@ -1490,6 +1506,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         host = _clean_host(body.domain)
         if host and doms.taken(c, host, exclude_tenant=tid):
             raise HTTPException(409, "Ese dominio ya está en uso")
+        if host:
+            check_zone_owner(c, tid, host)
         c.execute("UPDATE tenants SET domain = ? WHERE id = ?", (host, tid))
         return get_tenant_domain(p, c, tid)
 
@@ -1503,7 +1521,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         tenant_networks=lambda c, tid: [str(wg.tenant_network(settings, tenant_or_404(c, tid)["net_index"]))]
         + wg.tenant_lans(c, tid),
     )
-    vars(deps).update(keypair=wg.generate_keypair, normalize_host=domains.normalize_host)
+    vars(deps).update(keypair=wg.generate_keypair, normalize_host=domains.normalize_host,
+                      tenant_host=lambda c, t: cf.host_for(c, t))
     exits.register(app, deps)
     forwards.register(app, deps)
     history.register(app, deps)
@@ -1520,6 +1539,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     deps.host_of = domains.host_of
     site.register(app, deps)
     deps.static_dir = STATIC_DIR
+    deps.cloudflare = cf
+    cfdns.register(app, deps)
     brand.register(app, deps)
     deps.updates = upd
     updates.register(app, deps)

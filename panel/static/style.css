@@ -673,3 +673,7 @@ button.rank:hover .name { color: var(--accent); }
 .pv-android { width: 64px; height: 64px; border-radius: 50%; }
 .pv-fav { width: 24px; height: 24px; border-radius: 4px; margin-bottom: 20px; }
 .color-input { width: 44px; height: 34px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); cursor: pointer; }
+.public-host { margin-top: 10px; gap: 6px; font-size: 14px; flex-wrap: wrap; }
+.public-host svg { width: 16px; height: 16px; color: var(--accent); }
+.badge-btn { border: 0; cursor: pointer; font: inherit; font-size: 12px; }
+.badge-btn:hover { filter: brightness(1.1); }

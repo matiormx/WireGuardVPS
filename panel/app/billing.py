@@ -33,6 +33,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from . import security
+from . import cfdns
 from .db import get_setting, set_setting, username_taken
 
 log = logging.getLogger("wgp.billing")
@@ -721,6 +722,7 @@ def register(app: FastAPI, d) -> None:
                VALUES (?, ?, ?, 0, ?, 1, 'Alta desde la web', ?, 0, 'billing', 'pending', ?)""",
             (name, body.username, security.hash_password(body.password), idx, int(time.time()), email))
         tid = cur.lastrowid
+        cfdns.assign(c)
         b.apply_plan(c, tid, plan["id"])
         t = d.tenant_or_404(c, tid)
         try:

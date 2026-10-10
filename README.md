@@ -109,6 +109,15 @@ Después, sus dispositivos móviles llegan a los equipos de la oficina y la ofic
 
 Cada cliente puede publicar en Internet un equipo de su red (NAS, cámaras, Home Assistant, un servidor web…) con **un nombre propio y HTTPS**: en **Servicios → Publicar servicio** indica el nombre (`nas.suempresa.com`), la IP del equipo (de su red o de la LAN de su router) y el puerto. Basta con crear un registro **A** de ese nombre hacia la IP del VPS: el certificado se emite solo. Opcionalmente, añade **usuario y contraseña** delante del servicio. El botón *Comprobar* verifica DNS, certificado y que el equipo responde. Requiere `ENABLE_HTTPS=true` (Caddy).
 
+## Subdominio de cada cliente (Cloudflare)
+
+Si tu dominio está en Cloudflare, en **Ajustes › Subdominios de clientes** pega un token de la API (Cloudflare › Mi perfil › Tokens de API › Crear token › plantilla «Editar DNS de zona», limitado a tu dominio), elige el dominio y activa «Un subdominio por cliente». El panel crea y mantiene solo:
+
+- `usuario.tudominio.com` → IP del servidor: los puertos abiertos se usan como `acme.tudominio.com:3389`.
+- `*.usuario.tudominio.com` → IP del servidor (opcional): sus servicios HTTPS funcionan al momento con nombres como `nas.acme.tudominio.com`, sin tocar el DNS.
+
+Son registros «solo DNS» (nube gris), porque los puertos TCP/UDP no pasan por el proxy de Cloudflare. El panel sólo modifica los registros que crea él; si ya existe otro con ese nombre, no lo toca y te lo indica. El subdominio sale del nombre de usuario y se puede cambiar desde la ficha del cliente; al borrar un cliente se borra su registro, y «Desconectar» elimina todos los del panel. Dentro de tu dominio, cada cliente sólo puede usar nombres de su propio subdominio.
+
 ## Puertos abiertos (TCP/UDP)
 
 Para lo que no es web (escritorio remoto, cámaras RTSP, SSH, juegos…), cada cliente puede abrir puertos en **Puertos → Abrir puerto**: `IP_del_VPS:3389 → 10.252.1.20:3389` (TCP, UDP o ambos), hacia un dispositivo o un equipo de la LAN de su router. El equipo ve la conexión como si viniera del servidor de la VPN, así la respuesta vuelve siempre por el túnel. El admin fija cuántos puede abrir cada cliente (5 por defecto, 0 = ninguno); los clientes usan puertos ≥ 1024 y nunca los del propio servidor (SSH, panel, WireGuard, 53, 80, 443). Las reglas las crea el host (`wgp-firewall`), que valida cada línea.

@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+import json
+import threading
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app import cfdns, domains
+from app.main import create_app
+
+H = {"X-WGP": "1"}
+
+
+class FakeCF:
+    def __init__(self):
+        self.records = {}
+        self.n = 0
+        self.zones = [{"id": "z1", "name": "wgcloud.app"}, {"id": "z2", "name": "otro.com"}]
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def reply(self, code, data):
+                body = json.dumps(data).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def handle_any(self):
+                if self.headers.get("Authorization") != "Bearer buen-token":
+                    return self.reply(403, {"success": False, "errors": [{"message": "Invalid API Token"}]})
+                url = urllib.parse.urlparse(self.path)
+                q = dict(urllib.parse.parse_qsl(url.query))
+                parts = url.path.strip("/").split("/")
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length)) if length else None
+                if parts == ["user", "tokens", "verify"]:
+                    return self.reply(200, {"success": True, "result": {"status": "active"}})
+                if parts == ["zones"]:
+                    return self.reply(200, {"success": True, "result": fake.zones})
+                zone = parts[1]
+                recs = [r for r in fake.records.values() if r["zone"] == zone]
+                if self.command == "GET":
+                    if "name" in q:
+                        recs = [r for r in recs if r["name"] == q["name"]]
+                    if "comment.startswith" in q:
+                        recs = [r for r in recs if (r.get("comment") or "").startswith(q["comment.startswith"])]
+                    return self.reply(200, {"success": True, "result": recs, "result_info": {"total_pages": 1}})
+                if self.command == "POST":
+                    fake.n += 1
+                    rid = f"r{fake.n}"
+                    fake.records[rid] = {**body, "id": rid, "zone": zone}
+                    return self.reply(200, {"success": True, "result": fake.records[rid]})
+                rid = parts[3]
+                if self.command == "PUT":
+                    fake.records[rid] = {**body, "id": rid, "zone": zone}
+                    return self.reply(200, {"success": True, "result": fake.records[rid]})
+                if self.command == "DELETE":
+                    fake.records.pop(rid)
+                    return self.reply(200, {"success": True, "result": {"id": rid}})
+
+            do_GET = do_POST = do_PUT = do_DELETE = handle_any
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+
+    def names(self, zone="z1"):
+        return sorted(r["name"] for r in self.records.values() if r["zone"] == zone)
+
+
+@pytest.fixture()
+def env(tmp_path, monkeypatch):
+    fake = FakeCF()
+    monkeypatch.setattr(cfdns, "API", fake.url)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WG_CONF_DIR", str(tmp_path / "wireguard"))
+    monkeypatch.setenv("WG_ENDPOINT", "203.0.113.10")
+    monkeypatch.setenv("SESSION_SECRET", "x")
+    monkeypatch.setenv("DNS_ENABLED", "false")
+    monkeypatch.setenv("CADDY_ADMIN", "")
+    monkeypatch.setattr("app.wg.WireGuardManager.host_networks", lambda self: [])
+    monkeypatch.setattr(domains.Domains, "resolve", staticmethod(lambda host: ["203.0.113.10"]))
+    with TestClient(create_app()) as c:
+        c.post("/api/auth/login", json={"username": "admin", "password": "admin"}, headers=H)
+        c.post("/api/me/password", json={"current": "admin", "new": "AdminPass1"}, headers=H)
+        yield c, fake
+    fake.server.shutdown()
+
+
+def tenant(c, name, user):
+    return c.post("/api/admin/tenants", json={"name": name, "username": user, "password": "Password1"}, headers=H).json()
+
+
+def test_labels():
+    assert cfdns.dns_label("Juan_Pérez.92") == "juan-p-rez-92" and cfdns.dns_label("___") == "cliente"
+
+
+def test_cloudflare_subdomains(env):
+    c, fake = env
+    acme = tenant(c, "Acme", "acme")
+    assert acme["subdomain"] == "acme" and acme["public_host"] is None            # aún sin Cloudflare
+    tenant(c, "Web SL", "WWW")                                                       # «www» está reservado
+    # token malo / dominio sin acceso
+    r = c.post("/api/admin/cloudflare/zones", json={"token": "malo"}, headers=H)
+    assert r.status_code == 400 and "Invalid API Token" in r.json()["detail"]
+    assert [z["name"] for z in c.post("/api/admin/cloudflare/zones", json={"token": "buen-token"}, headers=H).json()["zones"]] == ["wgcloud.app", "otro.com"]
+    assert c.put("/api/admin/cloudflare", json={"token": "buen-token", "zone": "noesmio.com"}, headers=H).status_code == 422
+    v = c.put("/api/admin/cloudflare", json={"token": "buen-token", "zone": "WGCloud.app"}, headers=H).json()
+    assert v["zone"] == "wgcloud.app" and v["has_token"] and not v["enabled"] and fake.records == {}
+    assert "token" not in json.dumps(v).replace("has_token", "")
+    v = c.put("/api/admin/cloudflare", json={"enabled": True}, headers=H).json()
+    assert v["state"]["ok"] and v["state"]["records"] == 4 and v["ip"] == "203.0.113.10"
+    assert fake.names() == ["*.acme.wgcloud.app", "*.www-2.wgcloud.app", "acme.wgcloud.app", "www-2.wgcloud.app"]
+    rec = next(r for r in fake.records.values() if r["name"] == "acme.wgcloud.app")
+    assert rec["content"] == "203.0.113.10" and rec["proxied"] is False and rec["type"] == "A" and rec["comment"].startswith("wgp:")
+    # el cliente ve su dirección y los puertos abiertos la usan
+    t = c.get(f"/api/admin/tenants/{acme['id']}").json()
+    assert t["public_host"] == "acme.wgcloud.app"
+    assert c.get(f"/api/forwards?tenant_id={acme['id']}").json()["public_host"] == "acme.wgcloud.app"
+    # registros existentes que no son del panel: no se tocan
+    fake.records["ext"] = {"id": "ext", "zone": "z1", "type": "A", "name": "globex.wgcloud.app", "content": "1.2.3.4"}
+    g = tenant(c, "Globex", "globex")
+    v = c.post("/api/admin/cloudflare/sync", headers=H).json()
+    assert v["state"]["ok"] is False and "globex.wgcloud.app" in v["state"]["error"]
+    assert fake.records["ext"]["content"] == "1.2.3.4" and "*.globex.wgcloud.app" in fake.names()
+    # el admin cambia el subdominio: se mueve el registro
+    assert c.put(f"/api/admin/tenants/{g['id']}/subdomain", json={"subdomain": "acme"}, headers=H).status_code == 409
+    assert c.put(f"/api/admin/tenants/{g['id']}/subdomain", json={"subdomain": "www"}, headers=H).status_code == 422
+    r = c.put(f"/api/admin/tenants/{g['id']}/subdomain", json={"subdomain": "globex-sa"}, headers=H).json()
+    assert r["host"] == "globex-sa.wgcloud.app" and "globex-sa.wgcloud.app" in fake.names() and "*.globex.wgcloud.app" not in fake.names()
+    assert c.get("/api/admin/cloudflare").json()["state"]["ok"] is True
+    # alguien cambia la IP a mano en Cloudflare: se corrige
+    rec = next(r for r in fake.records.values() if r["name"] == "acme.wgcloud.app")
+    rec["content"] = "9.9.9.9"
+    c.post("/api/admin/cloudflare/sync", headers=H)
+    assert next(r for r in fake.records.values() if r["name"] == "acme.wgcloud.app")["content"] == "203.0.113.10"
+    # sin comodín: sólo el subdominio
+    c.put("/api/admin/cloudflare", json={"wildcard": False}, headers=H)
+    assert not any(n.startswith("*.") for n in fake.names())
+    # borrar un cliente borra su registro
+    c.delete(f"/api/admin/tenants/{g['id']}", headers=H)
+    c.post("/api/admin/cloudflare/sync", headers=H)
+    assert "globex-sa.wgcloud.app" not in fake.names()
+    # desconectar: borra todos los del panel (no el ajeno) y olvida el token
+    v = c.delete("/api/admin/cloudflare", headers=H).json()
+    assert fake.names() == ["globex.wgcloud.app"] and not v["has_token"] and v["zone"] == ""
+
+
+def test_zone_names_belong_to_tenant(env, monkeypatch):
+    c, fake = env
+    a, b = tenant(c, "Acme", "acme"), tenant(c, "Beta", "beta")
+    c.put("/api/admin/cloudflare", json={"token": "buen-token", "zone": "wgcloud.app", "enabled": True}, headers=H)
+    put = lambda tid, host: c.put(f"/api/tenant-domain?tenant_id={tid}", json={"domain": host}, headers=H)
+    assert put(a["id"], "panel.acme.wgcloud.app").status_code == 200
+    r = put(b["id"], "panel2.acme.wgcloud.app")
+    assert r.status_code == 409 and "beta.wgcloud.app" in r.json()["detail"]
+    assert put(b["id"], "wgcloud.app").status_code == 409
+    assert put(b["id"], "vpn.beta-externo.com").status_code == 200       # otros dominios, como siempre
