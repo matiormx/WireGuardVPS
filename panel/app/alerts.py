@@ -45,6 +45,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from . import cfdns
 from .db import Database, get_setting, set_setting
 
 log = logging.getLogger("wgp.alerts")
@@ -158,7 +159,27 @@ class AlertsConfigIn(BaseModel):
     smtp_user: str | None = Field(default=None, max_length=200)
     smtp_password: str | None = Field(default=None, max_length=200)  # vacío = conservar
     smtp_from: str | None = Field(default=None, max_length=200)
+    email_provider: str | None = Field(default=None, pattern="^(smtp|cloudflare)$")
+    cf_from: str | None = Field(default=None, max_length=200)
+    cf_token: str | None = Field(default=None, max_length=200)       # "" = usar el de Subdominios
+    cf_account: str | None = Field(default=None, max_length=64)      # "" = deducirlo del dominio del remitente
     delay_min: int | None = Field(default=None, ge=1, le=120)
+
+
+def email_provider(c: sqlite3.Connection) -> str:
+    return get_setting(c, "email_provider") or "smtp"
+
+
+def email_ready(c: sqlite3.Connection) -> bool:
+    """¿Se pueden enviar emails? Por SMTP o por Cloudflare Email Service."""
+    if email_provider(c) == "cloudflare":
+        return bool(get_setting(c, "cfmail_from") and get_setting(c, "cfmail_account")
+                    and (get_setting(c, "cfmail_token") or get_setting(c, "cf_token")))
+    return bool(get_setting(c, "smtp_host") and get_setting(c, "smtp_from"))
+
+
+def sender_address(c: sqlite3.Connection) -> str:
+    return (get_setting(c, "cfmail_from") if email_provider(c) == "cloudflare" else get_setting(c, "smtp_from")) or ""
 
 
 # --------------------------------------------------------------------------- motor
@@ -181,7 +202,8 @@ class Notifier:
         return self.setting("telegram_token")
 
     def smtp_ready(self) -> bool:
-        return bool(self.setting("smtp_host") and self.setting("smtp_from"))
+        with self.db.conn() as c:
+            return email_ready(c)
 
     # ------------------------------------------------------------------ envío
     def deliver(self, recipients: set[tuple[str, int]], title: str, body: str, url: str = "/") -> None:
@@ -239,6 +261,8 @@ class Notifier:
         return data["result"]
 
     def email(self, to: str, subject: str, body: str) -> None:
+        if self.setting("email_provider", "smtp") == "cloudflare":
+            return self.email_cloudflare(to, subject, body)
         host = self.setting("smtp_host")
         if not host:
             raise RuntimeError("El email no está configurado")
@@ -263,12 +287,44 @@ class Notifier:
                 server.login(user, password)
             server.send_message(msg)
 
+    def email_cloudflare(self, to: str, subject: str, body: str) -> None:
+        """Cloudflare Email Service (API REST): el dominio del remitente debe estar dado de alta en
+        Email Service y el token necesita el permiso «Email Sending: Edit»."""
+        token = self.setting("cfmail_token") or self.setting("cf_token")
+        account, sender = self.setting("cfmail_account"), self.setting("cfmail_from")
+        if not (token and account and sender):
+            raise RuntimeError("El envío por Cloudflare no está configurado")
+        name, addr = parseaddr(sender)
+        text = f"{body}\n\n— {self.brand_name()}"
+        html_body = "<br>".join(_html(line) for line in text.splitlines())
+        payload = {"to": [to], "from": {"address": addr or sender, "name": name or self.brand_name()},
+                   "subject": subject, "text": text,
+                   "html": f'<div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;line-height:1.5">{html_body}</div>'}
+        req = urllib.request.Request(f"{cfdns.API}/accounts/{account}/email/sending/send", method="POST",
+                                     data=json.dumps(payload).encode(),
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as r:   # noqa: S310 - API fija
+                data = json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as exc:
+            try:
+                data = json.loads(exc.read() or b"{}")
+            except ValueError:
+                data = {}
+            msg = "; ".join(f"{e.get('message', '')} ({e.get('code')})" for e in data.get("errors", [])) or f"HTTP {exc.code}"
+            raise RuntimeError(f"Cloudflare: {msg}") from None
+        if not data.get("success", False):
+            raise RuntimeError("Cloudflare: " + ("; ".join(e.get("message", "") for e in data.get("errors", [])) or "envío rechazado"))
+        bounced = (data.get("result") or {}).get("permanent_bounces") or []
+        if bounced:
+            raise RuntimeError(f"Cloudflare: dirección rechazada ({', '.join(map(str, bounced))})")
+
     def push(self, sub: dict, message: dict) -> None:
         if not push_endpoint_ok(sub["endpoint"]):
             raise PushGone("Servicio de notificaciones no admitido")
         with self.db.conn() as c:
             key, public = vapid_keys(c)
-            subject = get_setting(c, "smtp_from") or "mailto:admin@wireguard.cloud"
+            subject = sender_address(c) or "mailto:admin@wireguard.cloud"
         if not subject.startswith(("mailto:", "https://")):
             subject = f"mailto:{parseaddr(subject)[1] or 'admin@wireguard.cloud'}"
         body = encrypt_push(json.dumps(message).encode(), sub["p256dh"], sub["auth"])
@@ -468,7 +524,7 @@ def register(app: FastAPI, d) -> None:
         return {
             "channels": [channel_json(r) for r in rows], "prefs": prefs(c, p.role, p.id),
             "available": {"telegram": bool(get_setting(c, "telegram_token")), "telegram_bot": bot,
-                          "email": bool(get_setting(c, "smtp_host") and get_setting(c, "smtp_from")),
+                          "email": email_ready(c),
                           "push_key": public},
             "delay_min": int(get_setting(c, "alert_delay_min") or 5),
         }
@@ -513,7 +569,7 @@ def register(app: FastAPI, d) -> None:
 
     @app.post("/api/alerts/email", status_code=201)
     def add_email(body: EmailIn, p: d.Anyone, c: d.Conn):
-        if not (get_setting(c, "smtp_host") and get_setting(c, "smtp_from")):
+        if not email_ready(c):
             raise HTTPException(409, "El envío de emails no está configurado en el servidor")
         email = body.email.strip()
         if not EMAIL_RE.match(email):
@@ -563,12 +619,26 @@ def register(app: FastAPI, d) -> None:
             "smtp": {"host": get_setting(c, "smtp_host") or "", "port": int(get_setting(c, "smtp_port") or 587),
                      "security": get_setting(c, "smtp_security") or "starttls", "user": get_setting(c, "smtp_user") or "",
                      "password_set": bool(get_setting(c, "smtp_password")), "from": get_setting(c, "smtp_from") or ""},
+            "email": {"provider": email_provider(c), "ready": email_ready(c)},
+            "cloudflare": {"from": get_setting(c, "cfmail_from") or "", "account": get_setting(c, "cfmail_account") or "",
+                           "own_token": bool(get_setting(c, "cfmail_token")), "dns_token": bool(get_setting(c, "cf_token"))},
             "delay_min": int(get_setting(c, "alert_delay_min") or 5),
         }
 
     @app.get("/api/admin/alerts-config")
     def get_config(_: d.Admin, c: d.Conn):
         return config_state(c)
+
+    @app.post("/api/admin/alerts-config/test-email")
+    def test_email(body: EmailIn, _: d.Admin, c: d.Conn):
+        if not email_ready(c):
+            raise HTTPException(409, "El envío de emails no está configurado")
+        try:
+            notifier.email(body.email.strip(), "🔔 Prueba de email",
+                           f"Si lees esto, {notifier.brand_name()} ya puede enviar avisos por email.")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(409, f"No se pudo enviar: {exc}") from None
+        return {"ok": True}
 
     @app.put("/api/admin/alerts-config")
     def put_config(body: AlertsConfigIn, _: d.Admin, c: d.Conn):
@@ -600,6 +670,32 @@ def register(app: FastAPI, d) -> None:
             set_setting(c, "smtp_security", body.smtp_security)
         if body.smtp_password:
             set_setting(c, "smtp_password", body.smtp_password)
+        if body.cf_from is not None or body.cf_token is not None or body.cf_account is not None:
+            sender = (body.cf_from if body.cf_from is not None else get_setting(c, "cfmail_from") or "").strip()
+            if "\n" in sender or "\r" in sender or not EMAIL_RE.match(parseaddr(sender)[1]):
+                raise HTTPException(422, "Remitente no válido (p. ej. Avisos <avisos@tudominio.com>)")
+            if body.cf_token is not None:
+                set_setting(c, "cfmail_token", body.cf_token.strip())
+            token = get_setting(c, "cfmail_token") or get_setting(c, "cf_token")
+            if not token:
+                raise HTTPException(422, "Pega un token de Cloudflare con el permiso «Email Sending: Edit»")
+            account = (body.cf_account or "").strip()
+            if not account:   # la cuenta del dominio del remitente
+                domain = parseaddr(sender)[1].rsplit("@", 1)[1].lower()
+                try:
+                    zones = cfdns.CloudflareDNS(d.db, d.doms).call(token, "GET", "/zones", query={"per_page": 50}).get("result", [])
+                except cfdns.CloudflareError as exc:
+                    raise HTTPException(400, f"Cloudflare: {exc}") from None
+                zone = next((z for z in zones if domain == z["name"] or domain.endswith("." + z["name"])), None)
+                if not zone:
+                    raise HTTPException(422, f"El token no ve el dominio {domain}: indica el ID de cuenta de Cloudflare")
+                account = zone["account"]["id"]
+            if not re.fullmatch(r"[0-9a-f]{32}", account):
+                raise HTTPException(422, "ID de cuenta no válido (32 caracteres hexadecimales)")
+            set_setting(c, "cfmail_from", sender)
+            set_setting(c, "cfmail_account", account)
+        if body.email_provider is not None:
+            set_setting(c, "email_provider", body.email_provider)
         if body.delay_min is not None:
             set_setting(c, "alert_delay_min", str(body.delay_min))
         c.commit()

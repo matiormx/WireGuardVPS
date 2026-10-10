@@ -2986,13 +2986,46 @@ function alertsConfigCard() {
         h("div", { class: "full" }, field("Remitente", input({ name: "smtp_from", required: true, value: s.from, placeholder: "Avisos VPN <avisos@tudominio.com>" }))),
       ],
       onSubmit: async (fd) => {
-        cfg = await api("PUT", "/api/admin/alerts-config", { smtp_host: fd.get("smtp_host"), smtp_port: Number(fd.get("smtp_port")),
+        cfg = await api("PUT", "/api/admin/alerts-config", { email_provider: "smtp", smtp_host: fd.get("smtp_host"), smtp_port: Number(fd.get("smtp_port")),
           smtp_security: fd.get("smtp_security"), smtp_user: fd.get("smtp_user"), smtp_password: fd.get("smtp_password") || null, smtp_from: fd.get("smtp_from") });
         toast("Correo configurado. Prueba enviando un aviso desde Avisos.");
         draw();
       },
     });
   };
+  const cloudflareModal = async () => {
+    try { cfg = await api("GET", "/api/admin/alerts-config"); } catch { /* se usa lo que ya había */ }
+    const cf = cfg.cloudflare;
+    formModal({
+      title: "Email con Cloudflare",
+      fields: [
+        h("ol", { class: "steps full" },
+          h("li", null, "En Cloudflare › ", h("b", { text: "Email Service" }), ", añade tu dominio para envíos (Cloudflare crea los registros SPF y DKIM)."),
+          h("li", null, "Crea un token con el permiso ", h("b", { text: "Email Sending: Edit" }),
+            cf.dns_token ? " (o añádelo al token que ya usas en Subdominios de clientes)." : "."),
+          h("li", { text: "Escribe el remitente con una dirección de ese dominio." })),
+        h("div", { class: "full" }, field("Remitente", input({ name: "cf_from", required: true, value: cf.from, placeholder: "Avisos VPN <avisos@tudominio.com>" }))),
+        h("div", { class: "full" }, field("Token de la API", input({ name: "cf_token", type: "password", class: "input mono", autocomplete: "off",
+          placeholder: cf.own_token ? "(guardado)" : cf.dns_token ? "Vacío: usar el de Subdominios de clientes" : "Token con permiso Email Sending: Edit" }),
+          cf.own_token ? "Déjalo vacío para conservarlo." : null)),
+        h("div", { class: "full" }, field("ID de cuenta (opcional)", input({ name: "cf_account", class: "input mono", value: cf.account, maxlength: "32", autocapitalize: "off", spellcheck: "false",
+          placeholder: "Se deduce del dominio del remitente" }))),
+      ],
+      onSubmit: async (fd) => {
+        const patch = { email_provider: "cloudflare", cf_from: fd.get("cf_from"), cf_account: fd.get("cf_account") };
+        if (fd.get("cf_token")) patch.cf_token = fd.get("cf_token");
+        cfg = await api("PUT", "/api/admin/alerts-config", patch);
+        toast("Email con Cloudflare configurado. Pulsa «Probar».");
+        draw();
+      },
+    });
+  };
+  const testEmail = () => formModal({
+    title: "Enviar un email de prueba",
+    submitLabel: "Enviar",
+    fields: [h("div", { class: "full" }, field("Enviar a", input({ name: "email", type: "email", required: true, placeholder: "tu@email.com" })))],
+    onSubmit: async (fd) => { await api("POST", "/api/admin/alerts-config/test-email", { email: fd.get("email") }); toast("Email de prueba enviado"); },
+  });
   const telegramModal = () => formModal({
     title: "Bot de Telegram",
     fields: [
@@ -3015,10 +3048,14 @@ function alertsConfigCard() {
             h("div", { class: "meta", text: cfg.telegram.configured ? `Bot @${cfg.telegram.bot}` : "Sin configurar" })),
           h("button", { class: "btn sm", onClick: telegramModal }, cfg.telegram.configured ? "Cambiar" : "Configurar"),
           cfg.telegram.configured ? h("button", { class: "btn ghost icon", title: "Quitar", onClick: () => save({ telegram_token: "" }, "Telegram desactivado") }, icon("trash")) : null),
-        h("div", { class: "blocked-row" }, h("span", { class: "channel-icon" }, icon("mail")),
+        h("div", { class: "blocked-row", style: { flexWrap: "wrap" } }, h("span", { class: "channel-icon" }, icon("mail")),
           h("div", { class: "grow" }, h("div", { class: "name", text: "Email" }),
-            h("div", { class: "meta", text: cfg.smtp.host ? `${cfg.smtp.host}:${cfg.smtp.port} · ${cfg.smtp.from}` : "Sin configurar" })),
-          h("button", { class: "btn sm", onClick: smtpModal }, cfg.smtp.host ? "Cambiar" : "Configurar")),
+            h("div", { class: "meta", text: cfg.email.provider === "cloudflare"
+              ? (cfg.email.ready ? `Cloudflare Email Service · ${cfg.cloudflare.from}` : "Cloudflare: sin configurar")
+              : cfg.smtp.host ? `SMTP ${cfg.smtp.host}:${cfg.smtp.port} · ${cfg.smtp.from}` : "Sin configurar" })),
+          h("button", { class: `btn sm ${cfg.email.provider === "smtp" && cfg.email.ready ? "primary" : ""}`, onClick: smtpModal }, "SMTP"),
+          h("button", { class: `btn sm ${cfg.email.provider === "cloudflare" && cfg.email.ready ? "primary" : ""}`, onClick: cloudflareModal }, "Cloudflare"),
+          cfg.email.ready ? h("button", { class: "btn ghost sm", onClick: testEmail }, "Probar") : null),
         h("label", { class: "inline-field" }, "Considerar caído un dispositivo tras",
           h("select", { class: "input", onChange: (e) => save({ delay_min: Number(e.target.value) }, "Guardado") }, delays), "sin conectar")));
   };

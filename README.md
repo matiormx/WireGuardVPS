@@ -134,6 +134,8 @@ Para instalar un dispositivo sin dar una cuenta, usa el botón **Enlace de insta
 - **Avisos:** si un dispositivo **vigilado** (los routers, por defecto) deja de conectar unos minutos, llega un aviso, y otro cuando vuelve. Cada persona elige dónde recibirlos: **notificaciones** en el móvil u ordenador (en iPhone, desde la app instalada), **Telegram** o **email**. Los administradores también reciben los fallos de las copias de seguridad.
 - Para Telegram y email, el admin los configura una vez en **Ajustes → Avisos**: un bot creado con [@BotFather](https://t.me/BotFather) (se pega su token) y un servidor SMTP. Cada persona vincula su Telegram con un clic desde **Avisos**.
 
+
+**Email de los avisos:** en Ajustes › Avisos › Email eliges **SMTP** (Gmail, Brevo, tu hosting…) o **Cloudflare** (Cloudflare Email Service): da de alta tu dominio en Cloudflare › Email Service, crea un token con el permiso «Email Sending: Edit» (puede ser el mismo de los subdominios si le añades ese permiso) y escribe el remitente, p. ej. `Avisos <avisos@tudominio.com>`; la cuenta se deduce sola del dominio. «Probar» envía un email de prueba.
 ## Salidas por país
 
 Tus clientes pueden navegar con la IP de otro país sin cambiar nada en sus dispositivos: siguen conectados a este servidor (red privada, DNS y filtros incluidos) y sólo su tráfico de Internet sale por la salida elegida. Hay dos tipos:

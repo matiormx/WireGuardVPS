@@ -18,7 +18,9 @@ class FakeCF:
     def __init__(self):
         self.records = {}
         self.n = 0
-        self.zones = [{"id": "z1", "name": "wgcloud.app"}, {"id": "z2", "name": "otro.com"}]
+        self.zones = [{"id": "z1", "name": "wgcloud.app", "account": {"id": "a" * 32}},
+                      {"id": "z2", "name": "otro.com", "account": {"id": "b" * 32}}]
+        self.mails = []
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -45,6 +47,13 @@ class FakeCF:
                     return self.reply(200, {"success": True, "result": {"status": "active"}})
                 if parts == ["zones"]:
                     return self.reply(200, {"success": True, "result": fake.zones})
+                if parts[0] == "accounts" and parts[2:] == ["email", "sending", "send"]:
+                    if parts[1] != "a" * 32:
+                        return self.reply(403, {"success": False, "errors": [{"code": 10102, "message": "Token lacks email sending permission"}]})
+                    fake.mails.append(body)
+                    bounced = [t for t in body["to"] if t.startswith("rebota@")]
+                    return self.reply(200, {"success": True, "result": {"delivered": [t for t in body["to"] if t not in bounced],
+                                                                        "permanent_bounces": bounced, "queued": []}})
                 zone = parts[1]
                 recs = [r for r in fake.records.values() if r["zone"] == zone]
                 if self.command == "GET":
@@ -165,3 +174,33 @@ def test_zone_names_belong_to_tenant(env, monkeypatch):
     assert r.status_code == 409 and "beta.wgcloud.app" in r.json()["detail"]
     assert put(b["id"], "wgcloud.app").status_code == 409
     assert put(b["id"], "vpn.beta-externo.com").status_code == 200       # otros dominios, como siempre
+
+
+def test_cloudflare_email(env):
+    c, fake = env
+    assert c.post("/api/admin/alerts-config/test-email", json={"email": "yo@ejemplo.com"}, headers=H).status_code == 409
+    # sin token de Cloudflare
+    r = c.put("/api/admin/alerts-config", json={"email_provider": "cloudflare", "cf_from": "avisos@wgcloud.app"}, headers=H)
+    assert r.status_code == 422
+    # con el token de Subdominios; la cuenta se deduce del dominio del remitente
+    c.put("/api/admin/cloudflare", json={"token": "buen-token", "zone": "wgcloud.app"}, headers=H)
+    assert c.put("/api/admin/alerts-config", json={"cf_from": "Avisos <avisos@noesmio.org>"}, headers=H).status_code == 422
+    assert c.put("/api/admin/alerts-config", json={"cf_from": "no-es-email"}, headers=H).status_code == 422
+    cfg = c.put("/api/admin/alerts-config", json={"email_provider": "cloudflare", "cf_from": "Avisos VPN <avisos@wgcloud.app>"}, headers=H).json()
+    assert cfg["email"] == {"provider": "cloudflare", "ready": True}
+    assert cfg["cloudflare"]["account"] == "a" * 32 and cfg["cloudflare"]["dns_token"] and not cfg["cloudflare"]["own_token"]
+    assert c.post("/api/admin/alerts-config/test-email", json={"email": "yo@ejemplo.com"}, headers=H).json() == {"ok": True}
+    m = fake.mails[-1]
+    assert m["to"] == ["yo@ejemplo.com"] and m["from"] == {"address": "avisos@wgcloud.app", "name": "Avisos VPN"}
+    assert "Prueba" in m["subject"] and "WireGuard Cloud" in m["text"] and m["html"].startswith("<div")
+    # rebote y falta de permiso: error claro
+    r = c.post("/api/admin/alerts-config/test-email", json={"email": "rebota@ejemplo.com"}, headers=H)
+    assert r.status_code == 409 and "rechazada" in r.json()["detail"]
+    c.put("/api/admin/alerts-config", json={"cf_account": "b" * 32}, headers=H)
+    r = c.post("/api/admin/alerts-config/test-email", json={"email": "yo@ejemplo.com"}, headers=H)
+    assert r.status_code == 409 and "10102" in r.json()["detail"]
+    assert c.put("/api/admin/alerts-config", json={"cf_account": "xyz"}, headers=H).status_code == 422
+    # los usuarios ya pueden añadir su email como canal de avisos
+    assert c.get("/api/alerts").json()["available"]["email"] is True
+    # volver a SMTP (sin configurar): el email deja de estar disponible
+    assert c.put("/api/admin/alerts-config", json={"email_provider": "smtp"}, headers=H).json()["email"]["ready"] is False
