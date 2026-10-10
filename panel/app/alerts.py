@@ -165,7 +165,7 @@ class AlertsConfigIn(BaseModel):
 class Notifier:
     def __init__(self, database: Database, title: str = "WireGuard Cloud") -> None:
         self.db = database
-        self.title = title
+        self.title = title   # nombre por defecto; el real es el de Ajustes › Marca (brand_name)
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=3, thread_name_prefix="alerts")
         self._tg_thread: threading.Thread | None = None
         self._tg_stop = threading.Event()
@@ -247,10 +247,10 @@ class Notifier:
         user, password, sender = self.setting("smtp_user"), self.setting("smtp_password"), self.setting("smtp_from")
         msg = EmailMessage()
         name, addr = parseaddr(sender)
-        msg["From"] = formataddr((name or self.title, addr or sender))
+        msg["From"] = formataddr((name or self.brand_name(), addr or sender))
         msg["To"] = to
         msg["Subject"] = subject
-        msg.set_content(f"{body}\n\n— {self.title}")
+        msg.set_content(f"{body}\n\n— {self.brand_name()}")
         ctx = ssl.create_default_context()
         if security == "ssl":
             server = smtplib.SMTP_SSL(host, port, timeout=20, context=ctx)
@@ -345,6 +345,10 @@ class Notifier:
         with self.db.conn() as c:
             to = {("admin", r["id"]) for r in c.execute("SELECT id FROM admins") if prefs(c, "admin", r["id"]).get("billing")}
         self.deliver(to, title, body, "/#/billing")
+
+    def brand_name(self) -> str:
+        with self.db.conn() as c:
+            return get_setting(c, "brand_name") or self.title
 
     def notify_system(self, title: str, body: str) -> None:
         """Avisos del servidor (actualizaciones) a los administradores con «backup» activado."""
@@ -547,7 +551,7 @@ def register(app: FastAPI, d) -> None:
     def test_channel(channel_id: int, p: d.Anyone, c: d.Conn):
         ch = dict(channel_for(c, p, channel_id))
         c.commit()
-        error = notifier._send_safe(ch, "🔔 Aviso de prueba", "Los avisos de WireGuard Cloud llegan correctamente.", "/#/alerts")
+        error = notifier._send_safe(ch, "🔔 Aviso de prueba", f"Los avisos de {notifier.brand_name()} llegan correctamente.", "/#/alerts")
         if error:
             raise HTTPException(409, f"No se pudo enviar: {error}")
         return {"ok": True}

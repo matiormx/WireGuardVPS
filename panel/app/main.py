@@ -5,6 +5,7 @@ import hashlib
 import ipaddress
 import io
 import json
+import html
 import logging
 import re
 import socket
@@ -29,7 +30,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import bcrypt
 
-from . import alerts, backup, billing, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, sysmon, updates, wg
+from . import alerts, backup, billing, brand, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, sysmon, updates, wg
 from .config import Settings, load_settings
 from .db import (LABEL_RE, Database, get_setting, make_hostname, name_in_use, set_setting,
                  unique_hostname, username_taken)
@@ -1428,11 +1429,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"title": owner["name"], "tenant": True}
         if domains.host_of(request.headers.get("host")) in doms.site_domains(c, only_enabled=True):
             return {"title": site.config(c)["title"], "tenant": False, "site": True}
-        return {"title": "WireGuard Cloud", "tenant": False}
+        return {"title": brand.name(c), "tenant": False}
 
     @app.get("/api/branding")
     def branding(request: Request, c: Conn):
-        return branding_for(c, request)
+        return {**branding_for(c, request), "logo": brand.url(c), "v": brand.version(c)}
 
     @app.get("/api/admin/settings")
     def get_settings(_: Admin, c: Conn):
@@ -1518,6 +1519,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     deps.clean_host = _clean_host
     deps.host_of = domains.host_of
     site.register(app, deps)
+    deps.static_dir = STATIC_DIR
+    brand.register(app, deps)
     deps.updates = upd
     updates.register(app, deps)
     deps.sysmon = sysm
@@ -1535,12 +1538,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def is_site(c: sqlite3.Connection, request: Request) -> bool:
         return domains.host_of(request.headers.get("host")) in doms.site_domains(c, only_enabled=True)
 
+    index_template = (STATIC_DIR / "index.html").read_text()
+
+    def index_page(c: sqlite3.Connection, request: Request) -> HTMLResponse:
+        """index.html con el nombre y los iconos de la marca (o del cliente, en su dominio)."""
+        b = branding_for(c, request)
+        short = b["title"][:12] if b["tenant"] or b.get("site") else brand.short_name(c)
+        page = (index_template.replace("__TITLE__", html.escape(b["title"])).replace("__SHORT__", html.escape(short))
+                .replace("__V__", brand.version(c)))
+        return HTMLResponse(page, headers={"Cache-Control": "no-cache"})
+
     @app.get("/", include_in_schema=False)
     def index(request: Request, c: Conn):
         # En el dominio de la página pública, la presentación; el panel queda en /<ruta> (site.panel_path).
         if is_site(c, request):
             return HTMLResponse(site.render(c, proxy.enabled), headers={"Cache-Control": "no-cache"})
-        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+        return index_page(c, request)
 
     @app.get("/app", include_in_schema=False)
     def panel_app(c: Conn):
@@ -1557,10 +1570,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/manifest.webmanifest", include_in_schema=False)
     def manifest(request: Request, c: Conn):
         data = json.loads((STATIC_DIR / "manifest.webmanifest").read_text())
-        brand = branding_for(c, request)
-        if brand["tenant"] or is_site(c, request):
-            data["name"] = brand["title"]
-            data["short_name"] = brand["title"][:12]
+        b = branding_for(c, request)
+        data["name"], data["short_name"] = brand.name(c), brand.short_name(c)
+        if b["tenant"] or is_site(c, request):
+            data["name"] = b["title"]
+            data["short_name"] = b["title"][:12]
+        for icon in data["icons"]:
+            icon["src"] += f"?v={brand.version(c)}"
         if is_site(c, request):
             data["start_url"] = f"/{site.panel_path(c)}?source=pwa"   # la app instalada abre el panel, no la presentación
         return JSONResponse(data, media_type="application/manifest+json", headers={"Cache-Control": "no-cache"})
@@ -1568,10 +1584,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # El panel en la ruta configurada de la página pública (/dashboard por defecto).
     # Va la última: sólo atiende rutas de un nivel que nadie más ha reclamado.
     @app.get("/{slug}", include_in_schema=False)
-    def panel_path(slug: str, c: Conn):
+    def panel_path(slug: str, request: Request, c: Conn):
         if slug != site.panel_path(c):
             raise HTTPException(404)
-        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+        return index_page(c, request)
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException):
@@ -1579,8 +1595,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if (exc.status_code == 404 and request.method in ("GET", "HEAD") and not request.url.path.startswith("/api/")
                 and "text/html" in request.headers.get("accept", "")):
             with database.conn() as c:
-                title = branding_for(c, request)["title"]
-            return HTMLResponse(site.render_404(title), status_code=404)
+                title, logo = branding_for(c, request)["title"], brand.url(c)
+            return HTMLResponse(site.render_404(title, logo), status_code=404)
         return await http_exception_handler(request, exc)
 
     return app

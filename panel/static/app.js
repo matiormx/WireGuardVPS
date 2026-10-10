@@ -453,7 +453,7 @@ async function render() {
 
 /* ------------------------------------------------------------------ shell */
 function brand() {
-  return h("div", { class: "brand" }, h("img", { class: "logo", src: "/static/favicon.svg", alt: "" }), h("span", { text: state.brand.title }));
+  return h("div", { class: "brand" }, h("img", { class: "logo", src: state.brand.logo || "/brand/logo", alt: "" }), h("span", { text: state.brand.title }));
 }
 
 function shell(active) {
@@ -1046,6 +1046,100 @@ function updatesCard() {
   return card;
 }
 
+/* Marca: nombre de la aplicación y logo. Los iconos se generan aquí con canvas. */
+const ICON_SPECS = [  // [fichero, lado, fondo, proporción del logo]
+  ["icon-512.png", 512, false, 0.92], ["icon-192.png", 192, false, 0.92], ["favicon.png", 64, false, 1],
+  ["icon-maskable-512.png", 512, true, 0.66], ["apple-touch-icon.png", 180, true, 0.78],
+];
+function renderIcon(img, side, bg, ratio) {
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = side;
+  const ctx = cv.getContext("2d");
+  if (bg) { ctx.fillStyle = bg; ctx.fillRect(0, 0, side, side); }
+  const w = img.naturalWidth || img.width || side, hh = img.naturalHeight || img.height || side;
+  const k = (side * ratio) / Math.max(w, hh);
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(img, (side - w * k) / 2, (side - hh * k) / 2, w * k, hh * k);
+  return cv.toDataURL("image/png");
+}
+function loadImage(file) {   // data: URL (la CSP del panel no admite blob:)
+  return new Promise((resolve, reject) => {
+    const fail = () => reject(new Error("No se pudo leer la imagen"));
+    const reader = new FileReader();
+    reader.onerror = fail;
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = fail;
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+function applyBrand(st) {
+  state.brand = { ...state.brand, logo: `/brand/logo?v=${st.version}`, v: st.version };
+  if (!state.brand.tenant && !state.brand.site) state.brand.title = st.name;
+  document.title = state.brand.title;
+  document.querySelectorAll("link[rel~=icon], link[rel=apple-touch-icon]").forEach((l) => { l.href = l.href.replace(/v=[^&]*/, `v=${st.version}`); });
+  document.querySelectorAll(".brand").forEach((b) => b.replaceWith(brand()));
+}
+
+function brandCard() {
+  const card = h("div", { class: "card" }, spinnerBlock());
+  let st = null, pending = null, img = null;
+  const fileInput = h("input", { type: "file", accept: "image/png,image/jpeg,image/webp,image/svg+xml", hidden: true, onChange: async (e) => {
+    const f = e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    if (f.size > 5 * 1024 * 1024) return toast("La imagen es demasiado grande (máx. 5 MB)", "err");
+    try { img = await loadImage(f); build(); } catch (err) { toast(err.message, "err"); }
+  } });
+  let bg = "#0b0d14";
+  const build = () => {
+    pending = Object.fromEntries(ICON_SPECS.map(([name, side, withBg, ratio]) => [name, renderIcon(img, side, withBg ? bg : null, ratio)]));
+    draw();
+  };
+  const draw = () => {
+    const nameIn = input({ value: st.name, maxlength: "40", placeholder: st.default_name });
+    const shortIn = input({ value: st.short_name, maxlength: "12", placeholder: "WG Cloud" });
+    const src = (f) => (pending ? pending[f] : `/brand/${f}?v=${st.version}`);
+    const bgIn = h("input", { type: "color", class: "color-input", value: bg, onInput: (e) => { bg = e.target.value; if (img) build(); } });
+    fill(card,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Marca" }),
+        h("div", { class: "note", text: "Nombre y logo de la aplicación: en el menú, el inicio de sesión, la app instalada (PWA), las pestañas del navegador, los avisos y la página pública." }))),
+      h("div", { class: "grid", style: { gap: "16px" } },
+        h("div", { class: "grid two", style: { gap: "12px" } },
+          field("Nombre de la aplicación", nameIn),
+          field("Nombre corto", shortIn, "Bajo el icono en el móvil (máx. 12 caracteres).")),
+        h("div", null, h("button", { class: "btn primary", onClick: async () => {
+          try { st = await api("PUT", "/api/admin/brand", { name: nameIn.value, short_name: shortIn.value || nameIn.value.slice(0, 12) }); applyBrand(st); toast("Nombre guardado"); draw(); }
+          catch (e) { toast(e.message, "err"); }
+        } }, "Guardar nombre")),
+        h("h3", { style: { margin: "6px 0 0" }, text: "Logo" }),
+        h("div", { class: "icon-previews" },
+          h("figure", null, h("img", { class: "pv-any", src: src("icon-512.png"), alt: "" }), h("figcaption", { text: "Logo" })),
+          h("figure", null, h("img", { class: "pv-ios", src: src("apple-touch-icon.png"), alt: "" }), h("figcaption", { text: "iPhone" })),
+          h("figure", null, h("img", { class: "pv-android", src: src("icon-maskable-512.png"), alt: "" }), h("figcaption", { text: "Android" })),
+          h("figure", null, h("img", { class: "pv-fav", src: src("favicon.png"), alt: "" }), h("figcaption", { text: "Pestaña" }))),
+        h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+          h("button", { class: "btn", onClick: () => fileInput.click() }, icon("download"), pending ? "Elegir otra imagen" : "Subir imagen"),
+          h("label", { class: "inline-field" }, "Fondo del icono", bgIn),
+          pending ? h("button", { class: "btn primary", onClick: async () => {
+            try { st = await api("PUT", "/api/admin/brand/logo", { files: pending, background: bg }); pending = null; img = null; applyBrand(st); toast("Logo guardado"); draw(); }
+            catch (e) { toast(e.message, "err"); }
+          } }, icon("check"), "Guardar logo") : null,
+          pending ? h("button", { class: "btn ghost", onClick: () => { pending = null; img = null; draw(); } }, "Cancelar") : null,
+          !pending && st.custom_logo ? h("button", { class: "btn ghost", onClick: async () => {
+            if (!(await confirmDialog({ title: "Restaurar el logo original", message: "Se quitará tu logo y volverá el escudo por defecto.", confirmLabel: "Restaurar" }))) return;
+            try { st = await api("DELETE", "/api/admin/brand/logo"); applyBrand(st); toast("Logo original restaurado"); draw(); } catch (e) { toast(e.message, "err"); }
+          } }, icon("refresh"), "Restaurar original") : null),
+        h("p", { class: "help", text: "Mejor una imagen cuadrada (PNG o SVG con fondo transparente, 512 px o más). El fondo se usa en los iconos de iPhone y Android. Las apps ya instaladas pueden tardar en mostrar el icono nuevo; en iPhone hay que volver a añadirla a la pantalla de inicio." })),
+      fileInput);
+  };
+  api("GET", "/api/admin/brand").then((d) => { st = d; bg = d.background; draw(); }).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
+  return card;
+}
+
 /* Página pública: presentación del servicio y planes en un dominio propio. */
 function siteCard() {
   const card = h("div", { class: "card" }, spinnerBlock());
@@ -1205,6 +1299,7 @@ async function settingsView(main) {
               h("code", { text: cfg.main_domain || "vpn.tudominio.com" }), " → ", h("code", { text: ip }), "."),
             h("li", { text: "Escríbelo arriba y pulsa Guardar." }),
             h("li", { text: "Pulsa Comprobar. Cuando HTTPS esté activo, abre el panel con el dominio y activa «Forzar HTTPS»." })))),
+      brandCard(),
       siteCard(),
       endpointCard(),
       exitsCard(),
@@ -3670,7 +3765,7 @@ async function installApp() {
         h("p", { class: "note", style: { margin: 0 } }, "Configura un dominio para el panel con ", h("code", { text: "PANEL_DOMAIN" }),
           " en /etc/wg-manager.conf y ejecuta ", h("code", { text: "wg-manager update" }), ": se obtendrá un certificado gratuito automáticamente.")]
       : [h("p", { style: { margin: 0 } }, "Abre el menú del navegador (⋮) y elige ", h("b", { text: "Instalar aplicación" }), " o ", h("b", { text: "Añadir a pantalla de inicio" }), ".")];
-  const m = modal({ title: "Instalar WireGuard Cloud", body: steps,
+  const m = modal({ title: `Instalar ${state.brand.title}`, body: steps,
     actions: [h("button", { class: "btn primary", onClick: () => m.close() }, "Entendido")] });
 }
 

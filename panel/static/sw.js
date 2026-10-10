@@ -55,8 +55,8 @@ self.addEventListener("push", (event) => {
   try { data = event.data ? event.data.json() : {}; } catch { data = { title: "WireGuard Cloud", body: event.data ? event.data.text() : "" }; }
   event.waitUntil(self.registration.showNotification(data.title || "WireGuard Cloud", {
     body: data.body || "",
-    icon: "/static/icons/icon-192.png",
-    badge: "/static/icons/icon-192.png",
+    icon: "/brand/icon-192.png",
+    badge: "/brand/icon-192.png",
     tag: data.tag,
     data: { url: data.url || "/" },
   }));

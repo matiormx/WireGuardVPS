@@ -159,6 +159,10 @@ En **Facturación**:
 
 Opcional: IVA automático con Stripe Tax. Recibes avisos de nuevas suscripciones, cancelaciones y cobros fallidos, y el cliente de sus problemas de pago.
 
+## Marca: nombre y logo
+
+En **Ajustes › Marca** cambias el nombre de la aplicación (y el nombre corto que aparece bajo el icono en el móvil) y subes tu logo (PNG, JPG, WebP o SVG; mejor cuadrado y con fondo transparente). El panel genera los iconos de la app instalada (iPhone y Android, con el color de fondo que elijas), el de la pestaña del navegador y el del menú, con vista previa antes de guardar. Se usan también en la página pública, los avisos y los emails. «Restaurar original» vuelve al escudo por defecto. El logo se guarda en la base de datos, así que va incluido en las copias de seguridad.
+
 ## Página pública
 
 Una web de presentación de tu servicio, con tus planes y botones para entrar o crear cuenta, en un dominio propio distinto del de la VPN (p. ej. `midominio.com` mientras el panel está en `vpn.midominio.com`). En **Ajustes › Página pública**: escribe el dominio (o varios, como `midominio.com, www.midominio.com`), crea sus registros **A** hacia la IP del VPS y activa «Publicar la página». Se sirve en el puerto 443 con certificado automático. Los textos (nombre, titular, descripción, email de contacto y aviso legal) se editan desde ahí; los planes salen de **Facturación**.

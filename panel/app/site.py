@@ -20,13 +20,14 @@ import urllib.parse
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from . import brand
 from .billing import fmt_money
 from .db import get_setting, set_setting
 
 MAX_DOMAINS = 3
 DEFAULT_PATH = "dashboard"
 PATH_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
-RESERVED_PATHS = {"api", "static", "app", "sw.js", "manifest.webmanifest", "healthz", "internal", "favicon.ico", "robots.txt"}
+RESERVED_PATHS = {"api", "static", "brand", "app", "sw.js", "manifest.webmanifest", "healthz", "internal", "favicon.ico", "robots.txt"}
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 DEFAULTS = {
     "site_title": "WireGuard Cloud",
@@ -60,7 +61,7 @@ def config(c: sqlite3.Connection) -> dict:
     return {
         "enabled": get_setting(c, "site_enabled") == "1",
         "domains": (get_setting(c, "site_domains") or "").split(),
-        "title": get_setting(c, "site_title") or DEFAULTS["site_title"],
+        "title": get_setting(c, "site_title") or brand.name(c),
         "headline": get_setting(c, "site_headline") or DEFAULTS["site_headline"],
         "subtitle": get_setting(c, "site_subtitle") or DEFAULTS["site_subtitle"],
         "email": get_setting(c, "site_email") or "",
@@ -70,18 +71,18 @@ def config(c: sqlite3.Connection) -> dict:
 
 
 # --------------------------------------------------------------------------- HTML
-def render_404(title: str, home: str = "/") -> str:
+def render_404(title: str, logo: str = "/brand/logo", home: str = "/") -> str:
     """Página «no encontrada» para rutas que no existen (las de /api siguen en JSON)."""
     return f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex"><meta name="theme-color" content="#0b0d14">
 <title>Página no encontrada · {esc(title)}</title>
-<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="{esc(logo.replace('/logo', '/favicon.png'))}" sizes="any">
 <link rel="stylesheet" href="/static/site.css">
 </head><body class="nf">
 <main class="nf-box">
-  <img src="/static/favicon.svg" alt="" width="64" height="64">
+  <img src="{esc(logo)}" alt="" width="64" height="64">
   <p class="nf-code">404</p>
   <h1>Esta página no existe</h1>
   <p class="muted">Puede que el enlace esté mal escrito o que la página se haya movido.</p>
@@ -194,14 +195,14 @@ def render(c: sqlite3.Connection, https_enabled: bool) -> str:
 <meta property="og:title" content="{esc(title)}">
 <meta property="og:description" content="{esc(cfg["subtitle"])}">
 <meta property="og:type" content="website">
-<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png?v=2">
+<link rel="icon" href="{brand.url(c, 'favicon.png')}" sizes="any">
+<link rel="apple-touch-icon" href="{brand.url(c, 'apple-touch-icon.png')}">
 <link rel="stylesheet" href="/static/site.css">
 </head>
 <body>
 <header class="top">
   <div class="wrap row">
-    <a class="logo" href="/"><img class="mark" src="/static/favicon.svg" alt="">{esc(title)}</a>
+    <a class="logo" href="/"><img class="mark" src="{brand.url(c)}" alt="">{esc(title)}</a>
     <nav>
       <a href="#funciones" class="hide-sm">Funciones</a>
       {'<a href="#planes" class="hide-sm">Planes</a>' if plans else ""}

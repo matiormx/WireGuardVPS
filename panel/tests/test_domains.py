@@ -88,7 +88,8 @@ def test_tenant_domains(admin, env):
 
     # Marca y manifest según el dominio
     host = {"Host": "vpn.acme.ok.test"}
-    assert admin.get("/api/branding", headers=host).json() == {"title": "Acme", "tenant": True}
+    br = admin.get("/api/branding", headers=host).json()
+    assert br["title"] == "Acme" and br["tenant"] is True and br["logo"].startswith("/brand/logo?v=")
     assert admin.get("/api/branding").json()["tenant"] is False
     assert admin.get("/manifest.webmanifest", headers=host).json()["name"] == "Acme"
 

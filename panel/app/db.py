@@ -245,6 +245,11 @@ CREATE TABLE IF NOT EXISTS dns_top (
     count     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant_id, day, domain)
 );
+CREATE TABLE IF NOT EXISTS brand_files (
+    name       TEXT PRIMARY KEY,
+    data       BLOB NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sys_minute (
     ts    INTEGER PRIMARY KEY,
     cpu   REAL, mem REAL, swap REAL, disk REAL, load1 REAL, rx REAL, tx REAL

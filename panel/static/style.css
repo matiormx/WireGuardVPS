@@ -665,3 +665,11 @@ button.rank:hover .name { color: var(--accent); }
 @media (max-width: 900px) { .sys-charts { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .sys-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .input-prefix { display: flex; align-items: center; padding: 0 2px 0 4px; color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+.icon-previews { display: flex; gap: 22px; flex-wrap: wrap; align-items: flex-end; padding: 16px; border-radius: var(--radius-sm); background: var(--surface-2); }
+.icon-previews figure { margin: 0; display: grid; justify-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.icon-previews img { display: block; background: repeating-conic-gradient(rgba(127, 127, 127, .12) 0 25%, transparent 0 50%) 0 0 / 12px 12px; }
+.pv-any { width: 72px; height: 72px; border-radius: 12px; }
+.pv-ios { width: 64px; height: 64px; border-radius: 15px; }
+.pv-android { width: 64px; height: 64px; border-radius: 50%; }
+.pv-fav { width: 24px; height: 24px; border-radius: 4px; margin-bottom: 20px; }
+.color-input { width: 44px; height: 34px; padding: 2px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); cursor: pointer; }
