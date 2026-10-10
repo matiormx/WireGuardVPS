@@ -368,6 +368,16 @@ function backButton(extra = "") {
     icon("back"), h("span", { text: "Atrás" })) : null;
 }
 
+/* Campos de IP (teclado numérico decimal): en iOS/Android con idioma español la
+   tecla decimal escribe «,»; en una IP siempre es «.». */
+document.addEventListener("input", (e) => {
+  const el = e.target;
+  if (!(el instanceof HTMLInputElement) || el.inputMode !== "decimal" || !el.value.includes(",")) return;
+  const pos = el.selectionStart;
+  el.value = el.value.replace(/,/g, ".");
+  try { el.setSelectionRange(pos, pos); } catch { /* algunos tipos no admiten selección */ }
+}, true);
+
 window.addEventListener("hashchange", () => {
   try { markNav(); } catch { /* ignorado */ }
   if (IOS_NAV) {
@@ -443,7 +453,7 @@ async function render() {
 
 /* ------------------------------------------------------------------ shell */
 function brand() {
-  return h("div", { class: "brand" }, h("div", { class: "logo" }, icon("logo")), h("span", { text: state.brand.title }));
+  return h("div", { class: "brand" }, h("img", { class: "logo", src: "/static/favicon.svg", alt: "" }), h("span", { text: state.brand.title }));
 }
 
 function shell(active) {
@@ -1069,6 +1079,7 @@ function siteCard() {
   });
   const draw = () => {
     const ip = cfg.server_ips[0] || "IP del servidor";
+    const pathInput = input({ value: cfg.path, placeholder: "dashboard", class: "input mono", maxlength: "31", autocapitalize: "off", spellcheck: "false" });
     const domInput = input({ value: cfg.domains.join(", "), placeholder: "midominio.com, www.midominio.com", class: "input mono", autocapitalize: "off", spellcheck: "false" });
     fill(card,
       h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Página pública" }),
@@ -1084,6 +1095,10 @@ function siteCard() {
           h("button", { class: "btn", onClick: editTexts }, icon("edit"), "Textos"),
           cfg.domains.length ? h("button", { class: "btn", onClick: (e) => { e.currentTarget.disabled = true; check(); } }, icon("refresh"), "Comprobar") : null),
         cfg.enabled ? domainStatusBlock(status) : null,
+        field("Dirección del panel", h("div", { class: "input-group" },
+          h("span", { class: "input-prefix mono", text: `${cfg.domains[0] || "midominio.com"}/` }), pathInput,
+          h("button", { class: "btn", onClick: () => save({ path: pathInput.value }, "Dirección guardada") }, "Guardar")),
+          "Donde tus clientes inician sesión desde la página. Minúsculas, números y guiones."),
         cfg.has_plans ? null : h("p", { class: "help" }, "Aún no tienes planes visibles: créalos en ", h("a", { href: "#/billing", text: "Facturación" }),
           " para que aparezcan con su precio."),
         cfg.has_plans && !cfg.signup ? h("p", { class: "help" }, "Para que los visitantes puedan contratar desde la página, activa el «Registro público» en ",
@@ -1092,7 +1107,7 @@ function siteCard() {
           h("li", null, "En tu proveedor de dominios crea un registro ", h("b", { text: "A" }), " de cada dominio (p. ej. ", h("code", { text: cfg.domains[0] || "midominio.com" }),
             " y www) hacia ", h("code", { text: ip }), "."),
           h("li", { text: "Escríbelos arriba, guarda y activa «Publicar la página». El certificado HTTPS se emite solo." }),
-          h("li", null, "Tus clientes entran desde el botón «Entrar» (el panel queda en ", h("code", { text: `${cfg.domains[0] || "midominio.com"}/app` }), ")."))));
+          h("li", null, "Tus clientes entran desde el botón «Entrar» (el panel queda en ", h("code", { text: `${cfg.domains[0] || "midominio.com"}/${cfg.path}` }), ")."))));
   };
   api("GET", "/api/admin/site").then((d) => { cfg = d; draw(); if (cfg.enabled && cfg.domains.length) check(); })
     .catch((e) => fill(card, h("p", { class: "note", text: e.message })));

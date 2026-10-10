@@ -51,13 +51,15 @@ def test_public_site(admin):
 
     html = page(admin, "mivpn.com").text
     assert "<h1>Tu red &amp; más</h1>" in html and "Mi &lt;VPN&gt;" in html and "<VPN>" not in html
-    assert 'href="/app"' in html and "hola@mivpn.com" in html and "NIF B12345678" in html
+    assert 'href="/dashboard"' in html and "hola@mivpn.com" in html and "NIF B12345678" in html
     assert 'id="planes"' not in html                                         # aún sin planes
-    assert "id=\"app\"" in page(admin, "mivpn.com", "/app").text             # el panel en /app
+    assert "id=\"app\"" in page(admin, "mivpn.com", "/dashboard").text       # el panel en /dashboard
+    r = admin.get("/app", headers={"Host": "mivpn.com"}, follow_redirects=False)   # la ruta antigua redirige
+    assert r.status_code == 301 and r.headers["location"] == "/dashboard"
     assert "id=\"app\"" in page(admin, "vpn.ejemplo.com").text               # el dominio del panel no cambia
     assert admin.get("/api/branding", headers={"Host": "mivpn.com"}).json()["title"] == "Mi <VPN>"
     man = admin.get("/manifest.webmanifest", headers={"Host": "www.mivpn.com"}).json()
-    assert man["start_url"] == "/app?source=pwa" and man["name"] == "Mi <VPN>"
+    assert man["start_url"] == "/dashboard?source=pwa" and man["name"] == "Mi <VPN>"
 
     # Con planes y registro abierto
     with admin.app.state.db.conn() as c:
@@ -74,6 +76,26 @@ def test_public_site(admin):
     with admin.app.state.db.conn() as c:
         c.execute("INSERT OR REPLACE INTO settings VALUES ('billing_signup', '1'), ('stripe_secret_key', 'sk_test_x')")
     html = page(admin, "mivpn.com").text
-    assert 'href="/app#/signup?plan=1"' in html and "Crear cuenta" in html
+    assert 'href="/dashboard#/signup?plan=1"' in html and "Crear cuenta" in html
     admin.put("/api/admin/site", json={"enabled": False}, headers=H)
     assert "id=\"app\"" in page(admin, "mivpn.com").text
+
+
+def test_custom_panel_path_and_404(admin):
+    admin.put("/api/admin/site", json={"domains": ["mivpn.com"], "enabled": True}, headers=H)
+    for bad in ["api", "static", "a", "Mal Ruta", "x/y", "-guion", "app"]:
+        assert admin.put("/api/admin/site", json={"path": bad}, headers=H).status_code == 422, bad
+    st = admin.put("/api/admin/site", json={"path": "/Mi-Cuenta/"}, headers=H).json()
+    assert st["path"] == "mi-cuenta"
+    assert 'href="/mi-cuenta"' in page(admin, "mivpn.com").text
+    assert "id=\"app\"" in page(admin, "mivpn.com", "/mi-cuenta").text
+    assert admin.get("/app", headers={"Host": "mivpn.com"}, follow_redirects=False).headers["location"] == "/mi-cuenta"
+    assert admin.get("/manifest.webmanifest", headers={"Host": "mivpn.com"}).json()["start_url"] == "/mi-cuenta?source=pwa"
+    # 404: HTML en el navegador, JSON en la API
+    r = admin.get("/dashboard", headers={"Host": "mivpn.com", "Accept": "text/html"})
+    assert r.status_code == 404 and "Esta página no existe" in r.text and r.headers["content-type"].startswith("text/html")
+    r = admin.get("/no/existe", headers={"Accept": "text/html,application/xhtml+xml"})
+    assert r.status_code == 404 and "Volver al inicio" in r.text
+    r = admin.get("/api/no-existe", headers={"Accept": "text/html"})
+    assert r.status_code == 404 and r.json() == {"detail": "Not Found"}
+    assert admin.get("/static/nada.js").status_code == 404

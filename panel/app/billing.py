@@ -376,10 +376,10 @@ def register(app: FastAPI, d) -> None:
 
     def return_base(c: sqlite3.Connection, request: Request | None) -> str:
         """A dónde vuelve el cliente tras pagar: al mismo dominio desde el que vino (la página
-        pública sirve el panel en /app) o, si no, al dominio del panel."""
+        pública sirve el panel en su ruta, /dashboard por defecto) o, si no, al dominio del panel."""
         host = d.host_of(request.headers.get("host")) if request is not None else None
         if host and host in d.doms.site_domains(c, only_enabled=True):
-            return f"https://{host}/app"
+            return f"https://{host}/{get_setting(c, 'site_path') or 'dashboard'}"   # site.panel_path (sin importarlo: ciclo)
         if host and d.doms.tenant_for_host(c, host) is not None:
             return f"https://{host}/"
         return public_base(c) + "/"

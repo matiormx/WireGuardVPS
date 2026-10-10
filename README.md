@@ -163,7 +163,7 @@ Opcional: IVA automático con Stripe Tax. Recibes avisos de nuevas suscripciones
 
 Una web de presentación de tu servicio, con tus planes y botones para entrar o crear cuenta, en un dominio propio distinto del de la VPN (p. ej. `midominio.com` mientras el panel está en `vpn.midominio.com`). En **Ajustes › Página pública**: escribe el dominio (o varios, como `midominio.com, www.midominio.com`), crea sus registros **A** hacia la IP del VPS y activa «Publicar la página». Se sirve en el puerto 443 con certificado automático. Los textos (nombre, titular, descripción, email de contacto y aviso legal) se editan desde ahí; los planes salen de **Facturación**.
 
-En ese dominio, el panel queda en `/app`: «Entrar» lleva al login y «Contratar» al registro con el plan elegido (si el registro público está activo; si no, a tu email). Tras pagar, el cliente vuelve al mismo dominio.
+En ese dominio, el panel queda en `/dashboard` (puedes cambiarla en **Ajustes › Página pública › Dirección del panel**, p. ej. `/mi-cuenta`; los enlaces antiguos a `/app` redirigen): «Entrar» lleva al login y «Contratar» al registro con el plan elegido (si el registro público está activo; si no, a tu email). Tras pagar, el cliente vuelve al mismo dominio.
 
 ## Endpoint y copias de seguridad
 

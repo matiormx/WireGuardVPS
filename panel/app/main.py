@@ -22,7 +22,9 @@ from typing import Annotated
 import segno
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field, field_validator
 
 import bcrypt
@@ -1535,14 +1537,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def index(request: Request, c: Conn):
-        # En el dominio de la página pública, la presentación; el panel queda en /app.
+        # En el dominio de la página pública, la presentación; el panel queda en /<ruta> (site.panel_path).
         if is_site(c, request):
             return HTMLResponse(site.render(c, proxy.enabled), headers={"Cache-Control": "no-cache"})
         return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/app", include_in_schema=False)
-    def panel_app():
-        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+    def panel_app(c: Conn):
+        # Ruta antigua del panel (versiones < 2.13 y apps ya instaladas): a la configurada.
+        return RedirectResponse(f"/{site.panel_path(c)}", status_code=301)
 
     # PWA: el service worker y el manifest se sirven desde la raíz para que su
     # ámbito (scope) cubra toda la aplicación.
@@ -1559,7 +1562,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             data["name"] = brand["title"]
             data["short_name"] = brand["title"][:12]
         if is_site(c, request):
-            data["start_url"] = "/app?source=pwa"   # la app instalada abre el panel, no la presentación
+            data["start_url"] = f"/{site.panel_path(c)}?source=pwa"   # la app instalada abre el panel, no la presentación
         return JSONResponse(data, media_type="application/manifest+json", headers={"Cache-Control": "no-cache"})
+
+    # El panel en la ruta configurada de la página pública (/dashboard por defecto).
+    # Va la última: sólo atiende rutas de un nivel que nadie más ha reclamado.
+    @app.get("/{slug}", include_in_schema=False)
+    def panel_path(slug: str, c: Conn):
+        if slug != site.panel_path(c):
+            raise HTTPException(404)
+        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException):
+        # Una ruta inexistente abierta en el navegador: página 404 en lugar de JSON.
+        if (exc.status_code == 404 and request.method in ("GET", "HEAD") and not request.url.path.startswith("/api/")
+                and "text/html" in request.headers.get("accept", "")):
+            with database.conn() as c:
+                title = branding_for(c, request)["title"]
+            return HTMLResponse(site.render_404(title), status_code=404)
+        return await http_exception_handler(request, exc)
 
     return app

@@ -85,11 +85,7 @@ h3 { font-size: 14px; font-weight: 600; color: var(--muted); text-transform: upp
 
 /* ---------- marca ---------- */
 .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; }
-.brand .logo {
-  width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-}
-.brand .logo svg { width: 20px; height: 20px; stroke: #fff; }
+.brand .logo { width: 32px; height: 32px; flex: none; filter: drop-shadow(0 4px 10px rgba(124, 92, 255, .35)); }
 
 /* ---------- layout ---------- */
 .layout { display: grid; grid-template-columns: 248px 1fr; min-height: 100vh; }
@@ -668,3 +664,4 @@ button.rank:hover .name { color: var(--accent); }
 .sys-charts .span-all { grid-column: 1 / -1; }
 @media (max-width: 900px) { .sys-charts { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .sys-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.input-prefix { display: flex; align-items: center; padding: 0 2px 0 4px; color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }

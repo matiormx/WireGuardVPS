@@ -43,8 +43,7 @@ h1, h2, h3 { line-height: 1.15; margin: 0; letter-spacing: -.02em; }
 }
 .top .row { height: 66px; }
 .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
-.mark { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
-.mark svg { width: 18px; height: 18px; }
+.mark { width: 34px; height: 34px; flex: none; filter: drop-shadow(0 4px 10px rgba(124, 92, 255, .35)); }
 .top nav { display: flex; align-items: center; gap: 6px; }
 .top nav > a:not(.btn) { padding: 8px 12px; color: var(--muted); font-weight: 500; border-radius: 9px; }
 .top nav > a:not(.btn):hover { color: var(--text); }
@@ -112,4 +111,12 @@ footer a:hover { color: var(--text); }
   .ctas .btn { flex: 1 1 100%; }
 }
 @media (max-width: 400px) { .hide-xs { display: none; } }
+/* 404 */
+body.nf { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 24px; text-align: center;
+  background: radial-gradient(520px 320px at 50% 30%, rgba(124, 92, 255, .22), transparent 70%), var(--bg); }
+.nf-box { max-width: 420px; display: grid; justify-items: center; gap: 6px; }
+.nf-code { margin: 14px 0 0; font-size: 64px; font-weight: 800; letter-spacing: -.04em; line-height: 1;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.nf-box h1 { font-size: 24px; }
+.nf-box .muted { margin: 4px 0 20px; }
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .btn { transition: none; } }

@@ -4,7 +4,8 @@ Se sirve en el puerto 443 (vía Caddy, con certificado automático) en los
 dominios que el admin configure en Ajustes › Página pública, distintos del
 dominio del panel o de WireGuard. En esos dominios:
   /        la página de presentación (HTML generado aquí, sin JavaScript)
-  /app     el panel (login, registro y la app), con la misma sesión
+  /<ruta>  el panel (login, registro y la app), con la misma sesión; la ruta
+           es configurable (por defecto /dashboard; /app redirige a ella)
 
 Todo el texto configurable se escapa al generar el HTML.
 
@@ -23,6 +24,9 @@ from .billing import fmt_money
 from .db import get_setting, set_setting
 
 MAX_DOMAINS = 3
+DEFAULT_PATH = "dashboard"
+PATH_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,30}$")
+RESERVED_PATHS = {"api", "static", "app", "sw.js", "manifest.webmanifest", "healthz", "internal", "favicon.ico", "robots.txt"}
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 DEFAULTS = {
     "site_title": "WireGuard Cloud",
@@ -44,6 +48,12 @@ class SiteIn(BaseModel):
     subtitle: str | None = Field(default=None, max_length=400)
     email: str | None = Field(default=None, max_length=254)
     legal: str | None = Field(default=None, max_length=4000)
+    path: str | None = Field(default=None, max_length=40)
+
+
+def panel_path(c: sqlite3.Connection) -> str:
+    """Ruta del panel en los dominios de la página pública, sin barras (p. ej. «dashboard»)."""
+    return get_setting(c, "site_path") or DEFAULT_PATH
 
 
 def config(c: sqlite3.Connection) -> dict:
@@ -55,10 +65,31 @@ def config(c: sqlite3.Connection) -> dict:
         "subtitle": get_setting(c, "site_subtitle") or DEFAULTS["site_subtitle"],
         "email": get_setting(c, "site_email") or "",
         "legal": get_setting(c, "site_legal") or "",
+        "path": panel_path(c),
     }
 
 
 # --------------------------------------------------------------------------- HTML
+def render_404(title: str, home: str = "/") -> str:
+    """Página «no encontrada» para rutas que no existen (las de /api siguen en JSON)."""
+    return f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex"><meta name="theme-color" content="#0b0d14">
+<title>Página no encontrada · {esc(title)}</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/site.css">
+</head><body class="nf">
+<main class="nf-box">
+  <img src="/static/favicon.svg" alt="" width="64" height="64">
+  <p class="nf-code">404</p>
+  <h1>Esta página no existe</h1>
+  <p class="muted">Puede que el enlace esté mal escrito o que la página se haya movido.</p>
+  <a class="btn primary lg" href="{esc(home)}">Volver al inicio</a>
+</main>
+</body></html>"""
+
+
 ICONS = {
     "lock": '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
     "shield": '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/>',
@@ -106,6 +137,7 @@ def render(c: sqlite3.Connection, https_enabled: bool) -> str:
     exits = c.execute("SELECT name, country FROM exits WHERE enabled = 1 ORDER BY name").fetchall()
     main_country = get_setting(c, "main_exit_country") or ""
     title, email = cfg["title"], cfg["email"]
+    app = "/" + cfg["path"]
 
     features = [
         ("lock", "Red privada cifrada", "Tus dispositivos se ven entre sí como en la misma oficina, cifrados con WireGuard, el protocolo VPN más rápido y moderno."),
@@ -127,9 +159,9 @@ def render(c: sqlite3.Connection, https_enabled: bool) -> str:
 
     def plan_card(p: sqlite3.Row, featured: bool) -> str:
         period = "año" if p["interval"] == "year" else "mes"
-        cta = (f'<a class="btn {"primary" if featured else ""} block" href="/app#/signup?plan={int(p["id"])}">Contratar</a>' if signup
+        cta = (f'<a class="btn {"primary" if featured else ""} block" href="{app}#/signup?plan={int(p["id"])}">Contratar</a>' if signup
                else f'<a class="btn {"primary" if featured else ""} block" href="mailto:{esc(email)}?subject={esc(urllib.parse.quote("Plan " + p["name"]))}">Contactar</a>'
-               if email else '<a class="btn block" href="/app">Entrar</a>')
+               if email else f'<a class="btn block" href="{app}">Entrar</a>')
         items = "".join(f"<li>{svg('check')}{esc(f)}</li>" for f in plan_features(p))
         return (f'<div class="plan{" featured" if featured else ""}">'
                 + ('<span class="tag">Más elegido</span>' if featured else "")
@@ -142,7 +174,7 @@ def render(c: sqlite3.Connection, https_enabled: bool) -> str:
     plans_html = "".join(plan_card(p, i == featured_idx) for i, p in enumerate(plans))
     feat_html = "".join(f'<div class="feature"><div class="ficon">{svg(i)}</div><h3>{esc(t)}</h3><p>{esc(d)}</p></div>'
                         for i, t, d in features)
-    signup_btn = '<a class="btn primary" href="/app#/signup">Crear cuenta</a>' if signup else ""
+    signup_btn = f'<a class="btn primary" href="{app}#/signup">Crear cuenta</a>' if signup else ""
     hero_cta = ('<a class="btn primary lg" href="#planes">Ver planes</a>' if plans else
                 (f'<a class="btn primary lg" href="mailto:{esc(email)}">Contactar</a>' if email else ""))
     legal = "".join(f"<p>{esc(line)}</p>" for line in cfg["legal"].splitlines() if line.strip())
@@ -163,17 +195,17 @@ def render(c: sqlite3.Connection, https_enabled: bool) -> str:
 <meta property="og:description" content="{esc(cfg["subtitle"])}">
 <meta property="og:type" content="website">
 <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png?v=2">
 <link rel="stylesheet" href="/static/site.css">
 </head>
 <body>
 <header class="top">
   <div class="wrap row">
-    <a class="logo" href="/"><span class="mark">{svg("lock")}</span>{esc(title)}</a>
+    <a class="logo" href="/"><img class="mark" src="/static/favicon.svg" alt="">{esc(title)}</a>
     <nav>
       <a href="#funciones" class="hide-sm">Funciones</a>
       {'<a href="#planes" class="hide-sm">Planes</a>' if plans else ""}
-      <a class="btn ghost" href="/app">Entrar</a>
+      <a class="btn ghost" href="{app}">Entrar</a>
       {signup_btn.replace('class="btn primary"', 'class="btn primary hide-xs"')}
     </nav>
   </div>
@@ -184,7 +216,7 @@ def render(c: sqlite3.Connection, https_enabled: bool) -> str:
       <p class="eyebrow">VPN WireGuard · Red privada{esc(location)}</p>
       <h1>{esc(cfg["headline"])}</h1>
       <p class="lead">{esc(cfg["subtitle"])}</p>
-      <div class="ctas">{hero_cta}<a class="btn lg" href="/app">Entrar a mi cuenta</a></div>
+      <div class="ctas">{hero_cta}<a class="btn lg" href="{app}">Entrar a mi cuenta</a></div>
     </div>
   </section>
   <section id="funciones" class="section">
@@ -215,7 +247,7 @@ def render(c: sqlite3.Connection, https_enabled: bool) -> str:
     <div class="wrap center">
       <h2>¿Ya tienes cuenta?</h2>
       <p class="muted">Entra para gestionar tus dispositivos, tu red y tu plan.</p>
-      <div class="ctas center"><a class="btn primary lg" href="/app">Entrar</a>{signup_btn.replace('btn primary', 'btn lg')}</div>
+      <div class="ctas center"><a class="btn primary lg" href="{app}">Entrar</a>{signup_btn.replace('btn primary', 'btn lg')}</div>
     </div>
   </section>
 </main>
@@ -269,6 +301,11 @@ def register(app: FastAPI, d) -> None:
             value = getattr(body, key)
             if value is not None:
                 set_setting(c, f"site_{key}", value.strip())
+        if body.path is not None:
+            path = body.path.strip().strip("/").lower()
+            if not PATH_RE.match(path) or path in RESERVED_PATHS:
+                raise HTTPException(422, "Ruta no válida: usa minúsculas, números y guiones (p. ej. dashboard, mi-cuenta)")
+            set_setting(c, "site_path", path)
         if body.enabled is not None:
             if body.enabled and not (get_setting(c, "site_domains") or "").split():
                 raise HTTPException(422, "Indica el dominio de la página")

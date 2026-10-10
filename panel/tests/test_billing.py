@@ -349,4 +349,4 @@ def test_checkout_from_public_site_returns_there(admin):
                                        "plan_id": plan["id"]}, headers={**H, "Host": "mivpn.com"})
     assert r.status_code == 200
     cs = [f for m, p, f in FakeStripe.calls if p == "checkout/sessions"][-1]
-    assert cs["success_url"] == "https://mivpn.com/app#/signup/ok" and cs["cancel_url"] == "https://mivpn.com/app#/signup"
+    assert cs["success_url"] == "https://mivpn.com/dashboard#/signup/ok" and cs["cancel_url"] == "https://mivpn.com/dashboard#/signup"
