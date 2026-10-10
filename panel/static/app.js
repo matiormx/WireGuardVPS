@@ -458,6 +458,7 @@ function brand() {
 }
 
 function shell(active) {
+  closeMenuState();   // una pantalla nueva siempre empieza con el menú cerrado (sin velo)
   const isAdmin = state.me.role === "admin";
   const links = state.me.suspended
     ? [["plan", "#/plan", "card", "Plan y pago"], ["account", "#/account", "key", "Cuenta"]]
@@ -476,8 +477,8 @@ function shell(active) {
   const sidebar = h("aside", { class: "sidebar" },
     brand(),
     h("nav", { class: "nav" }, links.map(([key, href, ic, label]) =>
-      h("a", { href, class: key === active ? "active" : null, onClick: () => sidebar.classList.remove("open") }, icon(ic), label)),
-      isStandalone() ? null : h("a", { href: "#", class: "install-link", onClick: (e) => { e.preventDefault(); sidebar.classList.remove("open"); installApp(); } },
+      h("a", { href, class: key === active ? "active" : null, onClick: () => setMenu(false) }, icon(ic), label)),
+      isStandalone() ? null : h("a", { href: "#", class: "install-link", onClick: (e) => { e.preventDefault(); setMenu(false); installApp(); } },
         icon("download"), "Instalar app")),
     h("div", { class: "spacer" }),
     h("div", { class: "userbox" },
@@ -502,9 +503,12 @@ function shell(active) {
 
 /* Menú lateral en móvil: botón, toque fuera, o deslizar el dedo desde el borde izquierdo
    (y hacia la izquierda para cerrarlo). */
+function closeMenuState() {
+  document.body.classList.remove("menu-open", "menu-dragging");
+}
 function setMenu(open) {
   const sb = document.querySelector(".sidebar");
-  if (!sb) return;
+  if (!sb) { closeMenuState(); return; }
   sb.style.transform = "";
   sb.classList.toggle("open", open);
   document.body.classList.toggle("menu-open", open);
@@ -541,6 +545,15 @@ function setMenu(open) {
     document.querySelector(".sidebar").style.transform = `translateX(${Math.max(-w, offset)}px)`;
     document.body.classList.add("menu-dragging");
   }, { passive: true });
+  // iOS cancela el toque si el sistema se queda el gesto (volver, centro de control…): sin esto
+  // el velo del menú se quedaba puesto.
+  document.addEventListener("touchcancel", () => {
+    const sb = document.querySelector(".sidebar");
+    if (start && dragging && sb) { sb.style.transition = ""; setMenu(start.open); }
+    document.body.classList.remove("menu-dragging");
+    start = null;
+    dragging = false;
+  });
   document.addEventListener("touchend", (e) => {
     if (!start) return;
     const sb = document.querySelector(".sidebar");
@@ -576,6 +589,7 @@ async function logout() {
 /* ------------------------------------------------------------------ login */
 function loginView() {
   $app.className = "";
+  closeMenuState();
   const signupLink = h("p", { class: "note", style: { textAlign: "center", margin: "16px 0 0" } });
   const err = h("div", { class: "help", style: { color: "var(--danger)", minHeight: "18px" } });
   const btn = h("button", { class: "btn primary block", type: "submit" }, "Entrar");
