@@ -1447,9 +1447,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return {"title": site.config(c)["title"], "tenant": False, "site": True}
         return {"title": brand.name(c), "tenant": False}
 
+    def install_url(c: sqlite3.Connection, request: Request) -> str | None:
+        """La app (PWA) se instala desde el dominio del panel (Ajustes › Dominio del panel): desde la
+        IP, la página pública u otro nombre, «Instalar» lleva allí. Los dominios propios de los
+        clientes instalan su propia app."""
+        main_host = doms.main_domain(c)
+        host = domains.host_of(request.headers.get("host"))
+        if not main_host or host == main_host or doms.tenant_for_host(c, host) is not None:
+            return None
+        return f"https://{main_host}/?install=1"
+
     @app.get("/api/branding")
     def branding(request: Request, c: Conn):
-        return {**branding_for(c, request), "logo": brand.url(c), "v": brand.version(c)}
+        return {**branding_for(c, request), "logo": brand.url(c), "v": brand.version(c), "install_url": install_url(c, request)}
 
     @app.get("/api/admin/settings")
     def get_settings(_: Admin, c: Conn):
@@ -1567,6 +1577,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         short = b["title"][:12] if b["tenant"] or b.get("site") else brand.short_name(c)
         page = (index_template.replace("__TITLE__", html.escape(b["title"])).replace("__SHORT__", html.escape(short))
                 .replace("__V__", brand.version(c)))
+        if install_url(c, request):
+            # Aquí no se ofrece instalar: la app es la del dominio del panel.
+            page = page.replace('<link rel="manifest" href="/manifest.webmanifest">', "")
         return HTMLResponse(page, headers={"Cache-Control": "no-cache"})
 
     @app.get("/", include_in_schema=False)

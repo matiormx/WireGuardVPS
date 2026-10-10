@@ -91,7 +91,7 @@ Todo se configura **desde el panel**, sin entrar al servidor:
 
 Por dentro, Caddy funciona en modo *on-demand TLS*: la primera vez que se visita un dominio, pregunta al panel si está dado de alta y si su DNS apunta a este servidor; solo entonces pide el certificado. Así nadie puede generar certificados para dominios ajenos y no hay que reiniciar nada al añadir o quitar dominios. Se usan los puertos 80 y 443; para no instalar Caddy, usa `ENABLE_HTTPS=false`.
 
-La app se instala desde el botón **Instalar app** (menú o pantalla de login):
+La app se instala desde el botón **Instalar app** (menú o pantalla de login). Siempre se instala desde el **dominio del panel** que configuraste: si entras por la IP, por la página pública u otro nombre, el botón te lleva a ese dominio y allí la instalas (los dominios propios de clientes instalan su propia app con su nombre):
 
 - **iPhone/iPad:** Safari → Compartir → *Añadir a pantalla de inicio* (funciona también sin HTTPS).
 - **Android/Chrome/Edge:** requieren HTTPS, es decir, un dominio configurado.

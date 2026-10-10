@@ -3854,6 +3854,9 @@ window.addEventListener("appinstalled", () => {
 });
 
 async function installApp() {
+  // La app se instala desde el dominio del panel (Ajustes › Dominio del panel).
+  const target = state.brand.install_url;
+  if (target && new URL(target).origin !== location.origin) { location.href = target; return; }
   if (state.installPrompt) {
     state.installPrompt.prompt();
     await state.installPrompt.userChoice.catch(() => null);
@@ -3897,4 +3900,17 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
   document.title = state.brand.title;
   state.me = me && me.ok ? await me.json() : null;
   render();
+  // Llegada desde «Instalar app» en otra dirección: se ofrece aquí (el navegador exige un toque).
+  const qs = new URLSearchParams(location.search);
+  if (qs.get("install") === "1" && !isStandalone()) {
+    qs.delete("install");
+    history.replaceState(history.state, "", location.pathname + (qs.toString() ? `?${qs}` : "") + location.hash);
+    setTimeout(() => {
+      if (isIOS()) return installApp();
+      const m = modal({ title: `Instalar ${state.brand.title}`,
+        body: h("p", { style: { margin: 0 }, text: "Instala la app desde esta dirección para tenerla en tu pantalla de inicio." }),
+        actions: [h("button", { class: "btn", onClick: () => m.close() }, "Ahora no"),
+          h("button", { class: "btn primary", onClick: () => { m.close(); installApp(); } }, icon("download"), "Instalar")] });
+    }, 600);
+  }
 })();

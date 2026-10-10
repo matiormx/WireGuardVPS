@@ -99,3 +99,20 @@ def test_custom_panel_path_and_404(admin):
     r = admin.get("/api/no-existe", headers={"Accept": "text/html"})
     assert r.status_code == 404 and r.json() == {"detail": "Not Found"}
     assert admin.get("/static/nada.js").status_code == 404
+
+
+def test_install_from_panel_domain(admin):
+    # Sin dominio del panel: se instala donde esté (p. ej. por IP)
+    assert admin.get("/api/branding").json()["install_url"] is None
+    assert 'rel="manifest"' in admin.get("/").text
+    admin.put("/api/admin/settings", json={"main_domain": "vpn.ejemplo.com"}, headers=H)
+    admin.put("/api/admin/site", json={"domains": ["mivpn.com"], "enabled": True}, headers=H)
+    t = admin.post("/api/admin/tenants", json={"name": "Acme", "username": "acme", "password": "Password1"}, headers=H).json()
+    admin.put(f"/api/tenant-domain?tenant_id={t['id']}", json={"domain": "vpn.acme.com"}, headers=H)
+    for host in ("mivpn.com", "203.0.113.10:5000", "otro.ejemplo.com"):
+        assert admin.get("/api/branding", headers={"Host": host}).json()["install_url"] == "https://vpn.ejemplo.com/?install=1", host
+    assert 'rel="manifest"' not in page(admin, "mivpn.com", "/dashboard").text
+    assert 'rel="manifest"' not in page(admin, "203.0.113.10:5000").text
+    for host in ("vpn.ejemplo.com", "vpn.acme.com"):                 # el panel y los dominios de clientes
+        assert admin.get("/api/branding", headers={"Host": host}).json()["install_url"] is None
+        assert 'rel="manifest"' in page(admin, host).text
