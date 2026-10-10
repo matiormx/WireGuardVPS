@@ -245,6 +245,42 @@ CREATE TABLE IF NOT EXISTS dns_top (
     count     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant_id, day, domain)
 );
+CREATE TABLE IF NOT EXISTS account_security (
+    role        TEXT NOT NULL,
+    user_id     INTEGER NOT NULL,
+    email       TEXT,
+    verified_at INTEGER,
+    twofa       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (role, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_account_email ON account_security(email);
+CREATE TABLE IF NOT EXISTS auth_codes (
+    id             INTEGER PRIMARY KEY,
+    kind           TEXT NOT NULL,          -- verify | login | reset
+    role           TEXT NOT NULL,
+    user_id        INTEGER NOT NULL,
+    email          TEXT NOT NULL,
+    secret_hash    TEXT NOT NULL,
+    challenge_hash TEXT,
+    created_at     INTEGER NOT NULL,
+    expires_at     INTEGER NOT NULL,
+    attempts       INTEGER NOT NULL DEFAULT 0,
+    used           INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_auth_codes_secret ON auth_codes(secret_hash);
+CREATE INDEX IF NOT EXISTS idx_auth_codes_challenge ON auth_codes(challenge_hash);
+CREATE TRIGGER IF NOT EXISTS trg_admin_security AFTER DELETE ON admins BEGIN
+    DELETE FROM account_security WHERE role = 'admin' AND user_id = OLD.id;
+    DELETE FROM auth_codes WHERE role = 'admin' AND user_id = OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_tenant_security AFTER DELETE ON tenants BEGIN
+    DELETE FROM account_security WHERE role = 'tenant' AND user_id = OLD.id;
+    DELETE FROM auth_codes WHERE role = 'tenant' AND user_id = OLD.id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_member_security AFTER DELETE ON members BEGIN
+    DELETE FROM account_security WHERE role = 'member' AND user_id = OLD.id;
+    DELETE FROM auth_codes WHERE role = 'member' AND user_id = OLD.id;
+END;
 CREATE TABLE IF NOT EXISTS brand_files (
     name       TEXT PRIMARY KEY,
     data       BLOB NOT NULL,

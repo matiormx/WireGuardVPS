@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import bcrypt
 
-from . import alerts, backup, billing, brand, cfdns, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, sysmon, updates, wg
+from . import account, alerts, backup, billing, brand, cfdns, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, sysmon, updates, wg
 from .config import Settings, load_settings
 from .db import (LABEL_RE, Database, get_setting, make_hostname, name_in_use, set_setting,
                  unique_hostname, username_taken)
@@ -590,6 +590,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             limiter.hit(key)
             raise HTTPException(401, "Usuario o contraseña incorrectos")
         limiter.reset(key)
+        if account.needs_2fa(c, role, row["id"]):
+            return deps.start_2fa(c, role, row)   # sin sesión hasta que llegue el código del email
         return finish_login(request, response, c, role, row)
 
     def finish_login(request: Request, response: Response, c: sqlite3.Connection, role: str, row: sqlite3.Row) -> dict:
@@ -1540,6 +1542,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     alerts.register(app, deps)
     vars(deps).update(set_session=set_session, limiter=limiter, device_for=device_for, render_config=render_config)
     members.register(app, deps)
+    deps.finish_login = finish_login
+    account.register(app, deps)
     bill = billing.Billing(settings, database, apply_wg, notifier.notify_tenant)
     app.state.billing = bill
     vars(deps).update(host_of=domains.host_of, billing=bill, BillingUser=BillingUser, next_net=lambda c: wg.next_free_net_index(c, settings),

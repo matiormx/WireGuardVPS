@@ -337,7 +337,7 @@ function markNav() {
 try { markNav(); } catch { /* sin sessionStorage: «Atrás» usará la pantalla superior */ }
 function parentRoute() {
   const [section, id, sub] = route();
-  if (!section || ["invite", "get", "signup"].includes(section)) return null;
+  if (!section || ["invite", "get", "signup", "reset"].includes(section)) return null;
   if (section === "clients" && id && sub) return `#/clients/${id}`;
   if (section === "clients" && id) return "#/clients";
   if (section === "plan" && id && state.me && state.me.role === "admin") return `#/clients/${id}`;
@@ -407,6 +407,7 @@ async function render() {
   if (pub === "invite" && token) return inviteView(token);
   if (pub === "get" && token) return sharedConfigView(token);
   if (pub === "signup") return signupView(token);
+  if (pub === "reset") return resetView();
   if (state.me) stopConditionalPasskey();
   if (!state.me) return loginView();
   if (state.me.must_change) return forcePasswordView();
@@ -587,7 +588,8 @@ function loginView() {
     btn.disabled = true;
     const fd = new FormData(form);
     try {
-      await api("POST", "/api/auth/login", { username: fd.get("username"), password: fd.get("password") });
+      const r = await api("POST", "/api/auth/login", { username: fd.get("username"), password: fd.get("password") });
+      if (r.twofa) return twoFactorStep(r);
       state.me = await api("GET", "/api/me");
       render();
     } catch (ex) {
@@ -623,6 +625,9 @@ function loginView() {
   fetch("/api/signup").then((r) => r.json()).then((d) => {
     if (d.enabled) fill(signupLink, "¿Aún no tienes cuenta? ", h("a", { href: "#/signup", text: "Crea tu red privada" }));
   }).catch(() => {});
+  fetch("/api/auth/forgot").then((r) => r.json()).then((d) => {
+    if (d.enabled) btn.after(h("p", { class: "forgot-link" }, h("a", { href: "#", text: "¿Has olvidado tu contraseña?", onClick: (e) => { e.preventDefault(); forgotModal(form.querySelector("#username").value); } })));
+  }).catch(() => {});
   setTimeout(() => form.querySelector("input").focus(), 30);
   startConditionalPasskey(err);
 }
@@ -655,6 +660,136 @@ function passwordForm(onDone) {
   return form;
 }
 
+/* Verificación en dos pasos: tras la contraseña, el código enviado por email. */
+function twoFactorStep(r) {
+  const err = h("div", { class: "help", style: { color: "var(--danger)", minHeight: "18px" } });
+  const code = input({ name: "code", required: true, inputmode: "numeric", autocomplete: "one-time-code", maxlength: "6", pattern: "[0-9]*",
+    class: "input mono code-input", placeholder: "000000" });
+  const btn = h("button", { class: "btn primary block", type: "submit" }, "Verificar");
+  const submit = async () => {
+    err.textContent = "";
+    btn.disabled = true;
+    try {
+      await api("POST", "/api/auth/2fa", { challenge: r.challenge, code: code.value });
+      state.me = await api("GET", "/api/me");
+      render();
+    } catch (ex) {
+      err.textContent = ex.message;
+      if (/caducado|vuelve a introducir/.test(ex.message)) setTimeout(loginView, 1800);
+    } finally { btn.disabled = false; }
+  };
+  code.addEventListener("input", () => { code.value = code.value.replace(/\D/g, "").slice(0, 6); if (code.value.length === 6) submit(); });
+  const form = h("form", { onSubmit: (e) => { e.preventDefault(); submit(); } },
+    h("p", { class: "lead", text: `Hemos enviado un código a ${r.email}` }),
+    field("Código de 6 cifras", code), err, btn,
+    h("div", { class: "cell-flex", style: { justifyContent: "space-between", marginTop: "14px" } },
+      h("button", { class: "btn ghost sm", type: "button", onClick: () => loginView() }, "Volver"),
+      h("button", { class: "btn ghost sm", type: "button", onClick: async (e) => {
+        const b = e.currentTarget;
+        b.disabled = true;
+        try { await api("POST", "/api/auth/2fa/resend", { challenge: r.challenge }); toast("Código reenviado"); }
+        catch (ex) { toast(ex.message, "err"); }
+        setTimeout(() => { b.disabled = false; }, 15000);
+      } }, "Reenviar código")));
+  fill($app, h("div", { class: "auth" }, h("div", { class: "auth-card" }, brand(), form)));
+  setTimeout(() => code.focus(), 30);
+}
+
+function forgotModal(prefill) {
+  formModal({
+    title: "Recuperar la contraseña",
+    submitLabel: "Enviar enlace",
+    fields: [
+      h("p", { class: "note full", style: { margin: 0 }, text: "Te enviaremos un enlace al email que verificaste en tu cuenta. Si no añadiste ninguno, pide ayuda a tu proveedor." }),
+      h("div", { class: "full" }, field("Usuario o email", input({ name: "login", required: true, value: prefill || "", autocapitalize: "none", autocomplete: "username" }))),
+    ],
+    onSubmit: async (fd) => {
+      await api("POST", "/api/auth/forgot", { login: fd.get("login") });
+      toast("Si la cuenta tiene un email verificado, te hemos enviado un enlace (revisa también el spam).");
+    },
+  });
+}
+
+function resetView() {
+  const token = hashParam("token");
+  const err = h("div", { class: "help", style: { color: "var(--danger)", minHeight: "18px" } });
+  const btn = h("button", { class: "btn primary block", type: "submit" }, "Guardar contraseña");
+  const form = h("form", { onSubmit: async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    err.textContent = "";
+    if (fd.get("new") !== fd.get("repeat")) { err.textContent = "Las contraseñas no coinciden"; return; }
+    btn.disabled = true;
+    try {
+      const r = await api("POST", "/api/auth/reset", { token, password: fd.get("new") });
+      toast("Contraseña cambiada: ya puedes entrar");
+      go("#/");
+      setTimeout(() => { const u = document.querySelector("#username"); if (u && r.username) u.value = r.username; }, 100);
+    } catch (ex) { err.textContent = ex.message; } finally { btn.disabled = false; }
+  } },
+    h("input", { type: "text", name: "username", autocomplete: "username", hidden: true, tabIndex: -1, "aria-hidden": "true" }),
+    field("Nueva contraseña", input({ name: "new", type: "password", required: true, minlength: "8", autocomplete: "new-password" }), "Mínimo 8 caracteres"),
+    field("Repetir", input({ name: "repeat", type: "password", required: true, minlength: "8", autocomplete: "new-password" })),
+    err, btn,
+    h("div", { style: { textAlign: "center", marginTop: "14px" } }, h("a", { class: "btn ghost sm", href: "#/" }, "Volver al inicio de sesión")));
+  fill($app, h("div", { class: "auth" }, h("div", { class: "auth-card" }, brand(),
+    h("p", { class: "lead", text: token ? "Elige una contraseña nueva" : "Enlace no válido" }), token ? form : null)));
+}
+
+/* Cuenta: email verificado (recuperación) y verificación en dos pasos. */
+function securityCard() {
+  const card = h("div", { class: "card", style: { maxWidth: "720px" } }, spinnerBlock());
+  let st = null;
+  const askPassword = (title, label, run) => formModal({
+    title, submitLabel: label,
+    fields: [h("div", { class: "full" }, field("Tu contraseña", input({ name: "password", type: "password", required: true, autocomplete: "current-password" }), "Por seguridad, confírmala."))],
+    onSubmit: async (fd) => { st = await run(fd.get("password")); draw(); },
+  });
+  const emailModal = () => formModal({
+    title: st.email ? "Cambiar email" : "Añadir email",
+    submitLabel: "Enviar código",
+    fields: [
+      h("div", { class: "full" }, field("Email", input({ name: "email", type: "email", required: true, autocomplete: "email", value: "" }))),
+      h("div", { class: "full" }, field("Tu contraseña", input({ name: "password", type: "password", required: true, autocomplete: "current-password" }))),
+    ],
+    onSubmit: async (fd) => { st = await api("POST", "/api/me/email", { email: fd.get("email"), password: fd.get("password") }); toast("Te hemos enviado un código"); draw(); },
+  });
+  const draw = () => {
+    const code = input({ inputmode: "numeric", autocomplete: "one-time-code", maxlength: "6", class: "input mono code-input", placeholder: "000000" });
+    const verify = async () => {
+      try { st = await api("POST", "/api/me/email/verify", { code: code.value }); toast("Email verificado"); draw(); } catch (e) { toast(e.message, "err"); }
+    };
+    code.addEventListener("input", () => { code.value = code.value.replace(/\D/g, "").slice(0, 6); if (code.value.length === 6) verify(); });
+    fill(card,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Email y verificación en dos pasos" }),
+        h("div", { class: "note", text: "Con un email verificado puedes recuperar la contraseña si la olvidas y pedir un código al entrar." }))),
+      !st.email_available ? h("div", { class: "banner" }, icon("alert"), state.me.role === "admin"
+        ? h("span", null, "Configura primero el envío de emails en ", h("a", { href: "#/settings", text: "Ajustes › Avisos" }), ".")
+        : "El servidor aún no tiene configurado el envío de emails.") : h("div", { class: "grid", style: { gap: "14px" } },
+        h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+          st.email ? h("span", { class: "badge ok" }, icon("check"), st.email) : h("span", { class: "note", text: "Sin email" }),
+          h("button", { class: "btn sm", onClick: emailModal }, st.email ? "Cambiar" : "Añadir email"),
+          st.email ? h("button", { class: "btn ghost sm", onClick: () => askPassword("Quitar el email", "Quitar",
+            async (password) => { const r = await api("DELETE", "/api/me/email", { password }); toast("Email quitado"); return r; }) }, icon("trash"), "Quitar") : null),
+        st.pending ? h("div", { class: "pending-code" },
+          h("p", { style: { margin: 0 } }, "Escribe el código que hemos enviado a ", h("b", { text: st.pending }), "."),
+          h("div", { class: "input-group", style: { maxWidth: "280px" } }, code, h("button", { class: "btn primary", onClick: verify }, "Verificar"))) : null,
+        h("label", { class: "switch" },
+          h("input", { type: "checkbox", checked: st.twofa, disabled: !st.verified, onChange: (e) => {
+            const on = e.target.checked;
+            e.target.checked = !on;   // se confirma con la contraseña
+            askPassword(on ? "Activar la verificación en dos pasos" : "Desactivar la verificación en dos pasos", on ? "Activar" : "Desactivar",
+              async (password) => { const r = await api("PUT", "/api/me/2fa", { enabled: on, password }); toast(on ? "Verificación en dos pasos activada" : "Verificación en dos pasos desactivada"); return r; });
+          } }),
+          h("span", { class: "track" }), h("span", { text: "Pedir un código por email al entrar con contraseña" })),
+        h("p", { class: "help", text: st.verified ? "Con la llave biométrica no hace falta el código: la llave ya es un segundo factor."
+          : "Añade y verifica tu email para activarla." })));
+    if (st.pending) setTimeout(() => code.focus(), 30);
+  };
+  api("GET", "/api/me/security").then((d) => { st = d; draw(); }).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
+  return card;
+}
+
 function forcePasswordView() {
   fill($app, h("div", { class: "auth" },
     h("div", { class: "auth-card", style: { maxWidth: "520px" } },
@@ -669,6 +804,7 @@ function accountView(main) {
   fill(main,
     pageHead("Cuenta", `Sesión iniciada como ${state.me.username}`),
     passkeysCard(),
+    securityCard(),
     h("div", { class: "card", style: { maxWidth: "720px" } }, h("div", { class: "card-head" }, h("h2", { text: "Cambiar contraseña" })), passwordForm()),
     state.me.role === "tenant" ? h("div", { class: "card", style: { maxWidth: "720px" } },
       h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dominio personalizado" }),

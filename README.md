@@ -122,6 +122,15 @@ Son registros «solo DNS» (nube gris), porque los puertos TCP/UDP no pasan por 
 
 Para lo que no es web (escritorio remoto, cámaras RTSP, SSH, juegos…), cada cliente puede abrir puertos en **Puertos → Abrir puerto**: `IP_del_VPS:3389 → 10.252.1.20:3389` (TCP, UDP o ambos), hacia un dispositivo o un equipo de la LAN de su router. El equipo ve la conexión como si viniera del servidor de la VPN, así la respuesta vuelve siempre por el túnel. El admin fija cuántos puede abrir cada cliente (5 por defecto, 0 = ninguno); los clientes usan puertos ≥ 1024 y nunca los del propio servidor (SSH, panel, WireGuard, 53, 80, 443). Las reglas las crea el host (`wgp-firewall`), que valida cada línea.
 
+## Email de la cuenta, recuperar contraseña y verificación en dos pasos
+
+Cada persona (administrador, cliente o usuario) puede añadir su email en **Cuenta › Email y verificación en dos pasos**; se confirma con un código de 6 cifras. Con él:
+
+- **¿Has olvidado tu contraseña?** (en el inicio de sesión): envía un enlace de un solo uso que caduca en 1 hora. La respuesta es la misma exista o no la cuenta, y el enlace siempre apunta al dominio del panel (o al del cliente / la página pública desde la que se pidió), nunca a uno inventado.
+- **Verificación en dos pasos:** al entrar con contraseña se pide además un código enviado por email (10 minutos, 5 intentos). Entrar con llave biométrica no lo pide, porque la llave ya es un segundo factor.
+
+Los emails salen por lo configurado en **Ajustes › Avisos** (SMTP o Cloudflare). Cambiar el email o desactivar la verificación pide la contraseña.
+
 ## Usuarios de cada cliente
 
 En **Usuarios**, el responsable de un cliente invita a sus empleados o familiares con un enlace (de un solo uso, 7 días) o les crea la cuenta. Cada usuario entra con su propia cuenta (también con llave biométrica) y sólo ve **sus** dispositivos, su actividad y sus avisos; el responsable lo ve todo y decide si pueden añadir dispositivos por su cuenta.

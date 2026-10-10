@@ -677,3 +677,8 @@ button.rank:hover .name { color: var(--accent); }
 .public-host svg { width: 16px; height: 16px; color: var(--accent); }
 .badge-btn { border: 0; cursor: pointer; font: inherit; font-size: 12px; }
 .badge-btn:hover { filter: brightness(1.1); }
+.forgot-link { text-align: center; margin: 12px 0 0; font-size: 13.5px; }
+.forgot-link a { color: var(--muted); }
+.forgot-link a:hover { color: var(--accent); }
+.code-input { letter-spacing: .4em; font-size: 20px; text-align: center; }
+.pending-code { display: grid; gap: 10px; padding: 14px; border-radius: var(--radius-sm); background: var(--accent-soft); }
