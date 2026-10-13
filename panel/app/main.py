@@ -1576,12 +1576,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True}
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-    sw_source = (STATIC_DIR / "sw.js").read_text().replace("__VERSION__", _static_version())
+    static_v = _static_version()   # cambia en cada despliegue: SW nuevo y URLs nuevas de app.js/style.css
+    sw_source = (STATIC_DIR / "sw.js").read_text().replace("__VERSION__", static_v)
 
     def is_site(c: sqlite3.Connection, request: Request) -> bool:
         return domains.host_of(request.headers.get("host")) in doms.site_domains(c, only_enabled=True)
 
-    index_template = (STATIC_DIR / "index.html").read_text()
+    index_template = (STATIC_DIR / "index.html").read_text().replace("__AV__", static_v)
 
     def index_page(c: sqlite3.Connection, request: Request) -> HTMLResponse:
         """index.html con el nombre y los iconos de la marca (o del cliente, en su dominio)."""

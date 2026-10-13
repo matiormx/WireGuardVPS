@@ -4153,12 +4153,25 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
   const hadController = Boolean(navigator.serviceWorker.controller);
   let reloading = false;
   // Nueva versión desplegada: el SW nuevo toma el control y se recarga una vez.
-  navigator.serviceWorker.addEventListener("controllerchange", () => {
-    if (!hadController || reloading) return;
+  const reloadNow = () => {
+    if (reloading) return;
+    // No se recarga en mitad de un formulario: se espera a que la app pase a segundo plano.
+    if (isEditing()) { document.addEventListener("visibilitychange", () => { if (document.hidden) reloadNow(); }, { once: true }); return; }
     reloading = true;
     location.reload();
+  };
+  navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadController) reloadNow(); });
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").then((reg) => {
+      // La app instalada puede pasar días abierta en segundo plano: al volver a primer plano
+      // (y cada 30 min) se comprueba si hay versión nueva; si la hay, el SW nuevo toma el control.
+      let last = Date.now();
+      const check = () => { if (Date.now() - last > 60000) { last = Date.now(); reg.update().catch(() => {}); } };
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) check(); });
+      window.addEventListener("focus", check);
+      setInterval(() => { last = 0; check(); }, 30 * 60 * 1000);
+    }).catch(() => {});
   });
-  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
 }
 
 /* ------------------------------------------------------------------ arranque */

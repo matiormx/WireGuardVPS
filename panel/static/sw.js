@@ -5,8 +5,8 @@
 const CACHE = "wgp-__VERSION__";
 const SHELL = [
   "/",
-  "/static/app.js",
-  "/static/style.css",
+  "/static/app.js?v=__VERSION__",
+  "/static/style.css?v=__VERSION__",
   "/static/favicon.svg",
   "/manifest.webmanifest",
   "/static/icons/icon-192.png",

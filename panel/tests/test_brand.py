@@ -94,3 +94,12 @@ def test_logo(admin):
     st = admin.delete("/api/admin/brand/logo", headers=H).json()
     assert not st["custom_logo"] and admin.get("/brand/logo").headers["content-type"].startswith("image/svg+xml")
     assert admin.put("/api/admin/site", json={"path": "brand"}, headers=H).status_code == 422
+
+
+def test_versioned_assets(admin):
+    import re
+    html = admin.get("/").text
+    v = re.search(r'/static/app\.js\?v=([0-9a-f]{12})', html).group(1)
+    assert f"/static/style.css?v={v}" in html and "__AV__" not in html
+    sw = admin.get("/sw.js").text
+    assert f'"wgp-{v}"' in sw and f"/static/app.js?v={v}" in sw and admin.get(f"/static/app.js?v={v}").status_code == 200
