@@ -13,6 +13,7 @@ const REFRESH_MS = 10000;
 /* ------------------------------------------------------------------ iconos */
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ICONS = {
+  cloud: '<path d="M17.5 19H7a5 5 0 1 1 1.1-9.9A6 6 0 0 1 19.6 11 4 4 0 0 1 17.5 19z"/>',
   tag: '<path d="M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/><path d="M7 7h.01"/>',
   chevron: '<path d="M6 9l6 6 6-6"/>',
   logo: '<path d="M4 7l4.5 11L12 10l3.5 8L20 7"/>',
@@ -892,10 +893,17 @@ function domainStatusBlock(st) {
   if (!st || !st.domain) return null;
   const dns = st.dns;
   const expected = dns.expected.join(", ") || "la IP del servidor";
-  return h("div", { class: "domain-status" },
-    checkLine(dns.ok, `DNS correcto: ${st.domain} → ${dns.resolved.join(", ")}`,
+  // Con el proxy de Cloudflare el DNS da IPs de Cloudflare: se muestra la nube y la IP del servidor.
+  const dnsLine = dns.ok && dns.via_cloudflare
+    ? h("div", { class: "check-line ok" }, icon("check"),
+        h("span", {}, `DNS correcto: ${st.domain} → `,
+          h("span", { class: "cf-proxy", title: `Cloudflare responde con ${dns.resolved.join(", ")} y reenvía al servidor` }, icon("cloud"), "Proxy de Cloudflare"),
+          ` → ${dns.expected.join(", ") || "servidor"}`))
+    : checkLine(dns.ok, `DNS correcto: ${st.domain} → ${dns.resolved.join(", ")}`,
       dns.resolved.length ? `El DNS apunta a ${dns.resolved.join(", ")}; debe apuntar a ${expected}`
-        : `${st.domain} todavía no resuelve. Crea el registro A hacia ${expected} (puede tardar unos minutos).`),
+        : `${st.domain} todavía no resuelve. Crea el registro A hacia ${expected} (puede tardar unos minutos).`);
+  return h("div", { class: "domain-status" },
+    dnsLine,
     checkLine(st.https.ok, "HTTPS activo con certificado válido",
       `HTTPS pendiente${st.https.error ? `: ${st.https.error}` : ""}`),
     st.https.ok ? h("a", { class: "btn sm", href: `https://${st.domain}`, target: "_blank", rel: "noopener" }, icon("globe"), `Abrir https://${st.domain}`) : null);

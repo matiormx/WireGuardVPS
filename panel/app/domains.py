@@ -54,6 +54,23 @@ def host_of(header: str | None) -> str:
     return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
 
 
+# Rangos publicados en https://www.cloudflare.com/ips/ (estables desde hace años).
+CLOUDFLARE_NETS = [ipaddress.ip_network(n) for n in (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22", "141.101.64.0/18",
+    "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20", "197.234.240.0/22", "198.41.128.0/17",
+    "162.158.0.0/15", "104.16.0.0/13", "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+    "2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32", "2405:8100::/32",
+    "2a06:98c0::/29", "2c0f:f248::/32")]
+
+
+def is_cloudflare_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return any(addr.version == n.version and addr in n for n in CLOUDFLARE_NETS)
+
+
 class Domains:
     def __init__(self, settings: Settings, database: Database) -> None:
         self.settings = settings
@@ -143,8 +160,12 @@ class Domains:
         ok = bool(resolved) and (not expected or bool(set(resolved) & set(expected)))
         with self.db.conn() as c:
             proxied = cfdns.is_proxied(c, host)
-        # Con el proxy de Cloudflare el DNS devuelve IPs de Cloudflare: es lo esperado.
-        return {"ok": ok or (proxied and bool(resolved)), "resolved": resolved, "expected": expected, "proxied": proxied}
+        # Con el proxy de Cloudflare (nube naranja) el DNS devuelve IPs de Cloudflare: es lo
+        # esperado. Si el panel no gestiona el registro, se reconoce por los rangos de Cloudflare;
+        # que de verdad llega a este servidor lo confirma después la comprobación HTTPS.
+        via_cf = bool(resolved) and all(is_cloudflare_ip(ip) for ip in resolved)
+        return {"ok": ok or ((proxied or via_cf) and bool(resolved)), "resolved": resolved, "expected": expected,
+                "proxied": proxied, "via_cloudflare": not ok and (proxied or via_cf)}
 
     @staticmethod
     def https_status(host: str, any_status: bool = False) -> dict:

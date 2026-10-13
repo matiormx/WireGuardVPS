@@ -305,7 +305,16 @@ def test_orange_cloud(env):
         dmod.Domains.resolve = staticmethod(lambda host: ["104.16.1.1"])
         assert doms.dns_status("acme.wgcloud.app")["ok"] and doms.dns_status("acme.wgcloud.app")["proxied"]
         assert doms.dns_status("nas.acme.wgcloud.app")["proxied"]
-        assert not doms.dns_status("bravo.wgcloud.app")["ok"]                       # gris: debe apuntar aquí
+        assert doms.dns_status("bravo.wgcloud.app")["via_cloudflare"]                # el DNS manda: está tras el proxy
+        dmod.Domains.resolve = staticmethod(lambda host: ["198.51.100.7"])
+        assert not doms.dns_status("bravo.wgcloud.app")["ok"]                       # ni aquí ni Cloudflare
+        assert not doms.dns_status("bravo.wgcloud.app")["via_cloudflare"]
+        dmod.Domains.resolve = staticmethod(lambda host: ["203.0.113.10"])
+        assert doms.dns_status("bravo.wgcloud.app")["ok"] and not doms.dns_status("bravo.wgcloud.app")["via_cloudflare"]
+        # dominio propio fuera de la zona, con la nube naranja puesta a mano en Cloudflare
+        dmod.Domains.resolve = staticmethod(lambda host: ["172.67.200.134", "2606:4700:3030::6815:44fa"])
+        st = doms.dns_status("vpn.otra-empresa.com")
+        assert st["ok"] and st["via_cloudflare"] and not st["proxied"]
     finally:
         dmod.Domains.resolve = orig
     # dominio del panel: sólo se cambia la nube del registro existente
@@ -324,3 +333,9 @@ def test_orange_cloud(env):
     c.put("/api/admin/wg-settings", json={"endpoint": ""}, headers=H)
     r = c.put("/api/admin/wg-settings", json={"endpoint": "acme.wgcloud.app"}, headers=H)
     assert r.status_code == 409 and "proxy de Cloudflare" in r.json()["detail"]
+
+
+def test_cloudflare_ranges():
+    from app.domains import is_cloudflare_ip
+    assert is_cloudflare_ip("104.21.68.250") and is_cloudflare_ip("172.67.200.134") and is_cloudflare_ip("2606:4700::1")
+    assert not is_cloudflare_ip("203.0.113.10") and not is_cloudflare_ip("2001:db8::1") and not is_cloudflare_ip("nope")

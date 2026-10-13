@@ -473,6 +473,9 @@ body { overflow-x: clip; } /* clip: no crea un contenedor de scroll (hidden sí)
 .check-line.ok { color: var(--success); }
 .check-line.bad { color: var(--warning); }
 .check-line span { color: var(--text); overflow-wrap: anywhere; }
+.check-line .cf-proxy { display: inline-flex; align-items: center; gap: 4px; padding: 0 7px; border-radius: 999px;
+  background: rgba(244, 129, 32, .14); color: #f48120; font-weight: 600; font-size: 12.5px; white-space: nowrap; vertical-align: 1px; }
+.check-line .cf-proxy svg { width: 14px; height: 14px; margin: 0; fill: #f48120; stroke: #f48120; }
 ol.steps { margin: 0; padding-left: 20px; color: var(--muted); font-size: 13.5px; line-height: 1.8; }
 ol.steps code { color: var(--text); background: var(--surface-2); padding: 1px 6px; border-radius: 6px; overflow-wrap: anywhere; }
 
