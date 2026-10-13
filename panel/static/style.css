@@ -707,3 +707,10 @@ button.rank:hover .name { color: var(--accent); }
   .blocked-row.stack .grow { flex: 1 1 calc(100% - 56px); }
   .blocked-row.stack .row-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
 }
+
+/* Nombres reservados: etiquetas con botón para quitar */
+.word-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 360px; overflow-y: auto; padding: 2px; }
+.word-chip { display: inline-flex; align-items: center; gap: 2px; padding: 3px 4px 3px 10px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); font: 13px var(--mono); }
+.word-chip button { display: grid; place-items: center; width: 22px; height: 22px; border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; }
+.word-chip button:hover { background: var(--danger-soft); color: var(--danger); }
+.word-chip button svg { width: 13px; height: 13px; }

@@ -1416,23 +1416,43 @@ function cloudflareCard() {
 /* Nombres reservados: no se pueden usar como usuario ni como dirección de cliente. */
 function reservedCard() {
   const card = h("div", { class: "card" }, spinnerBlock());
-  let st = null;
+  let st = null, filter = "";
+  const save = async (list, msg) => {
+    try { st = await api("PUT", "/api/admin/reserved", { words: list }); toast(msg); draw(); }
+    catch (e) { toast(e.message, "err"); }
+  };
   const draw = () => {
-    const ta = h("textarea", { class: "input mono", rows: "6", spellcheck: "false", autocapitalize: "off", value: st.words.join(", ") });
+    const addIn = input({ placeholder: "Palabra o varias separadas por comas", autocapitalize: "off", spellcheck: "false", class: "input" });
+    const add = () => {
+      const fresh = addIn.value.toLowerCase().split(/[\s,;]+/).filter(Boolean).filter((w) => !st.words.includes(w));
+      if (!fresh.length) { addIn.value = ""; return; }
+      save([...st.words, ...fresh], fresh.length === 1 ? `«${fresh[0]}» añadida` : `${fresh.length} palabras añadidas`);
+    };
+    addIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } });
+    const search = input({ type: "search", placeholder: "Buscar en la lista…", value: filter, class: "input", autocapitalize: "off" });
+    const chips = h("div", { class: "word-chips" });
+    const paint = () => {
+      const q = filter.trim().toLowerCase();
+      const shown = st.words.filter((w) => !q || w.includes(q));
+      fill(chips, shown.length ? shown.map((w) => h("span", { class: "word-chip" }, h("span", { text: w }),
+        h("button", { type: "button", title: `Quitar «${w}»`, "aria-label": `Quitar ${w}`, onClick: () => save(st.words.filter((x) => x !== w), `«${w}» quitada`) }, icon("x"))))
+        : h("p", { class: "note", style: { margin: 0 }, text: q ? "Ninguna palabra coincide." : "La lista está vacía: cualquier nombre está permitido." }));
+    };
+    search.addEventListener("input", () => { filter = search.value; paint(); });
+    paint();
     fill(card,
       h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Nombres reservados" }),
-        h("div", { class: "note", text: "Palabras que nadie puede usar como usuario (clientes, sus usuarios, registro público) ni como dirección de cliente (usuario.tudominio), para evitar suplantaciones como «admin» o «soporte». No distingue mayúsculas ni separadores: «Ad_Min» cuenta como «admin». Las cuentas que ya existen no cambian." }))),
-      h("div", { class: "grid", style: { gap: "12px" } },
-        field(`${st.count} palabras${st.default ? " (lista por defecto)" : ""}`, ta, "Separadas por comas, espacios o líneas. Minúsculas, números y guiones."),
-        h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
-          h("button", { class: "btn primary", onClick: async () => {
-            try { st = await api("PUT", "/api/admin/reserved", { words: ta.value.split(/[\s,;]+/).filter(Boolean) }); toast("Lista guardada"); draw(); }
-            catch (e) { toast(e.message, "err"); }
-          } }, "Guardar"),
-          st.default ? null : h("button", { class: "btn ghost", onClick: async () => {
+        h("div", { class: "note", text: "Nadie puede usarlas como nombre de usuario (clientes, sus usuarios, registro público) ni como dirección de cliente (usuario.tudominio). Evita suplantaciones como «admin» o «soporte». No distingue mayúsculas ni separadores: «Ad_Min» cuenta como «admin». Las cuentas que ya existen no cambian." }))),
+      h("div", { class: "grid", style: { gap: "14px" } },
+        field("Añadir", h("div", { class: "input-group" }, addIn, h("button", { class: "btn primary", onClick: add }, icon("plus"), "Añadir")),
+          "Minúsculas, números y guiones. Por ejemplo, tu marca o la de tu competencia."),
+        h("div", { class: "cell-flex", style: { flexWrap: "wrap", justifyContent: "space-between" } },
+          h("b", { text: `${st.count} palabras${st.default ? " · lista por defecto" : ""}` }),
+          st.default ? null : h("button", { class: "btn ghost sm", onClick: async () => {
             if (!(await confirmDialog({ title: "Restaurar la lista por defecto", message: "Se perderán las palabras que hayas añadido o quitado.", confirmLabel: "Restaurar" }))) return;
             try { st = await api("DELETE", "/api/admin/reserved"); toast("Lista por defecto restaurada"); draw(); } catch (e) { toast(e.message, "err"); }
-          } }, icon("refresh"), "Restaurar por defecto"))));
+          } }, icon("refresh"), "Restaurar por defecto")),
+        search, chips));
   };
   api("GET", "/api/admin/reserved").then((d) => { st = d; draw(); }).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
   return card;
@@ -1552,7 +1572,8 @@ function dnsSettingsCard() {
 /* Ajustes: secciones con submenú (columna en ordenador, pestañas deslizables en el móvil). */
 const SETTINGS_SECTIONS = [
   ["general", "General", "globe", "Dominio del panel, marca y página pública"],
-  ["clientes", "Clientes", "users", "Subdominios (Cloudflare), dominios propios y nombres reservados"],
+  ["clientes", "Clientes", "users", "Subdominios (Cloudflare) y dominios propios de los clientes"],
+  ["nombres", "Nombres reservados", "ban", "Palabras que nadie puede usar como usuario ni como dirección"],
   ["red", "Red y VPN", "network", "Endpoint de WireGuard, salidas por país y DNS"],
   ["avisos", "Avisos y email", "bell", "Telegram, email (SMTP o Cloudflare) y cuándo avisar"],
   ["copias", "Copias de seguridad", "download", "Copias cifradas, S3 y restaurar"],
@@ -1625,7 +1646,8 @@ async function settingsView(main, sectionId) {
 
   const cards = {
     general: () => [domainSlot, brandCard(), siteCard()],
-    clientes: () => [cloudflareCard(), clientDomainsCard(), reservedCard()],
+    clientes: () => [cloudflareCard(), clientDomainsCard()],
+    nombres: () => [reservedCard()],
     red: () => [endpointCard(), exitsCard(), dnsSettingsCard()],
     avisos: () => [alertsConfigCard()],
     copias: () => [backupCard()],

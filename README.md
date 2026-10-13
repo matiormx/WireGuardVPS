@@ -135,7 +135,7 @@ Los emails salen por lo configurado en **Ajustes › Avisos** (SMTP o Cloudflare
 
 ## Nombres reservados
 
-Hay una lista de palabras que nadie puede usar como nombre de usuario (clientes, sus usuarios, registro público) ni como dirección de cliente (`usuario.tudominio`): `admin`, `www`, `soporte`, `root`, `mail`, `api`, `login`… unas 160 por defecto. No distingue mayúsculas ni separadores (`Ad_Min` cuenta como `admin`). La editas en **Ajustes › Nombres reservados** (añadir tu marca, quitar alguna…) y puedes volver a la lista por defecto. Las cuentas que ya existen no cambian.
+Hay una lista de palabras que nadie puede usar como nombre de usuario (clientes, sus usuarios, registro público) ni como dirección de cliente (`usuario.tudominio`): `admin`, `www`, `soporte`, `root`, `mail`, `api`, `login`… unas 160 por defecto. No distingue mayúsculas ni separadores (`Ad_Min` cuenta como `admin`). La editas en **Ajustes › Nombres reservados**: escribe una palabra (o varias separadas por comas) y pulsa «Añadir», o quítala con la × de su etiqueta; hay un buscador para la lista y puedes volver a la lista por defecto. Las cuentas que ya existen no cambian.
 
 ## Usuarios de cada cliente
 
