@@ -125,6 +125,19 @@ function slugify(s) {
   return s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-").replace(/^[-._]+|[-._]+$/g, "").slice(0, 32);
 }
+/* Los datos de las instrucciones (IPs, dominios, comandos) se copian con un toque. */
+function ipCodes(ips, fallback) {
+  return ips.length ? ips.flatMap((ip, i) => [i ? ", " : null, h("code", { text: ip })]) : fallback;
+}
+document.addEventListener("click", (e) => {
+  const code = e.target.closest && e.target.closest("code");
+  if (!code || code.closest("pre, a, button, .nocopy")) return;
+  const text = code.textContent.trim();
+  if (!text) return;
+  copyText(text, `Copiado: ${text}`);
+  code.classList.add("copied");
+  setTimeout(() => code.classList.remove("copied"), 1200);
+});
 async function copyText(text, label = "Copiado al portapapeles") {
   try {
     await navigator.clipboard.writeText(text);
@@ -270,7 +283,7 @@ function field(label, input, help) {
   // lectores de pantalla la usan para entender qué es cada campo.
   if (!input.id) input.id = `f${++fieldSeq}-${input.name || "campo"}`;
   return h("div", { class: "field" }, h("label", { text: label, for: input.id }), input,
-    help ? h("div", { class: "help", text: help }) : null);
+    help ? h("div", { class: "help" }, help) : null);
 }
 function input(props) { return h("input", { class: "input", ...props }); }
 function switchEl(name, checked, label) {
@@ -886,7 +899,7 @@ function myAddressCard() {
 
 /* ------------------------------------------------------------------ dominios */
 function checkLine(ok, okText, badText) {
-  return h("div", { class: `check-line ${ok ? "ok" : "bad"}` }, icon(ok ? "check" : "alert"), h("span", { text: ok ? okText : badText }));
+  return h("div", { class: `check-line ${ok ? "ok" : "bad"}` }, icon(ok ? "check" : "alert"), h("span", {}, ok ? okText : badText));
 }
 
 function domainStatusBlock(st) {
@@ -900,8 +913,8 @@ function domainStatusBlock(st) {
           h("span", { class: "cf-proxy", title: `Cloudflare responde con ${dns.resolved.join(", ")} y reenvía al servidor` }, icon("cloud"), "Proxy de Cloudflare"),
           ` → ${dns.expected.join(", ") || "servidor"}`))
     : checkLine(dns.ok, `DNS correcto: ${st.domain} → ${dns.resolved.join(", ")}`,
-      dns.resolved.length ? `El DNS apunta a ${dns.resolved.join(", ")}; debe apuntar a ${expected}`
-        : `${st.domain} todavía no resuelve. Crea el registro A hacia ${expected} (puede tardar unos minutos).`);
+      dns.resolved.length ? [`El DNS apunta a ${dns.resolved.join(", ")}; debe apuntar a `, ipCodes(dns.expected, "la IP del servidor")]
+        : [`${st.domain} todavía no resuelve. Crea el registro A hacia `, ipCodes(dns.expected, "la IP del servidor"), " (puede tardar unos minutos)."]);
   return h("div", { class: "domain-status" },
     dnsLine,
     checkLine(st.https.ok, "HTTPS activo con certificado válido",
@@ -2434,8 +2447,8 @@ function serviceModal(ctx, svc, onDone) {
   const fields = [
     isNew ? h("div", { class: "full" }, field("Nombre público",
       input({ name: "hostname", required: true, maxlength: "253", placeholder: ctx.host ? `nas.${ctx.host}` : "nas.tuempresa.com", class: "input mono", autocapitalize: "off", spellcheck: "false", inputmode: "url" }),
-      ctx.host ? `Cualquier nombre terminado en .${ctx.host} funciona al momento (p. ej. nas.${ctx.host}). También puedes usar tu propio dominio con un registro A hacia ${ctx.ip}.`
-        : `Un nombre de tu dominio. Crea en tu DNS un registro A hacia ${ctx.ip}.`)) : null,
+      ctx.host ? [`Cualquier nombre terminado en .${ctx.host} funciona al momento (p. ej. nas.${ctx.host}). También puedes usar tu propio dominio con un registro A hacia `, h("code", { text: ctx.ip }), "."]
+        : ["Un nombre de tu dominio. Crea en tu DNS un registro A hacia ", h("code", { text: ctx.ip }), "."])) : null,
     field("IP del equipo", input({ name: "target_ip", required: true, maxlength: "15", value: svc ? svc.target_ip : "", list: listId,
       placeholder: ctx.networks[0].replace(/0\/\d+$/, "50"), class: "input mono", inputmode: "decimal" }),
     `De tu red (${ctx.networks.join(", ")}).`),
