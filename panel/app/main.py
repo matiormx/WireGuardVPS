@@ -1080,8 +1080,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if host is None:
                     raise HTTPException(422, f"Endpoint no válido: {body.endpoint!r} (IP o nombre, p. ej. wg.tudominio.com)")
                 if cfdns.is_proxied(c, host):
-                    raise HTTPException(409, f"{host} tiene la nube naranja de Cloudflare: WireGuard (UDP) no pasa por el proxy. "
-                                             "Usa un nombre en gris (sólo DNS), p. ej. wg.tudominio.com.")
+                    raise HTTPException(409, f"{host} pasa por el proxy de Cloudflare y WireGuard (UDP) no puede ir por él. "
+                                             "Usa un nombre en «Solo DNS», p. ej. wg.tudominio.com.")
                 raw = host
         set_setting(c, "wg_endpoint", raw)
         c.commit()

@@ -6,7 +6,7 @@ de esa cuenta (p. ej. wgcloud.app), cada cliente tiene su dirección:
   acme.wgcloud.app     A -> IP del servidor (puertos abiertos: acme.wgcloud.app:3389)
   *.acme.wgcloud.app   A -> IP del servidor (servicios HTTPS: nas.acme.wgcloud.app)
 
-Los registros son «solo DNS» (nube gris): un puerto TCP/UDP no pasa por el
+Los registros son «Solo DNS» (sin proxy): un puerto TCP/UDP no pasa por el
 proxy de Cloudflare. El panel sólo toca los registros que crea él (llevan el
 comentario «wgp: …»); si ya existe otro registro con ese nombre, no lo pisa y lo
 indica. Un bucle compara cada minuto lo que debería haber con lo último aplicado
@@ -98,7 +98,7 @@ def tenant_proxied(c: sqlite3.Connection, t: sqlite3.Row) -> bool:
 
 
 def proxy_hosts(c: sqlite3.Connection) -> dict:
-    """Nube naranja elegida para dominios que no crea el panel (el del panel, la página pública)."""
+    """Proxy de Cloudflare elegido para dominios que no crea el panel (el del panel, la página pública)."""
     return json.loads(get_setting(c, "cf_proxy_hosts") or "{}")
 
 
@@ -212,7 +212,7 @@ class CloudflareDNS:
         return out
 
     def external(self, c: sqlite3.Connection) -> dict:
-        """Nube naranja de dominios que no crea el panel (sólo los que el admin ha tocado)."""
+        """Proxy de Cloudflare de dominios que no crea el panel (sólo los que el admin ha tocado)."""
         zone = zone_of(c)
         if not zone:
             return {}
@@ -250,7 +250,7 @@ class CloudflareDNS:
             for r in ours.values():   # clientes borrados, subdominio cambiado o desactivado
                 self.call(token, "DELETE", f"/zones/{zone}/dns_records/{r['id']}")
                 changes += 1
-            for name, proxied in extra.items():   # dominio del panel / página pública: sólo la nube
+            for name, proxied in extra.items():   # dominio del panel / página pública: sólo el proxy
                 for r in self.records(token, zone, name=name):
                     if r.get("type") in ("A", "AAAA", "CNAME") and bool(r.get("proxied")) != proxied:
                         self.call(token, "PATCH", f"/zones/{zone}/dns_records/{r['id']}", {"proxied": proxied})
@@ -451,7 +451,7 @@ def register(app, d) -> None:
             raise HTTPException(409, "Las direcciones de cliente no están activas")
         return await change_subdomain(c, p.id, body.subdomain)
 
-    # ---------------------------------------------------------------- nube naranja (proxy de Cloudflare)
+    # ---------------------------------------------------------------- proxy de Cloudflare
     def endpoint_host(c: sqlite3.Connection) -> str:
         return (d.endpoint_host(c) or "").lower()
 

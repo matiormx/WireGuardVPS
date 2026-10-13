@@ -143,7 +143,7 @@ class Domains:
         ok = bool(resolved) and (not expected or bool(set(resolved) & set(expected)))
         with self.db.conn() as c:
             proxied = cfdns.is_proxied(c, host)
-        # Con la nube naranja el DNS devuelve IPs de Cloudflare: es lo esperado.
+        # Con el proxy de Cloudflare el DNS devuelve IPs de Cloudflare: es lo esperado.
         return {"ok": ok or (proxied and bool(resolved)), "resolved": resolved, "expected": expected, "proxied": proxied}
 
     @staticmethod

@@ -292,7 +292,7 @@ def test_orange_cloud(env):
     assert not rec(fake, "beta.wgcloud.app")["proxied"] and rec(fake, "acme.wgcloud.app")["proxied"]
     t = c.get(f"/api/admin/tenants/{a['id']}").json()
     assert t["cf_proxied"] is True and t["cf_proxy_custom"] is False
-    # puertos: con nube naranja se usa la dirección del servidor; en gris, la del cliente
+    # puertos: con proxy se usa la dirección del servidor; en «Solo DNS», la del cliente
     assert c.get(f"/api/forwards?tenant_id={a['id']}").json()["public_host"] == "203.0.113.10"
     assert c.get(f"/api/forwards?tenant_id={b['id']}").json()["public_host"] == "beta.wgcloud.app"
     # con proxy, el DNS apunta a Cloudflare y aun así se da por bueno (y se emite el certificado)
@@ -318,7 +318,7 @@ def test_orange_cloud(env):
     r = c.put("/api/admin/cloudflare/proxy", json={"host": "vpn.wgcloud.app", "proxied": True}, headers=H)
     assert r.status_code == 409 and "WireGuard" in r.json()["detail"]
 
-    # y al revés: un nombre con nube naranja no puede ser el endpoint
+    # y al revés: un nombre con proxy no puede ser el endpoint
     c.put("/api/admin/wg-settings", json={"endpoint": ""}, headers=H)
     r = c.put("/api/admin/wg-settings", json={"endpoint": "acme.wgcloud.app"}, headers=H)
-    assert r.status_code == 409 and "nube naranja" in r.json()["detail"]
+    assert r.status_code == 409 and "proxy de Cloudflare" in r.json()["detail"]

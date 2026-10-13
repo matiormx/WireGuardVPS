@@ -1365,13 +1365,13 @@ function cloudflareCard() {
           onChange: (e) => save({ wildcard: e.target.checked }, "Guardado") }),
           h("span", { class: "track" }), h("span", { text: `También *.${st.example} para sus servicios HTTPS (nas.${st.example})` })),
         h("label", { class: "switch" }, h("input", { type: "checkbox", checked: st.proxy_default, disabled: !st.enabled,
-          onChange: (e) => save({ proxy_default: e.target.checked }, e.target.checked ? "Nube naranja activada por defecto" : "Nube naranja desactivada por defecto") }),
-          h("span", { class: "track" }), h("span", { text: "Nube naranja por defecto en las direcciones de clientes (cada cliente se puede cambiar en su ficha)" })),
+          onChange: (e) => save({ proxy_default: e.target.checked }, e.target.checked ? "Proxy de Cloudflare activado por defecto" : "Proxy de Cloudflare desactivado por defecto") }),
+          h("span", { class: "track" }), h("span", { text: "Proxy de Cloudflare por defecto en las direcciones de clientes (cada cliente se puede cambiar en su ficha)" })),
         st.enabled && st.proxy_hosts.length ? h("div", { class: "blocked-list" }, st.proxy_hosts.map((x) => h("div", { class: "blocked-row" },
           h("div", { class: "grow" }, h("div", { class: "mono name", text: x.host }),
             h("div", { class: "meta", text: x.endpoint ? "Es el endpoint de WireGuard: no puede ir por el proxy (UDP)" : x.kind === "panel" ? "Dominio del panel" : "Página pública" })),
-          h("label", { class: "switch", title: "Nube naranja" }, h("input", { type: "checkbox", checked: x.proxied, disabled: x.endpoint, onChange: async (e) => {
-            try { st = await api("PUT", "/api/admin/cloudflare/proxy", { host: x.host, proxied: e.target.checked }); toast(e.target.checked ? `${x.host}: nube naranja` : `${x.host}: sólo DNS`); }
+          h("label", { class: "switch", title: "Proxy de Cloudflare" }, h("input", { type: "checkbox", checked: x.proxied, disabled: x.endpoint, onChange: async (e) => {
+            try { st = await api("PUT", "/api/admin/cloudflare/proxy", { host: x.host, proxied: e.target.checked }); toast(e.target.checked ? `${x.host}: con proxy de Cloudflare` : `${x.host}: solo DNS`); }
             catch (err) { toast(err.message, "err"); }
             draw();
           } }), h("span", { class: "track" }))))) : null,
@@ -1386,7 +1386,7 @@ function cloudflareCard() {
             if (!(await confirmDialog({ title: "Desconectar Cloudflare", message: "Se borrarán los registros que creó el panel y se olvidará el token. Las direcciones de los clientes dejarán de funcionar.", confirmLabel: "Desconectar" }))) return;
             try { st = await api("DELETE", "/api/admin/cloudflare"); toast("Cloudflare desconectado"); draw(); } catch (err) { toast(err.message, "err"); }
           } }, icon("trash"), "Desconectar")),
-        h("p", { class: "help", text: "Nube gris (sólo DNS): todo funciona, también los puertos TCP/UDP. Nube naranja: la web pasa por Cloudflare (oculta la IP del servidor, caché y protección), pero los puertos TCP/UDP de ese nombre dejan de funcionar. En Cloudflare › SSL/TLS usa el modo «Completo (estricto)». El panel sólo crea y borra sus propios registros." })));
+        h("p", { class: "help", text: "Solo DNS: todo funciona, también los puertos TCP/UDP. Con proxy de Cloudflare: la web pasa por Cloudflare (oculta la IP del servidor, caché y protección), pero los puertos TCP/UDP de ese nombre dejan de funcionar. En Cloudflare › SSL/TLS usa el modo «Completo (estricto)». El panel sólo crea y borra sus propios registros." })));
   };
   api("GET", "/api/admin/cloudflare").then((d) => { st = d; draw(); }).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
   return card;
@@ -1466,7 +1466,7 @@ function endpointCard() {
     const inp = input({ value: cfg.endpoint, placeholder: cfg.default, class: "input mono", autocapitalize: "off", spellcheck: "false", inputmode: "url" });
     fill(card,
       h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Endpoint de WireGuard" }),
-        h("div", { class: "note", text: "La dirección a la que se conectan los dispositivos. Recomendado: un nombre (p. ej. wg.tudominio.com, nube gris en Cloudflare). Así, si cambias de servidor, basta con actualizar el DNS y nadie tiene que reconfigurar nada." }))),
+        h("div", { class: "note", text: "La dirección a la que se conectan los dispositivos. Recomendado: un nombre (p. ej. wg.tudominio.com, en «Solo DNS» si usas Cloudflare). Así, si cambias de servidor, basta con actualizar el DNS y nadie tiene que reconfigurar nada." }))),
       h("div", { class: "grid", style: { gap: "12px" } },
         h("div", { class: "input-group" }, inp,
           h("button", { class: "btn primary", onClick: async () => {
@@ -1725,17 +1725,17 @@ async function clientDetailView(main, id) {
         h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : t.suspended_reason === "billing" ? "Suspendido por impago" : "Suspendido" }),
         t.billing_status && t.billing_status !== "none" ? statusBadge(t.billing_status) : null,
         h("span", { class: "mono", text: t.network }),
-        t.public_host ? h("button", { class: `badge accent badge-btn${t.cf_proxied ? " proxied" : ""}`, title: "Dirección y nube naranja", onClick: () => formModal({
+        t.public_host ? h("button", { class: `badge accent badge-btn${t.cf_proxied ? " proxied" : ""}`, title: "Dirección y proxy de Cloudflare", onClick: () => formModal({
           title: "Dirección del cliente",
           fields: [
             h("div", { class: "full" }, field("Subdominio", h("div", { class: "input-group" },
               input({ name: "subdomain", value: t.subdomain, class: "input mono", maxlength: "63", autocapitalize: "off", spellcheck: "false", required: true }),
               h("span", { class: "input-prefix mono", text: `.${t.public_host.split(".").slice(1).join(".")}` })),
               "Su panel, sus puertos abiertos y sus servicios usan esta dirección. Al cambiarla, la anterior deja de funcionar.")),
-            h("div", { class: "full" }, field("Nube naranja (proxy de Cloudflare)", h("div", { class: "segmented" },
-              [["default", "Por defecto"], ["on", "Activada"], ["off", "Desactivada"]].map(([k, l]) => h("label", null,
+            h("div", { class: "full" }, field("Proxy de Cloudflare", h("div", { class: "segmented" },
+              [["default", "Por defecto"], ["on", "Con proxy"], ["off", "Solo DNS"]].map(([k, l]) => h("label", null,
                 h("input", { type: "radio", name: "proxy", value: k, checked: k === (t.cf_proxy_custom ? (t.cf_proxied ? "on" : "off") : "default") }), h("span", { text: l })))),
-              "Con la nube naranja su web y sus servicios HTTPS pasan por Cloudflare (oculta la IP, caché, protección), pero sus puertos TCP/UDP dejan de funcionar con este nombre.")),
+              "Con proxy, su web y sus servicios HTTPS pasan por Cloudflare (oculta la IP, caché, protección), pero sus puertos TCP/UDP dejan de funcionar con este nombre.")),
           ],
           onSubmit: async (fd) => {
             if (fd.get("subdomain") !== t.subdomain) await api("PUT", `/api/admin/tenants/${t.id}/subdomain`, { subdomain: fd.get("subdomain") });
