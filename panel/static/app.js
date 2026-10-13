@@ -1392,6 +1392,31 @@ function cloudflareCard() {
   return card;
 }
 
+/* Nombres reservados: no se pueden usar como usuario ni como dirección de cliente. */
+function reservedCard() {
+  const card = h("div", { class: "card" }, spinnerBlock());
+  let st = null;
+  const draw = () => {
+    const ta = h("textarea", { class: "input mono", rows: "6", spellcheck: "false", autocapitalize: "off", value: st.words.join(", ") });
+    fill(card,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Nombres reservados" }),
+        h("div", { class: "note", text: "Palabras que nadie puede usar como usuario (clientes, sus usuarios, registro público) ni como dirección de cliente (usuario.tudominio), para evitar suplantaciones como «admin» o «soporte». No distingue mayúsculas ni separadores: «Ad_Min» cuenta como «admin». Las cuentas que ya existen no cambian." }))),
+      h("div", { class: "grid", style: { gap: "12px" } },
+        field(`${st.count} palabras${st.default ? " (lista por defecto)" : ""}`, ta, "Separadas por comas, espacios o líneas. Minúsculas, números y guiones."),
+        h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
+          h("button", { class: "btn primary", onClick: async () => {
+            try { st = await api("PUT", "/api/admin/reserved", { words: ta.value.split(/[\s,;]+/).filter(Boolean) }); toast("Lista guardada"); draw(); }
+            catch (e) { toast(e.message, "err"); }
+          } }, "Guardar"),
+          st.default ? null : h("button", { class: "btn ghost", onClick: async () => {
+            if (!(await confirmDialog({ title: "Restaurar la lista por defecto", message: "Se perderán las palabras que hayas añadido o quitado.", confirmLabel: "Restaurar" }))) return;
+            try { st = await api("DELETE", "/api/admin/reserved"); toast("Lista por defecto restaurada"); draw(); } catch (e) { toast(e.message, "err"); }
+          } }, icon("refresh"), "Restaurar por defecto"))));
+  };
+  api("GET", "/api/admin/reserved").then((d) => { st = d; draw(); }).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
+  return card;
+}
+
 /* Página pública: presentación del servicio y planes en un dominio propio. */
 function siteCard() {
   const card = h("div", { class: "card" }, spinnerBlock());
@@ -1554,6 +1579,7 @@ async function settingsView(main) {
       brandCard(),
       siteCard(),
       cloudflareCard(),
+      reservedCard(),
       endpointCard(),
       exitsCard(),
       alertsConfigCard(),

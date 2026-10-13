@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from . import security
 from . import cfdns
+from . import reserved
 from .db import get_setting, set_setting, username_taken
 
 log = logging.getLogger("wgp.billing")
@@ -712,6 +713,7 @@ def register(app: FastAPI, d) -> None:
             raise HTTPException(422, "Email no válido")
         if username_taken(c, body.username):
             raise HTTPException(409, "Ese nombre de usuario ya existe; elige otro")
+        reserved.check_username(c, body.username)
         idx = d.next_net(c)
         if idx is None:
             raise HTTPException(409, "No quedan plazas libres. Contacta con nosotros.")

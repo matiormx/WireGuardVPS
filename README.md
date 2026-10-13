@@ -133,6 +133,10 @@ Cada persona (administrador, cliente o usuario) puede añadir su email en **Cuen
 
 Los emails salen por lo configurado en **Ajustes › Avisos** (SMTP o Cloudflare). Cambiar el email o desactivar la verificación pide la contraseña.
 
+## Nombres reservados
+
+Hay una lista de palabras que nadie puede usar como nombre de usuario (clientes, sus usuarios, registro público) ni como dirección de cliente (`usuario.tudominio`): `admin`, `www`, `soporte`, `root`, `mail`, `api`, `login`… unas 160 por defecto. No distingue mayúsculas ni separadores (`Ad_Min` cuenta como `admin`). La editas en **Ajustes › Nombres reservados** (añadir tu marca, quitar alguna…) y puedes volver a la lista por defecto. Las cuentas que ya existen no cambian.
+
 ## Usuarios de cada cliente
 
 En **Usuarios**, el responsable de un cliente invita a sus empleados o familiares con un enlace (de un solo uso, 7 días) o les crea la cuenta. Cada usuario entra con su propia cuenta (también con llave biométrica) y sólo ve **sus** dispositivos, su actividad y sus avisos; el responsable lo ve todo y decide si pueden añadir dispositivos por su cuenta.

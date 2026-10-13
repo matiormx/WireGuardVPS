@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import bcrypt
 
-from . import account, alerts, backup, billing, brand, cfdns, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, sysmon, updates, wg
+from . import account, alerts, reserved, backup, billing, brand, cfdns, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, sysmon, updates, wg
 from .config import Settings, load_settings
 from .db import (LABEL_RE, Database, get_setting, make_hostname, name_in_use, set_setting,
                  unique_hostname, username_taken)
@@ -679,6 +679,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def create_tenant(body: TenantCreate, _: Admin, c: Conn):
         if username_taken(c, body.username):
             raise HTTPException(409, "Ese nombre de usuario ya existe")
+        reserved.check_username(c, body.username)
         idx = wg.next_free_net_index(c, settings)
         if idx is None:
             raise HTTPException(409, "No quedan redes libres para nuevos clientes")
@@ -1561,6 +1562,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     deps.static_dir = STATIC_DIR
     deps.cloudflare = cf
     cfdns.register(app, deps)
+    reserved.register(app, deps)
     brand.register(app, deps)
     deps.updates = upd
     updates.register(app, deps)

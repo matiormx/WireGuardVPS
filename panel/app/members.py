@@ -21,6 +21,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from . import security
+from . import reserved
 from .db import username_taken
 
 USERNAME_RE = r"^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$"
@@ -117,6 +118,7 @@ def register(app: FastAPI, d) -> None:
         tid = target_tenant(p, c, body.tenant_id)
         if username_taken(c, body.username):
             raise HTTPException(409, "Ese nombre de usuario ya existe")
+        reserved.check_username(c, body.username)
         cur = c.execute(
             """INSERT INTO members (tenant_id, username, name, password_hash, must_change, can_create, created_at)
                VALUES (?, ?, ?, ?, 1, ?, ?)""",
@@ -191,6 +193,7 @@ def register(app: FastAPI, d) -> None:
             raise
         if username_taken(c, body.username):
             raise HTTPException(409, "Ese nombre de usuario ya existe; elige otro")
+        reserved.check_username(c, body.username)
         password_hash = security.hash_password(body.password)
         cur = c.execute(
             """INSERT INTO members (tenant_id, username, name, password_hash, must_change, can_create, created_at, last_login)

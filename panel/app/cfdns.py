@@ -31,6 +31,7 @@ from typing import Optional
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
+from . import reserved
 from .db import Database, get_setting, set_setting
 
 log = logging.getLogger("wgp.cloudflare")
@@ -60,7 +61,7 @@ def zone_of(c: sqlite3.Connection) -> Optional[str]:
 
 def taken_labels(c: sqlite3.Connection, zone: Optional[str]) -> set:
     """Etiquetas que ya usan el panel o la página pública dentro del dominio (no pueden ser de un cliente)."""
-    out = set(RESERVED)
+    out = set(RESERVED) | reserved.blocked(c)
     if zone:
         hosts = [get_setting(c, "main_domain") or ""] + (get_setting(c, "site_domains") or "").split()
         out |= {h[: -len(zone) - 1].split(".")[-1] for h in hosts if h.endswith("." + zone)}
@@ -72,7 +73,7 @@ def assign(c: sqlite3.Connection) -> None:
     blocked = taken_labels(c, get_setting(c, "cf_zone"))
     for t in c.execute("SELECT id, username FROM tenants WHERE subdomain IS NULL ORDER BY id").fetchall():
         label = dns_label(t["username"])
-        if label in blocked or c.execute("SELECT 1 FROM tenants WHERE subdomain = ?", (label,)).fetchone():
+        if label in blocked or reserved.is_reserved(c, label) or c.execute("SELECT 1 FROM tenants WHERE subdomain = ?", (label,)).fetchone():
             label = f"{label[:55]}-{t['id']}"
         c.execute("UPDATE tenants SET subdomain = ? WHERE id = ?", (label, t["id"]))
 
@@ -427,8 +428,10 @@ def register(app, d) -> None:
     async def change_subdomain(c: sqlite3.Connection, tenant_id: int, raw: str) -> dict:
         d.tenant_or_404(c, tenant_id)
         label = raw.strip().lower()
-        if not LABEL_RE.match(label) or label in taken_labels(c, cf.config(c)["zone"]):
+        if not LABEL_RE.match(label):
             raise HTTPException(422, "Subdominio no válido: minúsculas, números y guiones")
+        if label in taken_labels(c, cf.config(c)["zone"]) or reserved.is_reserved(c, label):
+            raise HTTPException(422, f"«{label}» es un nombre reservado: elige otro")
         other = c.execute("SELECT id FROM tenants WHERE subdomain = ? AND id != ?", (label, tenant_id)).fetchone()
         zone = cf.config(c)["zone"]
         if other or (zone and d.doms.taken(c, f"{label}.{zone}", exclude_tenant=tenant_id)):
