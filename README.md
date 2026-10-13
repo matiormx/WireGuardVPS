@@ -185,6 +185,15 @@ En **Facturación**:
 
 Opcional: IVA automático con Stripe Tax. Recibes avisos de nuevas suscripciones, cancelaciones y cobros fallidos, y el cliente de sus problemas de pago.
 
+## Cuentas Enterprise (instalaciones propias, sin cobros)
+
+Para empresas que gestionan varias sedes o a sus propios clientes, como un reseller pero sin pasar por Stripe. En **Enterprise → Nueva cuenta Enterprise** creas la cuenta con:
+
+- **Bloque de red propio**, fuera de la red general `10.252.0.0/16`. Se propone uno libre (`10.20.0.0/16`, `10.21.0.0/16`…) y puedes poner cualquier red privada entre /8 y /24 que no se solape con otra cuenta, con la LAN de un router ni con las redes del servidor.
+- **Límites**: cuántas instalaciones puede crear, cuántos dispositivos en total (la cuenta los reparte entre sus instalaciones) y si puede usar las salidas por país / IPs adicionales.
+
+La cuenta entra en el mismo panel con su usuario y sólo ve **Instalaciones**. Cada instalación es una red privada aislada (la siguiente /24 libre de su bloque: `10.20.0.0/24`, `10.20.1.0/24`…) con sus dispositivos, routers, servicios, puertos, DNS, filtros y usuarios, y su propio acceso al panel para el responsable de esa sede. Las instalaciones están aisladas entre sí y del resto de clientes; el host enruta el bloque por WireGuard y le da salida a Internet (y a las salidas por país) con NAT. Suspender la cuenta suspende sus instalaciones; borrarla las borra.
+
 ## Marca: nombre y logo
 
 En **Ajustes › Marca** cambias el nombre de la aplicación (y el nombre corto que aparece bajo el icono en el móvil) y subes tu logo (PNG, JPG, WebP o SVG; mejor cuadrado y con fondo transparente). El panel genera los iconos de la app instalada (iPhone y Android, con el color de fondo que elijas), el de la pestaña del navegador y el del menú, con vista previa antes de guardar. Se usan también en la página pública, los avisos y los emails. «Restaurar original» vuelve al escudo por defecto. El logo se guarda en la base de datos, así que va incluido en las copias de seguridad.

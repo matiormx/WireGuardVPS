@@ -64,11 +64,71 @@ def generate_psk() -> str:
 
 # ---------------------------------------------------------------------- direccionamiento
 def tenant_network(settings: Settings, net_index: int) -> ipaddress.IPv4Network:
+    if net_index < 0:
+        # Instalación de una cuenta Enterprise: su /24 va codificada en el índice
+        # (-(dirección de red >> 8)), dentro del bloque propio de la cuenta.
+        return ipaddress.IPv4Network(((-net_index) << 8, ORG_PREFIX))
     if not 1 <= net_index <= settings.tenant_capacity:
         raise ValueError(f"Índice de red fuera de rango: {net_index}")
     size = 2 ** (32 - settings.tenant_prefix)
     base = int(settings.wg_subnet.network_address) + net_index * size
     return ipaddress.IPv4Network((base, settings.tenant_prefix))
+
+
+ORG_PREFIX = 24
+ORG_CANDIDATES = [ipaddress.IPv4Network(f"10.{n}.0.0/16") for n in range(20, 250)]
+CGNAT = ipaddress.IPv4Network("100.64.0.0/10")
+
+
+def org_net_index(net: ipaddress.IPv4Network) -> int:
+    return -(int(net.network_address) >> 8)
+
+
+def org_blocks(c: sqlite3.Connection) -> list[ipaddress.IPv4Network]:
+    return [ipaddress.IPv4Network(r[0]) for r in c.execute("SELECT network FROM orgs")]
+
+
+def next_free_org_net(c: sqlite3.Connection, block: ipaddress.IPv4Network) -> ipaddress.IPv4Network | None:
+    """Siguiente /24 libre del bloque de una cuenta Enterprise para una instalación nueva."""
+    used = {r[0] for r in c.execute("SELECT net_index FROM tenants WHERE net_index < 0")}
+    for net in block.subnets(new_prefix=ORG_PREFIX):
+        if org_net_index(net) not in used:
+            return net
+    return None
+
+
+def platform_nets(c: sqlite3.Connection, settings: Settings, exclude_org: int | None = None) -> list[ipaddress.IPv4Network]:
+    """Redes ya ocupadas: la de la VPN, los bloques Enterprise y las LAN de los routers."""
+    nets = [settings.wg_subnet]
+    nets += [ipaddress.IPv4Network(r["network"]) for r in c.execute("SELECT id, network FROM orgs") if r["id"] != exclude_org]
+    for r in c.execute("SELECT lan_networks FROM devices WHERE kind = 'router'"):
+        nets += [ipaddress.IPv4Network(x, strict=False) for x in parse_lans(r["lan_networks"])]
+    return nets
+
+
+def check_org_block(c: sqlite3.Connection, settings: Settings, value: str,
+                    exclude_org: int | None = None) -> ipaddress.IPv4Network:
+    """Valida el bloque de una cuenta Enterprise. ValueError con el motivo si no vale."""
+    try:
+        net = ipaddress.ip_network(value.strip(), strict=True)
+    except ValueError:
+        raise ValueError(f"Red no válida: {value!r} (ejemplo: 10.20.0.0/16)") from None
+    if not isinstance(net, ipaddress.IPv4Network) or not 8 <= net.prefixlen <= ORG_PREFIX:
+        raise ValueError("Usa una red IPv4 entre /8 y /24 (p. ej. 10.20.0.0/16)")
+    if not (net.is_private or net.subnet_of(CGNAT)) or net.is_loopback or net.is_link_local:
+        raise ValueError(f"{net}: sólo redes privadas (10.x, 172.16-31.x, 192.168.x o 100.64-127.x)")
+    for other in platform_nets(c, settings, exclude_org):
+        if net.overlaps(other):
+            raise ValueError(f"{net} se solapa con {other}, que ya está en uso; elige otro rango")
+    return net
+
+
+def suggest_org_block(c: sqlite3.Connection, settings: Settings) -> str | None:
+    taken = platform_nets(c, settings)
+    for net in ORG_CANDIDATES:
+        if not any(net.overlaps(t) for t in taken):
+            return str(net)
+    return None
 
 
 def device_capacity(settings: Settings) -> int:
@@ -270,6 +330,7 @@ class WireGuardManager:
         self.tenants_list = self.fw_dir / "tenants.list"
         self.dns_list = self.fw_dir / "dns.list"
         self.forwards_list = self.fw_dir / "forwards.list"
+        self.blocks_list = self.fw_dir / "blocks.list"   # bloques Enterprise: salida a Internet y NAT
         self.stamp = self.fw_dir / "apply.stamp"
 
     def server_public_key(self) -> str:
@@ -306,6 +367,7 @@ class WireGuardManager:
                           tuple(parse_lans(r["lan_networks"])) if r["kind"] == "router" else ()) for r in rows]
             all_lans = {lan for lans in lans_by_tenant.values() for lan in lans}
             with self.db.conn() as c:
+                blocks = [str(n) for n in org_blocks(c)]
                 fwd_lines = forward_lines(c)
                 from . import exits  # import local: exits no depende de este módulo
                 self.exit_usable = exits.write_files(c, self.settings, _atomic_write)
@@ -314,12 +376,13 @@ class WireGuardManager:
             _atomic_write(self.tenants_list, "".join(f"{g}\n" for g in groups), 0o644)
             _atomic_write(self.dns_list, "".join(f"{n}\n" for n in dns_nets), 0o644)
             _atomic_write(self.forwards_list, "".join(f"{x}\n" for x in fwd_lines), 0o644)
+            _atomic_write(self.blocks_list, "".join(f"{b}\n" for b in blocks), 0o644)
             # Escritura in situ (IN_CLOSE_WRITE) para disparar la unidad .path del host.
             with open(self.stamp, "w") as fh:
                 fh.write(f"{time.time():.3f}\n")
             applied = self._syncconf(render_server_conf(self.settings, private, peers, full=False))
             # `wg syncconf` no toca la tabla de rutas: las LAN de los routers se enrutan aquí.
-            self._sync_routes(all_lans)
+            self._sync_routes(all_lans | set(blocks))
             return applied
 
     def refresh_exits(self) -> tuple[set[int], set[int]] | None:
@@ -353,7 +416,7 @@ class WireGuardManager:
             return None
 
     def _sync_routes(self, desired: set[str]) -> None:
-        """Rutas por wg0 hacia las LAN de los routers: añade las nuevas y quita las que sobran."""
+        """Rutas por wg0 hacia las LAN de los routers y los bloques Enterprise: añade las nuevas y quita las que sobran."""
         iface = self.settings.wg_interface
         if not self.interface_up():
             return

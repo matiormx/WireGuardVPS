@@ -8,7 +8,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-NS=(srv a1 a2 b1 inet sw r1 lan1 x1)
+NS=(srv a1 a2 b1 inet sw r1 lan1 x1 e1 e1b e2)
 netns_cleanup() {
     for p in "${PIDS[@]+"${PIDS[@]}"}"; do kill "$p" 2>/dev/null; done
     for n in "${NS[@]}"; do ip netns del "$n" 2>/dev/null; done
@@ -33,6 +33,7 @@ EXITS=/etc/wireguard/wgp/exits.list
 EXIT_ROUTES=/etc/wireguard/wgp/exit_routes.list
 IPS=/etc/wireguard/wgp/ips.list
 IP_ROUTES=/etc/wireguard/wgp/ip_routes.list
+BLOCKS=/etc/wireguard/wgp/blocks.list
 PIDS=()
 
 for n in "${NS[@]}"; do ip netns add "$n"; ip -n "$n" link set lo up; done
@@ -40,7 +41,8 @@ for n in "${NS[@]}"; do ip netns add "$n"; ip -n "$n" link set lo up; done
 # br_netfilter ni las reglas FORWARD del host (p. ej. las de Docker) le afectan.
 ip -n sw link add br-sim type bridge && ip -n sw link set br-sim up
 ip -n sw link add s-br type veth peer name wg0 netns srv && ip -n sw link set s-br master br-sim up
-for d in a1:10.252.1.2 a2:10.252.1.3 b1:10.252.2.2; do
+# e1/e1b: instalación 1 de una cuenta Enterprise (10.20.0.0/24); e2: instalación 2 (10.20.1.0/24).
+for d in a1:10.252.1.2 a2:10.252.1.3 b1:10.252.2.2 e1:10.20.0.2 e1b:10.20.0.3 e2:10.20.1.2; do
     n=${d%%:*}; a=${d#*:}
     ip -n sw link add "$n-br" type veth peer name eth0 netns "$n"
     ip -n sw link set "$n-br" master br-sim up
@@ -56,6 +58,7 @@ ip -n r1 addr add 192.168.88.1/24 dev lan && ip -n r1 link set lan up
 ip -n lan1 addr add 192.168.88.10/24 dev eth0 && ip -n lan1 link set eth0 up && ip -n lan1 route add default via 192.168.88.1
 ip netns exec r1 sysctl -qw net.ipv4.ip_forward=1
 ip -n srv addr add 10.252.0.1/16 dev wg0 && ip -n srv link set wg0 up
+ip -n srv route add 10.20.0.0/16 dev wg0          # bloque Enterprise (en producción lo enruta el panel)
 # En WireGuard la ruta a la LAN va por wg0 (AllowedIPs del router); en la simulación, vía r1.
 ip -n srv route add 192.168.88.0/24 via 10.252.1.5 dev wg0
 ip link add eth0 netns srv type veth peer name eth0 netns inet
@@ -82,9 +85,10 @@ printf 'wgx1 201\n' >"$EXITS"
 rm -f /var/lib/wgp-firewall/ips.added
 printf '198.51.100.50\n300.1.1.1\n' >"$IPS"
 printf '10.252.1.3 198.51.100.50\n10.252.2.2 198.51.100.77\n' >"$IP_ROUTES"
-printf '10.252.1.2 wgx1\n10.252.1.5 wgx1\n999.1.1.1 wgx1\n10.252.2.2 wgx9\n' >"$EXIT_ROUTES"
+printf '10.252.1.2 wgx1\n10.252.1.5 wgx1\n999.1.1.1 wgx1\n10.252.2.2 wgx9\n10.20.1.2 wgx1\n' >"$EXIT_ROUTES"
 
-printf '10.252.1.0/24 192.168.88.0/24\n10.252.2.0/24\n; iptables -F\n' >"$LIST"
+printf '10.252.1.0/24 192.168.88.0/24\n10.252.2.0/24\n10.20.0.0/24\n10.20.1.0/24\n; iptables -F\n' >"$LIST"
+printf '10.20.0.0/16\n8.8.8.8/32; rm -rf /\n' >"$BLOCKS"
 printf '10.252.1.0/24\n' >"$DNS_LIST"          # sólo el cliente 1 tiene filtros DNS
 ip netns exec srv iptables -P INPUT DROP          # el resolver sólo es accesible por la regla propia
 
@@ -153,6 +157,13 @@ check a1 192.168.88.10 pass "site-to-site: dispositivo -> LAN del router de su c
 check lan1 10.252.1.2 pass  "site-to-site: LAN del router -> dispositivo de su cliente"
 check b1 192.168.88.10 block "site-to-site: otro cliente -> LAN ajena"
 check lan1 10.252.2.2 block "site-to-site: LAN -> dispositivo de otro cliente"
+check e1 10.20.0.3  pass  "Enterprise: misma instalación"
+check e1 10.20.1.2  block "Enterprise: entre instalaciones de la misma cuenta"
+check e1 10.252.1.2 block "Enterprise -> cliente de la red general"
+check a1 10.20.0.2  block "cliente de la red general -> Enterprise"
+check e1 8.8.8.8    pass  "Enterprise: Internet por NAT"
+check inet 10.20.0.2 block "Internet -> Enterprise"
+dns_check e1 10.252.0.1 resolver "Enterprise: llega al resolver del servidor"
 
 fwd_check() { # fwd_check <tcp|udp> <puerto> <respuesta esperada|cerrado> <descripción>
     local got
@@ -185,6 +196,8 @@ except Exception: print('sin-conexion')")
 }
 exit_check a1 203.0.113.1  "dispositivo con salida por otro país"
 exit_check a2 198.51.100.50 "dispositivo con IP adicional"
+exit_check e2 203.0.113.1  "Enterprise con salida por otro país (SNAT a la red de la VPN)"
+exit_check e1 198.51.100.1 "Enterprise sin salida: IP del servidor principal"
 [[ $(ip netns exec srv ip -4 -o addr show dev eth0 | grep -c '198.51.100.50/32') -eq 1 ]] || { echo "FALLO la IP adicional no se configuró"; fail=1; }
 exit_check b1 198.51.100.1 "salida inexistente / IP no configurada: servidor principal"
 fwd_check udp 7000 "udp-b1 10.252.0.1" "puertos abiertos siguen funcionando con IPs adicionales"
@@ -211,7 +224,7 @@ dns_check b1 10.252.0.1 resolver "cliente sin filtros puede usar el resolver"
 dot_check a1 block "DNS-over-TLS bloqueado con filtros"
 dot_check b1 pass  "DNS-over-TLS permitido sin filtros"
 
-[[ $(ip netns exec srv iptables -S FORWARD | grep -c wg-manager) -eq 9 ]] || { echo "FALLO reglas duplicadas"; fail=1; }
+[[ $(ip netns exec srv iptables -S FORWARD | grep -c wg-manager) -eq 10 ]] || { echo "FALLO reglas duplicadas"; fail=1; }
 
 printf '10.252.2.0/24\n' >"$LIST"
 printf 'udp 7000 10.252.2.2 7777\n' >"$FWD_LIST"

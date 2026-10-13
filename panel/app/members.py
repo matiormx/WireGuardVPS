@@ -86,7 +86,7 @@ def register(app: FastAPI, d) -> None:
 
     def member_for(c: sqlite3.Connection, p, member_id: int) -> sqlite3.Row:
         row = c.execute("SELECT * FROM members WHERE id = ?", (member_id,)).fetchone()
-        if not row or (not p.is_admin and row["tenant_id"] != p.id):
+        if not row or not d.can_access(p, row["tenant_id"]):
             raise HTTPException(404, "Usuario no encontrado")
         return row
 
@@ -163,7 +163,7 @@ def register(app: FastAPI, d) -> None:
     @app.delete("/api/invites/{invite_id}")
     def delete_invite(invite_id: int, p: d.User, c: d.Conn):
         row = c.execute("SELECT tenant_id FROM invites WHERE id = ?", (invite_id,)).fetchone()
-        if not row or (not p.is_admin and row["tenant_id"] != p.id):
+        if not row or not d.can_access(p, row["tenant_id"]):
             raise HTTPException(404, "Invitación no encontrada")
         c.execute("DELETE FROM invites WHERE id = ?", (invite_id,))
         return {"ok": True}

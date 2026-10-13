@@ -448,7 +448,7 @@ def register(app, d) -> None:
     @app.put("/api/me/subdomain")
     async def put_my_subdomain(body: SubdomainIn, p: d.User, c: d.Conn):
         """El cliente cambia su dirección por defecto (acme.<dominio>)."""
-        if p.is_admin:
+        if p.is_admin or p.is_org:
             raise HTTPException(400, "Sólo para clientes")
         if not cf.active(c):
             raise HTTPException(409, "Las direcciones de cliente no están activas")

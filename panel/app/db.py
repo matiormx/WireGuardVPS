@@ -311,6 +311,20 @@ CREATE TABLE IF NOT EXISTS sys_hourly (
     hour  INTEGER PRIMARY KEY,
     cpu   REAL, cpu_max REAL, mem REAL, mem_max REAL, swap REAL, disk REAL, load1 REAL, rx REAL, tx REAL
 );
+CREATE TABLE IF NOT EXISTS orgs (
+    id            INTEGER PRIMARY KEY,
+    name          TEXT NOT NULL,
+    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    must_change   INTEGER NOT NULL DEFAULT 1,
+    network       TEXT NOT NULL UNIQUE,
+    max_installs  INTEGER NOT NULL DEFAULT 10,
+    max_devices   INTEGER NOT NULL DEFAULT 100,
+    allow_exits   INTEGER NOT NULL DEFAULT 1,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    notes         TEXT NOT NULL DEFAULT '',
+    created_at    INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS dns_records (
     id         INTEGER PRIMARY KEY,
     tenant_id  INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -404,6 +418,9 @@ def _migrate(c: sqlite3.Connection) -> None:
         # Avisar si se desconecta: activado por defecto en los routers existentes.
         _ensure_column(c, "devices", "monitor", "INTEGER NOT NULL DEFAULT 0")
         c.execute("UPDATE devices SET monitor = 1 WHERE kind = 'router'")
+    # Enterprise: instalaciones (clientes) de una cuenta Enterprise, en su propio bloque de red.
+    _ensure_column(c, "tenants", "org_id", "INTEGER REFERENCES orgs(id) ON DELETE CASCADE")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_tenants_org ON tenants(org_id)")
     if get_setting(c, "dns_suffixes") is None:
         set_setting(c, "dns_suffixes", "vpn")
 
@@ -455,6 +472,8 @@ def username_taken(c: sqlite3.Connection, username: str, exclude_tenant: int | N
     if c.execute("SELECT 1 FROM admins WHERE username = ? COLLATE NOCASE", (username,)).fetchone():
         return True
     if c.execute("SELECT 1 FROM members WHERE username = ? COLLATE NOCASE", (username,)).fetchone():
+        return True
+    if c.execute("SELECT 1 FROM orgs WHERE username = ? COLLATE NOCASE", (username,)).fetchone():
         return True
     row = c.execute("SELECT id FROM tenants WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
     return bool(row) and row["id"] != exclude_tenant

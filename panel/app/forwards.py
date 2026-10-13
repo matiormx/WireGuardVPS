@@ -73,7 +73,7 @@ def register(app: FastAPI, d) -> None:
 
     def forward_for(c: sqlite3.Connection, p, forward_id: int) -> sqlite3.Row:
         row = c.execute("SELECT * FROM forwards WHERE id = ?", (forward_id,)).fetchone()
-        if not row or (not p.is_admin and row["tenant_id"] != p.id):
+        if not row or not d.can_access(p, row["tenant_id"]):
             raise HTTPException(404, "Reenvío no encontrado")
         return row
 
@@ -95,9 +95,7 @@ def register(app: FastAPI, d) -> None:
 
     @app.post("/api/forwards", status_code=201)
     def create_forward(body: ForwardIn, p: d.User, c: d.Conn):
-        tid = body.tenant_id if p.is_admin else p.id
-        if tid is None:
-            raise HTTPException(400, "tenant_id es obligatorio")
+        tid = d.scope_tenant(p, body.tenant_id)
         t = d.tenant_or_404(c, tid)
         count = c.execute("SELECT COUNT(*) FROM forwards WHERE tenant_id = ?", (tid,)).fetchone()[0]
         if count >= t["max_forwards"]:

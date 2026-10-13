@@ -31,7 +31,7 @@ from . import alerts, domains, security
 log = logging.getLogger("wgp.account")
 
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
-ROLE_TABLE = {"admin": "admins", "tenant": "tenants", "member": "members"}
+ROLE_TABLE = {"admin": "admins", "org": "orgs", "tenant": "tenants", "member": "members"}
 CODE_TTL = 10 * 60
 RESET_TTL = 60 * 60
 MAX_ATTEMPTS = 5

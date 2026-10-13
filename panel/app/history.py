@@ -49,7 +49,7 @@ def register(app: FastAPI, d) -> None:
     def scope(p, c: sqlite3.Connection, tenant_id: int | None, device_id: int | None) -> tuple[str, tuple, dict]:
         """Filtro SQL (tenant_id / device_id) según quién pregunta; {t} = prefijo de tabla."""
         if not p.is_admin:
-            tenant_id = p.tenant_id
+            tenant_id = d.scope_tenant(p, tenant_id)   # Enterprise: una de sus instalaciones
         info: dict = {"tenant": None, "device": None}
         if tenant_id is not None:
             info["tenant"] = d.tenant_or_404(c, tenant_id)["name"]

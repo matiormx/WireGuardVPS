@@ -287,6 +287,7 @@ pre.conf {
   max-height: 260px; overflow: auto;
 }
 .note { font-size: 12.5px; color: var(--muted); }
+.note > svg { width: 14px; height: 14px; vertical-align: -2px; flex: none; }
 
 /* ---------- toasts ---------- */
 #toasts { position: fixed; right: 20px; bottom: 20px; display: grid; gap: 10px; z-index: 60; }

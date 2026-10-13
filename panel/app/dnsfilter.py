@@ -428,6 +428,7 @@ class DnsFilter:
         self.port = settings.dns_port
         self.policies: dict[int, Policy] = {}
         self.lan_policies: list[tuple[ipaddress.IPv4Network, int]] = []
+        self.org_blocks: list[ipaddress.IPv4Network] = []
         self.suffixes: list[str] = ["vpn"]
         self.stats: dict[int, TenantStats] = {}
         self.cache: OrderedDict[tuple, tuple[float, bytes]] = OrderedDict()
@@ -447,6 +448,7 @@ class DnsFilter:
             ).fetchall()
             device_rows = c.execute("SELECT tenant_id, ip, hostname, dns_filter, enabled, kind, lan_networks FROM devices").fetchall()
             record_rows = c.execute("SELECT tenant_id, name, ip FROM dns_records").fetchall()
+            self.org_blocks = [ipaddress.IPv4Network(r[0]) for r in c.execute("SELECT network FROM orgs")]
             self.suffixes = parse_suffixes(get_setting(c, "dns_suffixes"))
         exempt: dict[int, set[str]] = {}
         zones: dict[int, dict[str, str]] = {}
@@ -492,6 +494,10 @@ class DnsFilter:
         idx = (ip - self._base) >> self._host_bits
         if 0 <= ip - self._base < self.settings.wg_subnet.num_addresses:
             return self.policies.get(idx) if idx > 0 else None
+        # Instalación Enterprise: su índice es -(red /24 >> 8).
+        org_policy = self.policies.get(-(ip >> 8))
+        if org_policy is not None:
+            return org_policy
         addr = ipaddress.IPv4Address(ip)
         for net, net_index in self.lan_policies:
             if addr in net:
@@ -529,7 +535,8 @@ class DnsFilter:
                 ip = str(ipaddress.IPv4Address(".".join(reversed(parts))))
             except ValueError:
                 return None
-            if ipaddress.IPv4Address(ip) not in self.settings.wg_subnet:
+            addr = ipaddress.IPv4Address(ip)
+            if addr not in self.settings.wg_subnet and not any(addr in b for b in self.org_blocks):
                 return None  # inversas públicas: al DNS de subida
             host = policy.reverse.get(ip) if policy else None
             if host and q.qtype in (QTYPE.PTR, QTYPE.ANY):

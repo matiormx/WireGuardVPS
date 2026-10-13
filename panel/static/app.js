@@ -13,6 +13,7 @@ const REFRESH_MS = 10000;
 /* ------------------------------------------------------------------ iconos */
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ICONS = {
+  building: '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M9 22v-4h6v4M8 6h.01M12 6h.01M16 6h.01M8 10h.01M12 10h.01M16 10h.01M8 14h.01M12 14h.01M16 14h.01"/>',
   cloud: '<path d="M17.5 19H7a5 5 0 1 1 1.1-9.9A6 6 0 0 1 19.6 11 4 4 0 0 1 17.5 19z"/>',
   tag: '<path d="M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/><path d="M7 7h.01"/>',
   chevron: '<path d="M6 9l6 6 6-6"/>',
@@ -138,6 +139,15 @@ document.addEventListener("click", (e) => {
   code.classList.add("copied");
   setTimeout(() => code.classList.remove("copied"), 1200);
 });
+/* Admin y cuentas Enterprise gestionan clientes desde arriba (?tenant_id=…).
+   Para una cuenta Enterprise, sus clientes se llaman «instalaciones». */
+function isOrg() { return !!state.me && state.me.role === "org"; }
+function manages() { return !!state.me && (state.me.role === "admin" || state.me.role === "org"); }
+function clientsWord() { return isOrg() ? "Instalaciones" : "Clientes"; }
+function clientWord() { return isOrg() ? "instalación" : "cliente"; }
+function clientCrumbs(tenantId, name, label) {
+  return [h("a", { href: "#/clients", text: clientsWord() }), " / ", h("a", { href: `#/clients/${tenantId}`, text: name }), ` / ${label}`];
+}
 async function copyText(text, label = "Copiado al portapapeles") {
   try {
     await navigator.clipboard.writeText(text);
@@ -429,7 +439,7 @@ async function render() {
   if (state.me.must_change) return forcePasswordView();
   const [section, id, sub] = route();
   const isAdmin = state.me.role === "admin";
-  const main = shell(section || "home");
+  const main = shell(isOrg() && !section ? "clients" : section || "home");
   if (!state.passkeyChecked) {
     state.passkeyChecked = true;
     setTimeout(suggestPasskey, 900);
@@ -441,16 +451,17 @@ async function render() {
     if (section === "settings" && isAdmin) return await settingsView(main, id);
     if (section === "server" && isAdmin) return await serverView(main);
     if (section === "billing" && isAdmin) return await billingAdminView(main);
-    if (isAdmin) {
+    if (section === "enterprise" && isAdmin) return await enterpriseAdminView(main);
+    if (isAdmin || isOrg()) {
       if (section === "clients" && id && sub === "filters") return await filtersView(main, Number(id));
       if (section === "clients" && id && sub === "dns") return await zoneView(main, Number(id));
       if (section === "clients" && id && sub === "services") return await servicesView(main, Number(id));
       if (section === "clients" && id && sub === "ports") return await portsView(main, Number(id));
       if (section === "clients" && id && sub === "activity") return await activityView(main, Number(id));
       if (section === "clients" && id && sub === "users") return await usersView(main, Number(id));
-      if (section === "activity") return await activityView(main, null);
+      if (section === "activity" && isAdmin) return await activityView(main, null);
       if (section === "clients" && id) return await clientDetailView(main, Number(id));
-      if (section === "clients") return await clientsView(main);
+      if (section === "clients" || isOrg()) return await clientsView(main);
       return await dashboardView(main);
     }
     if (section === "activity") return await activityView(main, state.me.tenant_id);
@@ -500,8 +511,11 @@ function shell(active) {
     : state.me.role === "member"
     ? [["home", "#/", "devices", "Mis dispositivos"], ["activity", "#/activity", "activity", "Actividad"],
       ["alerts", "#/alerts", "bell", "Avisos"], ["account", "#/account", "key", "Cuenta"]]
+    : isOrg()
+    ? [["clients", "#/clients", "building", "Instalaciones"], ["account", "#/account", "key", "Cuenta"]]
     : isAdmin
-    ? [["home", "#/", "dashboard", "Panel"], ["clients", "#/clients", "users", "Clientes"], ["activity", "#/activity", "activity", "Actividad"],
+    ? [["home", "#/", "dashboard", "Panel"], ["clients", "#/clients", "users", "Clientes"], ["enterprise", "#/enterprise", "building", "Enterprise"],
+      ["activity", "#/activity", "activity", "Actividad"],
       ["server", "#/server", "server", "Servidor"], ["billing", "#/billing", "card", "Facturación"], ["alerts", "#/alerts", "bell", "Avisos"], ["settings", "#/settings", "globe", "Ajustes"],
       ["account", "#/account", "key", "Cuenta"]]
     : [["home", "#/", "network", "Mi red"], ["activity", "#/activity", "activity", "Actividad"], ["dns", "#/dns", "server", "DNS"], ["services", "#/services", "globe", "Servicios"],
@@ -522,7 +536,7 @@ function shell(active) {
     h("div", { class: "userbox" },
       h("div", { class: "avatar", text: initials(state.me.name || state.me.username) }),
       h("div", { class: "who" }, h("b", { text: state.me.name || state.me.username }),
-        h("span", { text: isAdmin ? "Administrador" : state.me.role === "member" ? state.me.tenant_name : "Cliente" })),
+        h("span", { text: isAdmin ? "Administrador" : isOrg() ? "Enterprise" : state.me.role === "member" ? state.me.tenant_name : "Cliente" })),
       h("button", { class: "btn ghost icon", title: "Cerrar sesión", onClick: logout }, icon("logout"))),
   );
   const main = h("main", { class: "main" }, spinnerBlock());
@@ -1749,20 +1763,38 @@ async function dashboardView(main) {
 async function clientsView(main) {
   let filter = "";
   let tenants = [];
+  let org = null;          // cuenta Enterprise (si es quien mira)
+  let orgNames = {};       // admin: org_id -> nombre de la cuenta Enterprise
+  const org_ = isOrg();
   const tableBox = h("div");
+  const quotaBox = h("div");
+  const newLabel = org_ ? "Nueva instalación" : "Nuevo cliente";
+  const create = () => newTenantModal(() => load(), org);
+  const drawQuota = () => {
+    if (!org) return fill(quotaBox);
+    const freeDevices = org.max_devices - org.devices_assigned;
+    fill(quotaBox, h("div", { class: "grid stats" },
+      statCard("building", "Instalaciones", `${org.installs} / ${org.max_installs}`, org.installs >= org.max_installs ? "Has llegado al límite de tu plan" : `Puedes crear ${org.max_installs - org.installs} más`),
+      statCard("devices", "Dispositivos", `${org.devices} / ${org.max_devices}`, `${org.devices_assigned} repartidos entre instalaciones · ${freeDevices} sin asignar`),
+      statCard("network", "Tu bloque de red", org.network, "Cada instalación recibe una /24 de este bloque", true)));
+  };
   const draw = () => {
     const q = filter.toLowerCase();
-    const rows = tenants.filter((t) => !q || t.name.toLowerCase().includes(q) || t.username.toLowerCase().includes(q) || t.network.includes(q));
+    const rows = tenants.filter((t) => !q || t.name.toLowerCase().includes(q) || t.username.toLowerCase().includes(q) || t.network.includes(q)
+      || (orgNames[t.org_id] || "").toLowerCase().includes(q));
     fill(tableBox, !tenants.length
-      ? h("div", { class: "empty" }, icon("users"), h("h2", { text: "Sin clientes" }),
-        h("p", { text: "Cada cliente recibe su propia red privada aislada." }),
-        h("button", { class: "btn primary", onClick: () => newTenantModal(() => load()) }, icon("plus"), "Nuevo cliente"))
+      ? h("div", { class: "empty" }, icon(org_ ? "building" : "users"), h("h2", { text: org_ ? "Aún no tienes instalaciones" : "Sin clientes" }),
+        h("p", { text: org_ ? "Cada instalación es una red privada aislada (una /24 de tu bloque) con sus propios dispositivos, routers, servicios y usuarios."
+          : "Cada cliente recibe su propia red privada aislada." }),
+        h("button", { class: "btn primary", onClick: create }, icon("plus"), newLabel))
       : h("div", { class: "table-wrap" }, h("table", { class: "cards" },
-        h("thead", null, h("tr", null, h("th", { text: "Cliente" }), h("th", { text: "Red" }), h("th", { text: "Dispositivos" }),
+        h("thead", null, h("tr", null, h("th", { text: org_ ? "Instalación" : "Cliente" }), h("th", { text: "Red" }), h("th", { text: "Dispositivos" }),
           h("th", { class: "hide-sm", text: "En línea" }), h("th", { class: "hide-sm", text: "Tráfico" }), h("th", { text: "Estado" }))),
         h("tbody", null, rows.map((t) => h("tr", { class: "link", onClick: () => go(`#/clients/${t.id}`) },
           h("td", { class: "primary" }, h("div", { class: "cell-flex" }, h("div", { class: "avatar", text: initials(t.name) }),
-            h("div", null, h("div", { class: "name" }, t.name, t.billing_status === "free" ? h("span", { class: "badge ok tiny", text: "Gratis" }) : null),
+            h("div", null, h("div", { class: "name" }, t.name,
+              t.org_id && !org_ ? h("span", { class: "badge accent tiny", text: `Enterprise · ${orgNames[t.org_id] || ""}` })
+                : t.billing_status === "free" && !org_ ? h("span", { class: "badge ok tiny", text: "Gratis" }) : null),
               h("div", { class: "meta", text: t.username })))),
           h("td", { class: "mono", "data-label": "Red", text: t.network }),
           h("td", { "data-label": "Dispositivos" }, h("div", { class: "meta", text: `${t.device_count} / ${t.max_devices}` }),
@@ -1772,40 +1804,171 @@ async function clientsView(main) {
           h("td", { class: "aside" }, h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : "Suspendido" })))))))
     );
   };
-  const load = async () => { tenants = await api("GET", "/api/admin/tenants"); draw(); };
+  const load = async () => {
+    const [list, extra] = await Promise.all([api("GET", "/api/admin/tenants"),
+      org_ ? api("GET", "/api/org") : api("GET", "/api/admin/orgs").catch(() => ({ orgs: [] }))]);
+    tenants = list;
+    if (org_) org = extra;
+    else orgNames = Object.fromEntries(extra.orgs.map((o) => [o.id, o.name]));
+    drawQuota();
+    draw();
+  };
   await load();
   fill(main,
-    pageHead("Clientes", "Cada cliente tiene su red /24 privada; sus dispositivos se ven entre sí, pero nunca con los de otros clientes.",
-      [h("div", { class: "search" }, icon("search"), input({ placeholder: "Buscar cliente o red…", onInput: (e) => { filter = e.target.value; draw(); } })),
-        h("button", { class: "btn primary", onClick: () => newTenantModal(() => load()) }, icon("plus"), "Nuevo cliente")]),
+    pageHead(org_ ? "Instalaciones" : "Clientes", org_
+      ? `${state.me.name}: cada instalación tiene su propia red privada; sus dispositivos se ven entre sí, pero nunca con los de otras instalaciones.`
+      : "Cada cliente tiene su red /24 privada; sus dispositivos se ven entre sí, pero nunca con los de otros clientes.",
+      [h("div", { class: "search" }, icon("search"), input({ placeholder: org_ ? "Buscar instalación o red…" : "Buscar cliente o red…", onInput: (e) => { filter = e.target.value; draw(); } })),
+        h("button", { class: "btn primary", onClick: create }, icon("plus"), newLabel)]),
+    quotaBox,
     h("div", { class: "card" }, tableBox));
   every(load);
 }
 
-function newTenantModal(onDone) {
+/* ------------------------------------------------------------------ admin: cuentas Enterprise */
+async function enterpriseAdminView(main) {
+  let data = null;
+  const box = h("div", { class: "card" }, spinnerBlock());
+  const load = async () => { data = await api("GET", "/api/admin/orgs"); draw(); };
+  const bar = (used, max) => h("div", { class: "progress" }, h("span", { style: { width: `${Math.min(100, (100 * used) / Math.max(1, max))}%` } }));
+  const draw = () => fill(box, !data.orgs.length
+    ? h("div", { class: "empty" }, icon("building"), h("h2", { text: "Sin cuentas Enterprise" }),
+      h("p", { text: "Una cuenta Enterprise gestiona sus propias instalaciones (redes aisladas) dentro de un bloque de red suyo, sin pasar por los cobros de la plataforma." }),
+      h("button", { class: "btn primary", onClick: () => orgModal(null, data, load) }, icon("plus"), "Nueva cuenta Enterprise"))
+    : h("div", { class: "table-wrap" }, h("table", { class: "cards" },
+      h("thead", null, h("tr", null, h("th", { text: "Cuenta" }), h("th", { text: "Bloque" }), h("th", { text: "Instalaciones" }),
+        h("th", { text: "Dispositivos" }), h("th", { text: "Estado" }))),
+      h("tbody", null, data.orgs.map((o) => h("tr", { class: "link", onClick: () => orgDetailModal(o, data, load) },
+        h("td", { class: "primary" }, h("div", { class: "cell-flex" }, h("div", { class: "avatar", text: initials(o.name) }),
+          h("div", null, h("div", { class: "name", text: o.name }), h("div", { class: "meta", text: o.username })))),
+        h("td", { class: "mono", "data-label": "Bloque", text: o.network }),
+        h("td", { "data-label": "Instalaciones" }, h("div", { class: "meta", text: `${o.installs} / ${o.max_installs}` }), bar(o.installs, o.max_installs)),
+        h("td", { "data-label": "Dispositivos" }, h("div", { class: "meta", text: `${o.devices} en uso · ${o.devices_assigned} / ${o.max_devices} repartidos` }),
+          bar(o.devices_assigned, o.max_devices)),
+        h("td", { class: "aside" }, h("span", { class: `badge ${o.enabled ? "ok" : "off"}`, text: o.enabled ? "Activa" : "Suspendida" }),
+          o.must_change ? h("span", { class: "badge warn tiny", text: "Sin primer acceso" }) : null)))))));
+  await load();
+  fill(main,
+    pageHead("Cuentas Enterprise", "Como un reseller sin cobros: cada cuenta crea y gestiona sus instalaciones dentro de su propio bloque de red, con los límites que le pongas.",
+      [h("button", { class: "btn primary", onClick: () => orgModal(null, data, load) }, icon("plus"), "Nueva cuenta Enterprise")]),
+    box,
+    h("div", { class: "card" }, h("h3", { text: "Cómo funciona" }),
+      h("ol", { class: "steps" },
+        h("li", null, "Crea la cuenta y dale un bloque de red propio, fuera de la red general (", h("code", { text: data.vpn_network }), "). Por defecto se propone ",
+          h("code", { text: data.suggested_network || "10.20.0.0/16" }), "."),
+        h("li", { text: "Comparte el usuario y la contraseña: la cuenta entra en este mismo panel y sólo ve sus instalaciones." }),
+        h("li", { text: "Cada instalación es una red privada aislada (la siguiente /24 libre de su bloque) con sus dispositivos, routers, servicios, puertos y usuarios." }),
+        h("li", { text: "Tú fijas cuántas instalaciones puede crear, cuántos dispositivos reparte entre ellas y si pueden usar las salidas por país o IPs adicionales." })),
+      h("p", { class: "note", style: { margin: "10px 0 0" } }, icon("shield"),
+        " Las instalaciones están aisladas entre sí y del resto de clientes, igual que cualquier cliente. No pasan por Stripe.")));
+  every(load);
+}
+
+function orgModal(o, data, onDone) {
+  const isNew = !o;
+  const nameInp = input({ name: "name", required: true, maxlength: "64", value: o ? o.name : "", placeholder: "Celec S.L." });
+  const userInp = input({ name: "username", required: true, pattern: "[A-Za-z0-9][A-Za-z0-9._\\-]{2,31}", placeholder: "celec" });
+  if (isNew) {
+    let touched = false;
+    userInp.addEventListener("input", () => { touched = true; });
+    nameInp.addEventListener("input", () => { if (!touched) userInp.value = slugify(nameInp.value); });
+  }
+  formModal({
+    title: isNew ? "Nueva cuenta Enterprise" : `Editar ${o.name}`,
+    submitLabel: isNew ? "Crear cuenta" : "Guardar",
+    fields: [
+      h("div", { class: "full" }, field("Nombre de la empresa", nameInp)),
+      isNew ? field("Usuario de acceso", userInp, "3-32 caracteres: letras, números . _ -") : null,
+      isNew ? passwordField("password", "Contraseña inicial", "Deberá cambiarla en su primer acceso.") : null,
+      isNew ? h("div", { class: "full" }, field("Bloque de red", input({ name: "network", class: "input mono", value: data.suggested_network || "",
+        placeholder: "10.20.0.0/16", inputmode: "decimal", autocapitalize: "off", spellcheck: "false" }),
+        `Red privada propia de la cuenta (entre /8 y /24). Cada instalación usa una /24: una /16 da para 256. No puede solaparse con ${data.vpn_network} ni con otras cuentas.`))
+        : field("Bloque de red", input({ value: o.network, disabled: true, class: "input mono" })),
+      field("Máx. instalaciones", input({ name: "max_installs", type: "number", min: String(o ? Math.max(1, o.installs) : 1), max: "4096", value: String(o ? o.max_installs : 10), required: true })),
+      field("Máx. dispositivos (total)", input({ name: "max_devices", type: "number", min: String(o ? Math.max(1, o.devices_assigned) : 1), max: "100000", value: String(o ? o.max_devices : 100), required: true }),
+        "La cuenta los reparte entre sus instalaciones."),
+      h("div", { class: "full field" }, switchEl("allow_exits", o ? o.allow_exits : true, "Puede usar salidas por país e IPs adicionales")),
+      h("div", { class: "full" }, field("Notas", h("textarea", { class: "input", name: "notes", maxlength: "500", value: o ? o.notes : "", placeholder: "Contrato, contacto, referencia…" }))),
+    ],
+    onSubmit: async (fd) => {
+      const body = { name: fd.get("name"), max_installs: Number(fd.get("max_installs")), max_devices: Number(fd.get("max_devices")),
+        allow_exits: fd.get("allow_exits") === "on", notes: fd.get("notes") || "" };
+      if (isNew) {
+        const r = await api("POST", "/api/admin/orgs", { ...body, username: fd.get("username"), password: fd.get("password"), network: (fd.get("network") || "").trim() || null });
+        toast(`Cuenta creada con el bloque ${r.network}`);
+        credentialsModal(r.name, r.username, fd.get("password"), r.network);
+      } else {
+        await api("PATCH", `/api/admin/orgs/${o.id}`, body);
+        toast("Cuenta actualizada");
+      }
+      onDone && onDone();
+    },
+  });
+}
+
+function orgDetailModal(o, data, onDone) {
+  const done = () => { m.close(); onDone && onDone(); };
+  const m = modal({
+    title: o.name,
+    body: [
+      h("dl", { class: "kv" },
+        h("dt", { text: "Usuario" }), h("dd", { class: "mono", text: o.username }),
+        h("dt", { text: "Bloque" }), h("dd", null, h("code", { text: o.network })),
+        h("dt", { text: "Instalaciones" }), h("dd", { text: `${o.installs} de ${o.max_installs}` }),
+        h("dt", { text: "Dispositivos" }), h("dd", { text: `${o.devices} en uso · ${o.devices_assigned} de ${o.max_devices} repartidos` }),
+        h("dt", { text: "Salidas por país" }), h("dd", { text: o.allow_exits ? "Permitidas" : "No" }),
+        h("dt", { text: "Alta" }), h("dd", { text: fmtDate(o.created_at) })),
+      o.notes ? h("p", { class: "note", style: { whiteSpace: "pre-wrap" }, text: o.notes }) : null,
+    ],
+    actions: [
+      h("button", { class: "btn ghost icon", title: "Eliminar cuenta", onClick: async () => {
+        if (!(await confirmDialog({ title: "Eliminar cuenta Enterprise", message: `Se eliminarán ${o.name}, sus ${o.installs} instalaciones y sus ${o.devices} dispositivos. Esta acción no se puede deshacer.`, confirmLabel: "Eliminar" }))) return;
+        try { await api("DELETE", `/api/admin/orgs/${o.id}`); toast("Cuenta eliminada"); done(); } catch (e) { toast(e.message, "err"); }
+      } }, icon("trash")),
+      h("button", { class: `btn ${o.enabled ? "danger" : ""}`, onClick: async () => {
+        if (o.enabled && !(await confirmDialog({ title: "Suspender cuenta", message: `${o.name} no podrá entrar y se desconectarán todas sus instalaciones.`, confirmLabel: "Suspender" }))) return;
+        try { await api("PATCH", `/api/admin/orgs/${o.id}`, { enabled: !o.enabled }); toast(o.enabled ? "Cuenta suspendida" : "Cuenta reactivada"); done(); } catch (e) { toast(e.message, "err"); }
+      } }, icon("power"), o.enabled ? "Suspender" : "Reactivar"),
+      h("button", { class: "btn", onClick: () => { m.close(); formModal({
+        title: `Nueva contraseña para ${o.name}`, submitLabel: "Restablecer",
+        fields: [passwordField("password", "Contraseña temporal", "Se cerrarán sus sesiones y deberá cambiarla al entrar.")],
+        onSubmit: async (fd) => { await api("PATCH", `/api/admin/orgs/${o.id}`, { password: fd.get("password") }); credentialsModal(o.name, o.username, fd.get("password"), o.network); onDone && onDone(); },
+      }); } }, icon("key"), "Contraseña"),
+      h("button", { class: "btn primary", onClick: () => { m.close(); orgModal(o, data, onDone); } }, icon("edit"), "Editar"),
+    ],
+  });
+}
+
+function newTenantModal(onDone, org) {
+  const free = org ? Math.min(253, org.max_devices - org.devices_assigned) : 253;
+  if (org && org.installs >= org.max_installs) return toast(`Tu plan Enterprise incluye ${org.max_installs} instalaciones`, "err");
+  if (org && free < 1) return toast("Ya has repartido todos los dispositivos de tu plan: reduce el límite de otra instalación", "err");
   const nameInp = input({ name: "name", required: true, maxlength: "64", placeholder: "Acme S.L." });
   const userInp = input({ name: "username", required: true, pattern: "[A-Za-z0-9][A-Za-z0-9._\\-]{2,31}", placeholder: "acme" });
   let userTouched = false;
   userInp.addEventListener("input", () => { userTouched = true; });
   nameInp.addEventListener("input", () => { if (!userTouched) userInp.value = slugify(nameInp.value); });
+  if (org) nameInp.placeholder = "Oficina Madrid";
   formModal({
-    title: "Nuevo cliente",
-    submitLabel: "Crear cliente",
+    title: org ? "Nueva instalación" : "Nuevo cliente",
+    submitLabel: org ? "Crear instalación" : "Crear cliente",
     fields: [
       h("div", { class: "full" }, field("Nombre", nameInp)),
-      field("Usuario de acceso", userInp, "3-32 caracteres: letras, números . _ -"),
-      field("Máx. dispositivos", input({ name: "max_devices", type: "number", min: "1", max: "253", value: "10", required: true })),
-      passwordField("password", "Contraseña inicial", "El cliente deberá cambiarla en su primer acceso."),
-      h("div", { class: "full field" }, switchEl("free", false, "Cliente gratuito (proyecto propio)"),
-        h("div", { class: "help", text: "Nunca se le cobra ni se suspende por pagos, y no ve planes que contratar." })),
-      h("div", { class: "full" }, field("Notas", h("textarea", { class: "input", name: "notes", maxlength: "500", placeholder: "Plan, contacto, referencia…" }))),
+      field("Usuario de acceso", userInp, org ? "Para que el responsable de la instalación entre en su panel. 3-32 caracteres." : "3-32 caracteres: letras, números . _ -"),
+      field("Máx. dispositivos", input({ name: "max_devices", type: "number", min: "1", max: String(free), value: String(Math.min(10, free)), required: true }),
+        org ? `Te quedan ${free} por repartir.` : null),
+      passwordField("password", "Contraseña inicial", org ? "Deberá cambiarla en su primer acceso." : "El cliente deberá cambiarla en su primer acceso."),
+      org ? h("div", { class: "full note" }, icon("network"), ` La red se asigna sola: la siguiente /24 libre de ${org.network}.`)
+        : h("div", { class: "full field" }, switchEl("free", false, "Cliente gratuito (proyecto propio)"),
+          h("div", { class: "help", text: "Nunca se le cobra ni se suspende por pagos, y no ve planes que contratar." })),
+      h("div", { class: "full" }, field("Notas", h("textarea", { class: "input", name: "notes", maxlength: "500", placeholder: org ? "Dirección, contacto, referencia…" : "Plan, contacto, referencia…" }))),
     ],
     onSubmit: async (fd) => {
       const t = await api("POST", "/api/admin/tenants", {
         name: fd.get("name"), username: fd.get("username"), password: fd.get("password"),
         max_devices: Number(fd.get("max_devices")), notes: fd.get("notes") || "", free: fd.get("free") === "on",
       });
-      toast(`Cliente creado con la red ${t.network}`);
+      toast(`${org ? "Instalación creada" : "Cliente creado"} con la red ${t.network}`);
       credentialsModal(t.name, t.username, fd.get("password"), t.network);
       onDone && onDone(t);
     },
@@ -1829,9 +1992,10 @@ async function clientDetailView(main, id) {
     fill(main, 
       pageHead(t.name, h("span", { class: "cell-flex" },
         h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : t.suspended_reason === "billing" ? "Suspendido por impago" : "Suspendido" }),
-        t.billing_status && t.billing_status !== "none" ? statusBadge(t.billing_status) : null,
+        t.billing_status && t.billing_status !== "none" && !t.org_id ? statusBadge(t.billing_status) : null,
         h("span", { class: "mono", text: t.network }),
-        t.public_host ? h("button", { class: `badge accent badge-btn${t.cf_proxied ? " proxied" : ""}`, title: "Dirección y proxy de Cloudflare", onClick: () => formModal({
+        t.public_host && isOrg() ? h("span", { class: "badge accent" }, icon(t.cf_proxied ? "shield" : "globe"), t.public_host) : null,
+        t.public_host && !isOrg() ? h("button", { class: `badge accent badge-btn${t.cf_proxied ? " proxied" : ""}`, title: "Dirección y proxy de Cloudflare", onClick: () => formModal({
           title: "Dirección del cliente",
           fields: [
             h("div", { class: "full" }, field("Subdominio", h("div", { class: "input-group" },
@@ -1856,7 +2020,7 @@ async function clientDetailView(main, id) {
       [
         h("a", { class: "btn", href: `#/clients/${t.id}/activity` }, icon("activity"), "Actividad"),
         h("a", { class: "btn", href: `#/clients/${t.id}/users` }, icon("users"), "Usuarios"),
-        h("a", { class: "btn", href: `#/plan/${t.id}` }, icon("card"), "Plan"),
+        isOrg() ? null : h("a", { class: "btn", href: `#/plan/${t.id}` }, icon("card"), "Plan"),
         h("a", { class: "btn", href: `#/clients/${t.id}/filters` }, icon("shield"), "Filtros"),
         h("a", { class: "btn", href: `#/clients/${t.id}/dns` }, icon("server"), "DNS"),
         h("a", { class: "btn", href: `#/clients/${t.id}/services` }, icon("globe"), "Servicios"),
@@ -1875,15 +2039,15 @@ async function clientDetailView(main, id) {
         h("button", { class: "btn", onClick: () => editTenantModal(t, reload) }, icon("edit"), "Editar"),
         h("button", { class: "btn", onClick: () => resetTenantPassword(t, reload) }, icon("key"), "Contraseña"),
         h("button", { class: `btn ${t.enabled ? "danger" : ""}`, onClick: async () => {
-          if (t.enabled && !(await confirmDialog({ title: "Suspender cliente", message: `Se desconectarán todos los dispositivos de ${t.name} y no podrá entrar al panel.`, confirmLabel: "Suspender" }))) return;
-          try { await api("PATCH", `/api/admin/tenants/${t.id}`, { enabled: !t.enabled }); toast(t.enabled ? "Cliente suspendido" : "Cliente reactivado"); reload(); } catch (e) { toast(e.message, "err"); }
+          if (t.enabled && !(await confirmDialog({ title: `Suspender ${clientWord()}`, message: `Se desconectarán todos los dispositivos de ${t.name} y no podrá entrar al panel.`, confirmLabel: "Suspender" }))) return;
+          try { await api("PATCH", `/api/admin/tenants/${t.id}`, { enabled: !t.enabled }); toast(t.enabled ? `${t.name}: suspendido` : `${t.name}: reactivado`); reload(); } catch (e) { toast(e.message, "err"); }
         } }, icon("power"), t.enabled ? "Suspender" : "Reactivar"),
-        h("button", { class: "btn ghost icon", title: "Eliminar cliente", onClick: async () => {
-          if (!(await confirmDialog({ title: "Eliminar cliente", message: `Se eliminarán ${t.name}, sus ${t.device_count} dispositivos y su red ${t.network}. Esta acción no se puede deshacer.`, confirmLabel: "Eliminar" }))) return;
-          try { await api("DELETE", `/api/admin/tenants/${t.id}`); toast("Cliente eliminado"); go("#/clients"); } catch (e) { toast(e.message, "err"); }
+        h("button", { class: "btn ghost icon", title: `Eliminar ${clientWord()}`, onClick: async () => {
+          if (!(await confirmDialog({ title: `Eliminar ${clientWord()}`, message: `Se eliminarán ${t.name}, sus ${t.device_count} dispositivos y su red ${t.network}. Esta acción no se puede deshacer.`, confirmLabel: "Eliminar" }))) return;
+          try { await api("DELETE", `/api/admin/tenants/${t.id}`); toast(`${t.name}: eliminado`); go("#/clients"); } catch (e) { toast(e.message, "err"); }
         } }, icon("trash")),
       ],
-      [h("a", { href: "#/clients", text: "Clientes" }), " / ", t.name]),
+      [h("a", { href: "#/clients", text: clientsWord() }), " / ", t.name]),
       h("div", { class: "grid stats" },
         statCard("network", "Red privada", t.network, `${t.device_count} de ${t.max_devices} dispositivos`, true),
         statCard("activity", "En línea", String(t.online_count), "dispositivos conectados"),
@@ -1898,21 +2062,24 @@ async function clientDetailView(main, id) {
 }
 
 function editTenantModal(t, onDone) {
+  const org = isOrg();
   formModal({
-    title: "Editar cliente",
+    title: org ? "Editar instalación" : "Editar cliente",
     fields: [
       h("div", { class: "full" }, field("Nombre", input({ name: "name", required: true, maxlength: "64", value: t.name }))),
-      field("Máx. dispositivos", input({ name: "max_devices", type: "number", min: String(Math.max(1, t.device_count)), max: "253", value: String(t.max_devices), required: true })),
-      field("Máx. puertos abiertos", input({ name: "max_forwards", type: "number", min: "0", max: "100", value: String(t.max_forwards), required: true }),
+      field("Máx. dispositivos", input({ name: "max_devices", type: "number", min: String(Math.max(1, t.device_count)), max: "253", value: String(t.max_devices), required: true }),
+        org ? "Sale del total de dispositivos de tu plan Enterprise." : null),
+      org ? null : field("Máx. puertos abiertos", input({ name: "max_forwards", type: "number", min: "0", max: "100", value: String(t.max_forwards), required: true }),
         "0 = no puede abrir puertos."),
       field("Red", input({ value: t.network, disabled: true })),
-      h("div", { class: "full field" }, switchEl("allow_exits", t.allow_exits, "Puede usar salidas por país")),
+      org ? null : h("div", { class: "full field" }, switchEl("allow_exits", t.allow_exits, "Puede usar salidas por país")),
       h("div", { class: "full" }, field("Notas", h("textarea", { class: "input", name: "notes", maxlength: "500", value: t.notes }))),
     ],
     onSubmit: async (fd) => {
-      await api("PATCH", `/api/admin/tenants/${t.id}`, { name: fd.get("name"), max_devices: Number(fd.get("max_devices")),
-        max_forwards: Number(fd.get("max_forwards")), allow_exits: fd.get("allow_exits") === "on", notes: fd.get("notes") || "" });
-      toast("Cliente actualizado");
+      const body = { name: fd.get("name"), max_devices: Number(fd.get("max_devices")), notes: fd.get("notes") || "" };
+      if (!org) Object.assign(body, { max_forwards: Number(fd.get("max_forwards")), allow_exits: fd.get("allow_exits") === "on" });
+      await api("PATCH", `/api/admin/tenants/${t.id}`, body);
+      toast(org ? "Instalación actualizada" : "Cliente actualizado");
       onDone();
     },
   });
@@ -2028,7 +2195,7 @@ async function newDeviceModal(tenantId, onDone) {
       const body = router
         ? { name: fd.get("name"), kind: "router", lan_networks: splitList(fd.get("lan_networks")), full_tunnel: false }
         : { name: fd.get("name"), full_tunnel: fd.get("full_tunnel") === "on" };
-      if (state.me.role === "admin") body.tenant_id = tenantId;
+      if (manages()) body.tenant_id = tenantId;
       if (memberId) body.member_id = memberId;
       if (!router && fd.get("exit_id") !== null && Number(fd.get("exit_id")) >= 0) body.exit_id = Number(fd.get("exit_id"));
       const d = await api("POST", "/api/devices", body);
@@ -2041,7 +2208,7 @@ async function newDeviceModal(tenantId, onDone) {
 async function memberOptions(tenantId) {
   if (state.me.role === "member") return null;
   try {
-    const qs = state.me.role === "admin" ? `?tenant_id=${tenantId}` : "";
+    const qs = manages() ? `?tenant_id=${tenantId}` : "";
     return (await api("GET", `/api/members${qs}`)).members;
   } catch { return null; }
 }
@@ -2069,7 +2236,7 @@ function countrySelect(name, value) {
 }
 async function exitOptions(tenantId) {
   try {
-    const qs = state.me.role === "admin" ? `?tenant_id=${tenantId}` : "";
+    const qs = manages() ? `?tenant_id=${tenantId}` : "";
     const r = await api("GET", `/api/exits${qs}`);
     return r.allowed && r.exits.length ? r : null;
   } catch { return null; }
@@ -2236,7 +2403,7 @@ function filterBadges(filters) {
 }
 
 async function filtersView(main, tenantId) {
-  const isAdmin = state.me.role === "admin";
+  const isAdmin = manages();
   const qs = isAdmin ? `?tenant_id=${tenantId}` : "";
   const [catalog, initial, devices, tenant] = await Promise.all([
     api("GET", "/api/filters/catalog"),
@@ -2331,7 +2498,7 @@ async function filtersView(main, tenantId) {
     body.querySelectorAll(".note > svg").forEach((svg) => Object.assign(svg.style, { width: "14px", height: "14px", verticalAlign: "-2px" }));
   };
 
-  const crumbs = isAdmin ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / Filtros"] : null;
+  const crumbs = isAdmin ? clientCrumbs(tenantId, tenant.name, "Filtros") : null;
   fill(main, pageHead("Navegación segura", `Filtros de Internet para todos los dispositivos de ${tenant.name}`, null, crumbs), body);
   draw();
   every(async () => {
@@ -2347,7 +2514,7 @@ function fqdns(name, suffixes) {
 }
 
 async function zoneView(main, tenantId) {
-  const isAdmin = state.me.role === "admin";
+  const isAdmin = manages();
   const qs = isAdmin ? `?tenant_id=${tenantId}` : "";
   let zone = await api("GET", `/api/dns-zone${qs}`);
   const tenant = isAdmin ? await api("GET", `/api/admin/tenants/${tenantId}`) : { name: state.me.name };
@@ -2427,7 +2594,7 @@ async function zoneView(main, tenantId) {
     body.querySelectorAll(".note > svg").forEach((svg) => Object.assign(svg.style, { width: "14px", height: "14px", verticalAlign: "-2px" }));
   };
 
-  const crumbs = isAdmin ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / DNS"] : null;
+  const crumbs = isAdmin ? clientCrumbs(tenantId, tenant.name, "DNS") : null;
   fill(main, pageHead("DNS de la red", `Nombres para los dispositivos de ${tenant.name} (${zone.network})`, null, crumbs), body);
   draw();
 }
@@ -2493,7 +2660,7 @@ function serviceModal(ctx, svc, onDone) {
 }
 
 async function servicesView(main, tenantId) {
-  const isAdmin = state.me.role === "admin";
+  const isAdmin = manages();
   const qs = isAdmin ? `?tenant_id=${tenantId}` : "";
   const [tenant, initialDevices] = await Promise.all([
     isAdmin ? api("GET", `/api/admin/tenants/${tenantId}`) : Promise.resolve({ name: state.me.name }),
@@ -2553,7 +2720,7 @@ async function servicesView(main, tenantId) {
     body.querySelectorAll(".note > svg").forEach((svg) => Object.assign(svg.style, { width: "14px", height: "14px", verticalAlign: "-2px" }));
   };
 
-  const crumbs = isAdmin ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / Servicios"] : null;
+  const crumbs = isAdmin ? clientCrumbs(tenantId, tenant.name, "Servicios") : null;
   const addBtn = data.enabled ? h("button", { class: "btn primary", onClick: () => serviceModal(ctx(), null, (svc) => { reload().then(() => check(svc)); }) }, icon("plus"), "Publicar servicio") : null;
   fill(main, pageHead("Servicios publicados", `Equipos de la red de ${tenant.name} accesibles con HTTPS desde Internet`, addBtn, crumbs), body);
   draw();
@@ -2600,7 +2767,7 @@ function portModal(ctx, fw, onDone) {
 }
 
 async function portsView(main, tenantId) {
-  const isAdmin = state.me.role === "admin";
+  const isAdmin = manages();
   const qs = isAdmin ? `?tenant_id=${tenantId}` : "";
   const [tenant, devices] = await Promise.all([
     isAdmin ? api("GET", `/api/admin/tenants/${tenantId}`) : Promise.resolve({ name: state.me.name }),
@@ -2665,7 +2832,7 @@ async function portsView(main, tenantId) {
     body.querySelectorAll(".note > svg").forEach((svg) => Object.assign(svg.style, { width: "14px", height: "14px", verticalAlign: "-2px" }));
   };
 
-  const crumbs = isAdmin ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / Puertos"] : null;
+  const crumbs = isAdmin ? clientCrumbs(tenantId, tenant.name, "Puertos") : null;
   addBtn = data.max > 0 ? h("button", { class: "btn primary", onClick: add }, icon("plus"), "Abrir puerto") : null;
   fill(main, pageHead("Puertos abiertos", `Accesos TCP/UDP desde Internet a equipos de la red de ${tenant.name}`, addBtn, crumbs), body);
   draw();
@@ -2945,9 +3112,9 @@ async function serverView(main) {
 
 /* ------------------------------------------------------------------ actividad */
 async function activityView(main, tenantId) {
-  const isAdmin = state.me.role === "admin";
+  const isAdmin = manages();
   const isMember = state.me.role === "member";
-  const platform = isAdmin && !tenantId;
+  const platform = state.me.role === "admin" && !tenantId;
   const qs = isAdmin && tenantId ? `&tenant_id=${tenantId}` : "";
   const tenant = isAdmin && tenantId ? await api("GET", `/api/admin/tenants/${tenantId}`) : null;
   let range = "24h";
@@ -2996,7 +3163,7 @@ async function activityView(main, tenantId) {
   };
   const loadAll = () => Promise.all([loadTraffic(), loadDns(), loadEvents()]).catch((e) => toast(e.message, "err"));
 
-  const crumbs = tenant ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / Actividad"] : null;
+  const crumbs = tenant ? clientCrumbs(tenantId, tenant.name, "Actividad") : null;
   const sub = platform ? "Tráfico, filtro DNS y conexiones de toda la plataforma"
     : isMember ? "Tráfico y conexiones de tus dispositivos" : `Tráfico, filtro DNS y conexiones de ${tenant ? tenant.name : "tu red"}`;
   fill(main, pageHead("Actividad", sub, rangePicker(range, (r) => { range = r; loadTraffic().catch((e) => toast(e.message, "err")); loadDns().catch(() => {}); }), crumbs),
@@ -3436,7 +3603,7 @@ async function installLinkModal(d) {
 }
 
 async function usersView(main, tenantId) {
-  const isAdmin = state.me.role === "admin";
+  const isAdmin = manages();
   const qs = isAdmin ? `?tenant_id=${tenantId}` : "";
   const tenant = isAdmin ? await api("GET", `/api/admin/tenants/${tenantId}`) : { name: state.me.name };
   let data = await api("GET", `/api/members${qs}`);
@@ -3524,7 +3691,7 @@ async function usersView(main, tenantId) {
           h("button", { class: "btn ghost icon", title: "Anular", onClick: () => run(() => api("DELETE", `/api/invites/${i.id}`), "Invitación anulada") }, icon("trash")))))) : null,
     );
   };
-  const crumbs = isAdmin ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / Usuarios"] : null;
+  const crumbs = isAdmin ? clientCrumbs(tenantId, tenant.name, "Usuarios") : null;
   fill(main, pageHead("Usuarios", `Personas con acceso a la red de ${tenant.name}`, h("div", { class: "cell-flex" },
     h("button", { class: "btn", onClick: create }, icon("plus"), "Crear"),
     h("button", { class: "btn primary", onClick: invite }, icon("send"), "Invitar")), crumbs), body);
@@ -3697,7 +3864,7 @@ async function planView(main, tenantId) {
             b.plan && ["active", "trialing", "past_due", "unpaid"].includes(b.status) ? "Cambiar a este plan" : "Contratar") })))) : null,
       invoicesBox);
   };
-  const crumbs = isAdmin ? [h("a", { href: "#/clients", text: "Clientes" }), " / ", h("a", { href: `#/clients/${tenantId}`, text: tenant.name }), " / Plan"] : null;
+  const crumbs = isAdmin ? clientCrumbs(tenantId, tenant.name, "Plan") : null;
   fill(main, pageHead(isAdmin ? "Plan y facturación" : "Tu plan", isAdmin ? `Suscripción de ${tenant.name}` : "Suscripción, uso y facturas", null, crumbs), body);
   draw();
   api("GET", `/api/billing/invoices${qs}`).then((r) => {
@@ -4030,7 +4197,7 @@ function defaultExitCard(tenantId) {
   exitOptions(tenantId).then((ex) => {
     if (!ex) return;
     const sel = h("select", { class: "input", onChange: async () => {
-      try { await api("PUT", "/api/exits/default", { exit_id: Number(sel.value), ...(state.me.role === "admin" ? { tenant_id: tenantId } : {}) }); toast("Salida guardada"); }
+      try { await api("PUT", "/api/exits/default", { exit_id: Number(sel.value), ...(manages() ? { tenant_id: tenantId } : {}) }); toast("Salida guardada"); }
       catch (e) { toast(e.message, "err"); }
     } }, [0, ...ex.exits.map((e) => e.id)].map((id) => h("option", { value: String(id), selected: id === ex.tenant_default, text: exitLabel(ex, id) })));
     fill(card, h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Salida a Internet" }),

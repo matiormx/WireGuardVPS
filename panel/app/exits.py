@@ -337,11 +337,19 @@ def register(app: FastAPI, d) -> None:
     # ---------------------------------------------------------------- clientes y usuarios
     @app.get("/api/exits")
     def available(p: d.Anyone, c: d.Conn, tenant_id: int | None = None):
-        tid = tenant_id if p.is_admin else p.tenant_id
+        if p.is_admin:
+            tid = tenant_id
+        elif p.is_org:
+            tid = d.scope_tenant(p, tenant_id) if tenant_id is not None else None
+        else:
+            tid = p.tenant_id
         t = d.tenant_or_404(c, tid) if tid else None
+        allowed = bool(t["allow_exits"]) if t else True
+        if p.is_org and t is None:
+            allowed = bool(c.execute("SELECT allow_exits FROM orgs WHERE id = ?", (p.id,)).fetchone()[0])
         rows = c.execute("SELECT * FROM exits WHERE enabled = 1 ORDER BY name COLLATE NOCASE").fetchall()
         return {"main": main_location(c), "exits": [exit_json(c, e, False) for e in rows],
-                "allowed": bool(t["allow_exits"]) if t else True, "tenant_default": (t["exit_id"] or 0) if t else 0}
+                "allowed": allowed, "tenant_default": (t["exit_id"] or 0) if t else 0}
 
     @app.put("/api/exits/default")
     def set_default(body: DefaultExitIn, p: d.User, c: d.Conn):

@@ -31,7 +31,7 @@ set -o errtrace  # set -E : el trap ERR se hereda en funciones y subshells
 # -----------------------------------------------------------------------------
 # VERSIÓN DEL SCRIPT (se compara con la publicada en GitHub). SemVer.
 # -----------------------------------------------------------------------------
-readonly VERSION="2.20.3"
+readonly VERSION="2.21.0"
 
 # =============================================================================
 #  CONFIGURACIÓN EDITABLE
@@ -104,6 +104,8 @@ readonly PFWD_CHAIN="WGP-PFWD"                     # reenvío de puertos: FORWAR
 readonly PDNAT_CHAIN="WGP-PDNAT"                   # reenvío de puertos: DNAT (PREROUTING)
 readonly PSNAT_CHAIN="WGP-PSNAT"                   # reenvío de puertos: SNAT hacia wg0
 readonly ISNAT_CHAIN="WGP-ISNAT"                   # IPs adicionales: SNAT por dispositivo
+readonly BLOCKS_CHAIN="WGP-BLOCKS"                 # bloques Enterprise: salida a Internet
+readonly BNAT_CHAIN="WGP-BNAT"                     # bloques Enterprise: NAT
 readonly RULE_TAG="wg-manager"
 readonly SYSTEMD_DIR="/etc/systemd/system"
 readonly LOCK_FILE="/var/lock/wg-manager.lock"
@@ -433,6 +435,10 @@ fetch_source() {
 #   FORWARD #2  -i wg0 -o WAN -s SUBNET           -> ACCEPT    (salida a Internet)
 #   FORWARD #3  -i WAN -o wg0 -d SUBNET  REL,EST  -> ACCEPT    (sólo respuestas)
 #   nat/POSTROUTING  -s SUBNET -o WAN             -> MASQUERADE
+#   FORWARD #10 -> WGP-BLOCKS, nat/POSTROUTING -> WGP-BNAT: lo mismo (salida y
+#     NAT) para los bloques de las cuentas Enterprise (wgp/blocks.list). Hacia
+#     las salidas por país (wgx+) se hace SNAT a la IP siguiente a la del
+#     servidor (10.252.0.2): los nodos de salida sólo aceptan la red de la VPN.
 #
 #   INPUT    #1/#2  -i wg0 -d 10.252.0.1 udp/tcp 53  -> ACCEPT   (resolver con filtros)
 #   FORWARD  -i wg0 -o WAN                     -> WGP-EGRESS (antes del ACCEPT de salida)
@@ -487,6 +493,7 @@ EXITS_LIST="${WGP_DIR}/exits.list"
 EXIT_ROUTES="${WGP_DIR}/exit_routes.list"
 IPS_LIST="${WGP_DIR}/ips.list"
 IP_ROUTES="${WGP_DIR}/ip_routes.list"
+BLOCKS_LIST="${WGP_DIR}/blocks.list"
 IPS_STATE="/var/lib/wgp-firewall/ips.added"
 RESERVED=" ${reserved} "
 CHAIN="${TENANT_CHAIN}"
@@ -496,6 +503,8 @@ PFWD="${PFWD_CHAIN}"
 PDNAT="${PDNAT_CHAIN}"
 PSNAT="${PSNAT_CHAIN}"
 ISNAT="${ISNAT_CHAIN}"
+BLOCKS="${BLOCKS_CHAIN}"
+BNAT="${BNAT_CHAIN}"
 TAG="${RULE_TAG}"
 EOF
     cat >>"${FIREWALL_BIN}" <<'EOF'
@@ -517,11 +526,13 @@ rule_specs() {
         "filter|FORWARD|7|-i ${i} -o wgx+ ${c} -j ${EGRESS}" \
         "filter|FORWARD|8|-i ${i} -o wgx+ -s ${SUBNET} ${c} -j ACCEPT" \
         "filter|FORWARD|9|-i wgx+ -o ${i} -d ${SUBNET} -m conntrack --ctstate RELATED,ESTABLISHED ${c} -j ACCEPT" \
+        "filter|FORWARD|10|${c} -j ${BLOCKS}" \
         "nat|PREROUTING|1|-i ${i} ${c} -j ${DNSCHAIN}" \
         "nat|PREROUTING|2|-i ${WAN} -m addrtype --dst-type LOCAL ${c} -j ${PDNAT}" \
         "nat|POSTROUTING|1|-o ${WAN} ${c} -j ${ISNAT}" \
         "nat|POSTROUTING|2|-s ${SUBNET} -o ${WAN} ${c} -j MASQUERADE" \
-        "nat|POSTROUTING|3|-o ${i} ${c} -j ${PSNAT}"
+        "nat|POSTROUTING|3|-o ${i} ${c} -j ${PSNAT}" \
+        "nat|POSTROUTING|4|${c} -j ${BNAT}"
 }
 
 valid_cidr() {
@@ -580,6 +591,8 @@ ensure_chains() {
     ipt -t nat -N "${PDNAT}" 2>/dev/null || true
     ipt -t nat -N "${PSNAT}" 2>/dev/null || true
     ipt -t nat -N "${ISNAT}" 2>/dev/null || true
+    ipt -N "${BLOCKS}" 2>/dev/null || true
+    ipt -t nat -N "${BNAT}" 2>/dev/null || true
 }
 
 # --- IPs adicionales (p. ej. IPs de otros países de OVH) ----------------------
@@ -641,7 +654,8 @@ read_groups() {
 
 sync_tenants() {
     ensure_chains
-    local net src dst group c="-m comment --comment ${TAG}" groups dns fwds proto pport dest dport dev_ip extra_ip isnat=""
+    local net src dst group c="-m comment --comment ${TAG}" groups dns fwds blocks proto pport dest dport dev_ip extra_ip isnat=""
+    local i="${IFACE_DEFAULT}" exit_snat="${SERVER_IP%.*}.$(( ${SERVER_IP##*.} + 1 ))"
     sync_ips
     if [[ -f "${IP_ROUTES}" ]]; then
         while read -r dev_ip extra_ip _ || [[ -n "${dev_ip}" ]]; do
@@ -656,12 +670,20 @@ sync_tenants() {
     groups="$(read_groups "${LIST}")"
     dns="$(read_nets "${DNS_LIST}")"
     fwds="$(read_forwards "${FWD_LIST}")"
+    blocks="$(read_nets "${BLOCKS_LIST}")"
     {
         # Con --noflush, declarar una cadena la vacía: el cambio es atómico.
         echo "*filter"
         echo ":${CHAIN} - [0:0]"
         echo ":${EGRESS} - [0:0]"
         echo ":${PFWD} - [0:0]"
+        echo ":${BLOCKS} - [0:0]"
+        for net in ${blocks}; do
+            echo "-A ${BLOCKS} -i ${i} -o ${WAN} -s ${net} ${c} -j ACCEPT"
+            echo "-A ${BLOCKS} -i ${WAN} -o ${i} -d ${net} -m conntrack --ctstate RELATED,ESTABLISHED ${c} -j ACCEPT"
+            echo "-A ${BLOCKS} -i ${i} -o wgx+ -s ${net} ${c} -j ACCEPT"
+            echo "-A ${BLOCKS} -i wgx+ -o ${i} -d ${net} -m conntrack --ctstate RELATED,ESTABLISHED ${c} -j ACCEPT"
+        done
         for group in ${groups}; do
             for src in ${group//,/ }; do
                 for dst in ${group//,/ }; do
@@ -685,7 +707,12 @@ sync_tenants() {
         echo ":${PDNAT} - [0:0]"
         echo ":${PSNAT} - [0:0]"
         echo ":${ISNAT} - [0:0]"
+        echo ":${BNAT} - [0:0]"
         printf '%s' "${isnat}"
+        for net in ${blocks}; do
+            echo "-A ${BNAT} -s ${net} -o ${WAN} ${c} -j MASQUERADE"
+            echo "-A ${BNAT} -s ${net} -o wgx+ ${c} -j SNAT --to-source ${exit_snat}"
+        done
         # SNAT a la IP del servidor: la respuesta vuelve siempre por el túnel,
         # aunque el dispositivo sólo enrute la red privada por WireGuard.
         while read -r proto pport dest dport; do
@@ -699,7 +726,7 @@ sync_tenants() {
         done
         echo "COMMIT"
     } | iptables-restore -w --noflush
-    logger -t wgp-firewall "Sincronizado: $(wc -w <<<"${groups}") clientes, $(wc -w <<<"${dns}") con filtrado DNS, $(grep -c . <<<"${fwds}") puertos" || true
+    logger -t wgp-firewall "Sincronizado: $(wc -w <<<"${groups}") clientes, $(wc -w <<<"${blocks}") bloques Enterprise, $(wc -w <<<"${dns}") con filtrado DNS, $(grep -c . <<<"${fwds}") puertos" || true
 }
 
 # --- Salidas por país -----------------------------------------------------------
@@ -783,8 +810,10 @@ down() {
     ipt -X "${EGRESS}" 2>/dev/null || true
     ipt -F "${PFWD}" 2>/dev/null || true
     ipt -X "${PFWD}" 2>/dev/null || true
+    ipt -F "${BLOCKS}" 2>/dev/null || true
+    ipt -X "${BLOCKS}" 2>/dev/null || true
     local t
-    for t in "${DNSCHAIN}" "${PDNAT}" "${PSNAT}" "${ISNAT}"; do
+    for t in "${DNSCHAIN}" "${PDNAT}" "${PSNAT}" "${ISNAT}" "${BNAT}"; do
         ipt -t nat -F "${t}" 2>/dev/null || true
         ipt -t nat -X "${t}" 2>/dev/null || true
     done
