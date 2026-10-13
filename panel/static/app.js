@@ -422,7 +422,7 @@ async function render() {
     if (section === "account") return accountView(main);
     if (state.me.suspended || section === "plan") return await planView(main, state.me.role === "admin" ? Number(id) : state.me.id);
     if (section === "alerts") return await alertsView(main);
-    if (section === "settings" && isAdmin) return await settingsView(main);
+    if (section === "settings" && isAdmin) return await settingsView(main, id);
     if (section === "server" && isAdmin) return await serverView(main);
     if (section === "billing" && isAdmin) return await billingAdminView(main);
     if (isAdmin) {
@@ -778,7 +778,7 @@ function securityCard() {
       h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Email y verificación en dos pasos" }),
         h("div", { class: "note", text: "Con un email verificado puedes recuperar la contraseña si la olvidas y pedir un código al entrar." }))),
       !st.email_available ? h("div", { class: "banner" }, icon("alert"), state.me.role === "admin"
-        ? h("span", null, "Configura primero el envío de emails en ", h("a", { href: "#/settings", text: "Ajustes › Avisos" }), ".")
+        ? h("span", null, "Configura primero el envío de emails en ", h("a", { href: "#/settings/avisos", text: "Ajustes › Avisos" }), ".")
         : "El servidor aún no tiene configurado el envío de emails.") : h("div", { class: "grid", style: { gap: "14px" } },
         h("div", { class: "cell-flex", style: { flexWrap: "wrap" } },
           st.email ? h("span", { class: "badge ok" }, icon("check"), st.email) : h("span", { class: "note", text: "Sin email" }),
@@ -1528,10 +1528,22 @@ function dnsSettingsCard() {
   return card;
 }
 
-async function settingsView(main) {
+/* Ajustes: secciones con submenú (columna en ordenador, pestañas deslizables en el móvil). */
+const SETTINGS_SECTIONS = [
+  ["general", "General", "globe", "Dominio del panel, marca y página pública"],
+  ["clientes", "Clientes", "users", "Subdominios (Cloudflare), dominios propios y nombres reservados"],
+  ["red", "Red y VPN", "network", "Endpoint de WireGuard, salidas por país y DNS"],
+  ["avisos", "Avisos y email", "bell", "Telegram, email (SMTP o Cloudflare) y cuándo avisar"],
+  ["copias", "Copias de seguridad", "download", "Copias cifradas, S3 y restaurar"],
+  ["actualizaciones", "Actualizaciones", "refresh", "Versión, actualizar ahora o automáticamente"],
+];
+
+async function settingsView(main, sectionId) {
+  const section = SETTINGS_SECTIONS.find((x) => x[0] === sectionId) || SETTINGS_SECTIONS[0];
+  const sec = section[0];
   let cfg = await api("GET", "/api/admin/settings");
   let status = null;
-  const body = h("div");
+  const domainSlot = h("div");
 
   const check = async (btn) => {
     if (btn) { btn.disabled = true; btn.lastChild.textContent = "Comprobando…"; }
@@ -1551,7 +1563,7 @@ async function settingsView(main) {
     const ip = cfg.server_ips[0] || "IP del servidor";
     const inp = input({ placeholder: "vpn.tudominio.com", value: cfg.main_domain || "", autocapitalize: "off", spellcheck: false, inputmode: "url" });
     const httpsOk = location.protocol === "https:" || (status && status.https && status.https.ok);
-    fill(body,
+    fill(domainSlot,
       h("div", { class: "card" },
         h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dominio del panel" }),
           h("div", { class: "note", text: "Con un dominio el panel funciona con HTTPS (certificado gratuito de Let's Encrypt, renovado automáticamente) y se puede instalar como app en Android." }))),
@@ -1575,34 +1587,39 @@ async function settingsView(main) {
             h("li", null, "En tu proveedor de dominios crea un registro ", h("b", { text: "A" }), ": ",
               h("code", { text: cfg.main_domain || "vpn.tudominio.com" }), " → ", h("code", { text: ip }), "."),
             h("li", { text: "Escríbelo arriba y pulsa Guardar." }),
-            h("li", { text: "Pulsa Comprobar. Cuando HTTPS esté activo, abre el panel con el dominio y activa «Forzar HTTPS»." })))),
-      brandCard(),
-      siteCard(),
-      cloudflareCard(),
-      reservedCard(),
-      endpointCard(),
-      exitsCard(),
-      alertsConfigCard(),
-      backupCard(),
-      updatesCard(),
-      dnsSettingsCard(),
-      h("div", { class: "card" },
-        h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dominios de clientes" }),
-          h("div", { class: "note", text: "Cada cliente puede usar su propio dominio (desde su Cuenta o desde su ficha). Allí verá el panel con su nombre y sólo podrá entrar él." }))),
-        cfg.tenant_domains.length
-          ? h("div", { class: "table-wrap" }, h("table", { class: "cards" },
-            h("thead", null, h("tr", null, h("th", { text: "Cliente" }), h("th", { text: "Dominio" }), h("th", { text: "Estado" }))),
-            h("tbody", null, cfg.tenant_domains.map((t) => h("tr", { class: "link", onClick: () => go(`#/clients/${t.tenant_id}`) },
-              h("td", { class: "primary" }, h("div", { class: "name", text: t.name })),
-              h("td", { class: "mono", "data-label": "Dominio", text: t.domain }),
-              h("td", { class: "aside" }, h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : "Suspendido" })))))))
-          : h("p", { class: "note", text: "Ningún cliente tiene dominio propio todavía." })),
-    );
+            h("li", { text: "Pulsa Comprobar. Cuando HTTPS esté activo, abre el panel con el dominio y activa «Forzar HTTPS»." })))));
   };
+  const clientDomainsCard = () =>
+      h("div", { class: "card" },
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Dominios de clientes" }),
+        h("div", { class: "note", text: "Cada cliente puede usar su propio dominio (desde su Cuenta o desde su ficha). Allí verá el panel con su nombre y sólo podrá entrar él." }))),
+      cfg.tenant_domains.length
+        ? h("div", { class: "table-wrap" }, h("table", { class: "cards" },
+          h("thead", null, h("tr", null, h("th", { text: "Cliente" }), h("th", { text: "Dominio" }), h("th", { text: "Estado" }))),
+          h("tbody", null, cfg.tenant_domains.map((t) => h("tr", { class: "link", onClick: () => go(`#/clients/${t.tenant_id}`) },
+            h("td", { class: "primary" }, h("div", { class: "name", text: t.name })),
+            h("td", { class: "mono", "data-label": "Dominio", text: t.domain }),
+            h("td", { class: "aside" }, h("span", { class: `badge ${t.enabled ? "ok" : "off"}`, text: t.enabled ? "Activo" : "Suspendido" })))))))
+        : h("p", { class: "note", text: "Ningún cliente tiene dominio propio todavía." }));
 
-  fill(main, pageHead("Ajustes", "Dominio, HTTPS, DNS de la red y dominios de los clientes"), body);
-  draw();
-  if (cfg.main_domain) check();
+  const cards = {
+    general: () => [domainSlot, brandCard(), siteCard()],
+    clientes: () => [cloudflareCard(), clientDomainsCard(), reservedCard()],
+    red: () => [endpointCard(), exitsCard(), dnsSettingsCard()],
+    avisos: () => [alertsConfigCard()],
+    copias: () => [backupCard()],
+    actualizaciones: () => [updatesCard()],
+  };
+  const subnav = h("nav", { class: "subnav", "aria-label": "Secciones de ajustes" }, SETTINGS_SECTIONS.map(([id, label, ic, hint]) =>
+    h("a", { href: `#/settings/${id}`, class: id === sec ? "active" : null, title: hint, "aria-current": id === sec ? "page" : null }, icon(ic), h("span", { text: label }))));
+  fill(main, pageHead("Ajustes", section[3]),
+    h("div", { class: "settings-layout" }, subnav, h("div", { class: "settings-body" }, cards[sec]())));
+  if (sec === "general") {
+    draw();
+    if (cfg.main_domain) check();
+  }
+  const active = subnav.querySelector(".active");
+  if (active && active.scrollIntoView) active.scrollIntoView({ block: "nearest", inline: "center" });
 }
 
 /* ------------------------------------------------------------------ admin: panel */
@@ -3061,7 +3078,7 @@ async function alertsView(main) {
           a.email ? h("button", { class: "btn", onClick: addEmail }, icon("mail"), "Añadir email") : null),
         pushProblem ? h("p", { class: "help", text: pushProblem }) : null,
         !a.telegram && !a.email && role !== "admin" ? h("p", { class: "help", text: "Telegram y email aparecerán aquí cuando tu proveedor los active." }) : null,
-        !a.telegram && !a.email && role === "admin" ? h("p", { class: "help" }, "Para Telegram y email, configúralos en ", h("a", { href: "#/settings", text: "Ajustes › Avisos" }), ".") : null),
+        !a.telegram && !a.email && role === "admin" ? h("p", { class: "help" }, "Para Telegram y email, configúralos en ", h("a", { href: "#/settings/avisos", text: "Ajustes › Avisos" }), ".") : null),
       h("div", { class: "card" },
         h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Qué avisar" }),
           h("div", { class: "note", text: `Un dispositivo vigilado se considera caído tras ${st.delay_min} min sin conectar; también avisa cuando vuelve.` }))),

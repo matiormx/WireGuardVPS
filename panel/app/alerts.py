@@ -376,9 +376,9 @@ class Notifier:
         for i in down:
             name, failover = names.get(i, ("?", 1))
             extra = "Sus dispositivos salen ahora por el servidor principal." if failover else "Sus dispositivos se han quedado sin Internet."
-            self.deliver(to, f"🔴 Salida «{name}» sin conexión", extra, "/#/settings")
+            self.deliver(to, f"🔴 Salida «{name}» sin conexión", extra, "/#/settings/red")
         for i in up:
-            self.deliver(to, f"🟢 Salida «{names.get(i, ('?',))[0]}» conectada de nuevo", "Sus dispositivos vuelven a salir por ella.", "/#/settings")
+            self.deliver(to, f"🟢 Salida «{names.get(i, ('?',))[0]}» conectada de nuevo", "Sus dispositivos vuelven a salir por ella.", "/#/settings/red")
 
     def notify_tenant(self, t, title: str, body: str, url: str = "/#/plan") -> None:
         """Avisos de facturación al responsable: sus canales y, si no tiene ese email, su email de facturación."""
@@ -410,7 +410,7 @@ class Notifier:
         """Avisos del servidor (actualizaciones) a los administradores con «backup» activado."""
         with self.db.conn() as c:
             to = {("admin", r["id"]) for r in c.execute("SELECT id FROM admins") if prefs(c, "admin", r["id"]).get("backup")}
-        self.deliver(to, title, body, "/#/settings")
+        self.deliver(to, title, body, "/#/settings/actualizaciones")
 
     def notify_server(self, title: str, body: str) -> None:
         """Estado del servidor (disco, memoria, CPU) a los administradores con «server» activado."""
@@ -421,7 +421,7 @@ class Notifier:
     def on_backup_failed(self, error: str) -> None:
         with self.db.conn() as c:
             to = {("admin", r["id"]) for r in c.execute("SELECT id FROM admins") if prefs(c, "admin", r["id"]).get("backup")}
-        self.deliver(to, "⚠️ Copia de seguridad fallida", error, "/#/settings")
+        self.deliver(to, "⚠️ Copia de seguridad fallida", error, "/#/settings/copias")
 
     # ------------------------------------------------------------------ Telegram: vinculación
     def start_telegram(self) -> None:

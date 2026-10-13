@@ -683,3 +683,21 @@ button.rank:hover .name { color: var(--accent); }
 .code-input { letter-spacing: .4em; font-size: 20px; text-align: center; }
 .pending-code { display: grid; gap: 10px; padding: 14px; border-radius: var(--radius-sm); background: var(--accent-soft); }
 .badge-btn.proxied { background: rgba(244, 129, 32, .16); color: #f48120; }
+
+/* ---------- ajustes: submenú ---------- */
+.settings-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 20px; align-items: start; }
+.settings-body { display: grid; gap: 20px; min-width: 0; }
+.settings-body > * { margin: 0; }
+.subnav { position: sticky; top: 16px; display: grid; gap: 2px; padding: 6px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.subnav a { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 10px; color: var(--muted); font-weight: 500; font-size: 14px; text-decoration: none; white-space: nowrap; }
+.subnav a svg { width: 17px; height: 17px; flex: none; }
+.subnav a:hover { color: var(--text); background: var(--surface-2); }
+.subnav a.active { color: var(--accent); background: var(--accent-soft); }
+@media (max-width: 900px) {
+  .settings-layout { grid-template-columns: 1fr; gap: 14px; }
+  .subnav { position: sticky; top: 58px; z-index: 5; display: flex; overflow-x: auto; gap: 4px; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+    margin: 0 -16px; padding: 6px 16px; border-radius: 0; border-left: 0; border-right: 0; background: var(--bg); }
+  .subnav::-webkit-scrollbar { display: none; }
+  .subnav a { padding: 8px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
+  .subnav a.active { border-color: var(--accent); }
+}
