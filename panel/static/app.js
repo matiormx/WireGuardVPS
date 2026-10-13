@@ -13,6 +13,7 @@ const REFRESH_MS = 10000;
 /* ------------------------------------------------------------------ iconos */
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ICONS = {
+  chevron: '<path d="M6 9l6 6 6-6"/>',
   logo: '<path d="M4 7l4.5 11L12 10l3.5 8L20 7"/>',
   dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
   users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
@@ -457,6 +458,25 @@ function brand() {
   return h("div", { class: "brand" }, h("img", { class: "logo", src: state.brand.logo || "/brand/logo", alt: "" }), h("span", { text: state.brand.title }));
 }
 
+/* Ajustes en el menú lateral: grupo desplegable con sus secciones (como el panel de Cloudflare).
+   El grupo se abre solo dentro de Ajustes; tocar «Ajustes» lo despliega o lo pliega. */
+function settingsNavGroup(ic, label, inSettings) {
+  const current = inSettings ? (route()[1] || "general") : null;
+  const group = h("div", { class: `nav-group${inSettings ? " open" : ""}` });
+  const parent = h("a", { href: "#/settings/general", class: `nav-parent${inSettings ? " current" : ""}`, "aria-expanded": String(inSettings),
+    onClick: (e) => {
+      e.preventDefault();
+      const open = !group.classList.contains("open");
+      group.classList.toggle("open", open);
+      parent.setAttribute("aria-expanded", String(open));
+      // En el ordenador, abrir el grupo fuera de Ajustes lleva a la primera sección.
+      if (open && !inSettings && !window.matchMedia("(max-width: 760px)").matches) go("#/settings/general");
+    } }, ic, h("span", { class: "grow", text: label }), h("span", { class: "chev" }, icon("chevron")));
+  fill(group, parent, h("div", { class: "nav-sub" }, SETTINGS_SECTIONS.map(([id, text]) =>
+    h("a", { href: `#/settings/${id}`, class: id === current ? "active" : null, onClick: () => setMenu(false) }, text))));
+  return group;
+}
+
 function shell(active) {
   closeMenuState();   // una pantalla nueva siempre empieza con el menú cerrado (sin velo)
   const isAdmin = state.me.role === "admin";
@@ -476,8 +496,9 @@ function shell(active) {
       ["account", "#/account", "key", "Cuenta"]];
   const sidebar = h("aside", { class: "sidebar" },
     brand(),
-    h("nav", { class: "nav" }, links.map(([key, href, ic, label]) =>
-      h("a", { href, class: key === active ? "active" : null, onClick: () => setMenu(false) }, icon(ic), label)),
+    h("nav", { class: "nav" }, links.map(([key, href, ic, label]) => key === "settings" && isAdmin
+      ? settingsNavGroup(icon(ic), label, key === active)
+      : h("a", { href, class: key === active ? "active" : null, onClick: () => setMenu(false) }, icon(ic), label)),
       isStandalone() ? null : h("a", { href: "#", class: "install-link", onClick: (e) => { e.preventDefault(); setMenu(false); installApp(); } },
         icon("download"), "Instalar app")),
     h("div", { class: "spacer" }),
@@ -494,7 +515,7 @@ function shell(active) {
     brand(),
     h("span", { class: "grow" }),
     backButton());
-  sidebar.querySelectorAll(".nav a").forEach((a) => a.addEventListener("click", () => setMenu(false)));
+  sidebar.querySelectorAll(".nav a:not(.nav-parent)").forEach((a) => a.addEventListener("click", () => setMenu(false)));
   clear($app);
   $app.className = "";
   $app.append(h("div", { class: "layout" }, sidebar, backdrop, h("div", null, topbar, main)));
@@ -1610,16 +1631,12 @@ async function settingsView(main, sectionId) {
     copias: () => [backupCard()],
     actualizaciones: () => [updatesCard()],
   };
-  const subnav = h("nav", { class: "subnav", "aria-label": "Secciones de ajustes" }, SETTINGS_SECTIONS.map(([id, label, ic, hint]) =>
-    h("a", { href: `#/settings/${id}`, class: id === sec ? "active" : null, title: hint, "aria-current": id === sec ? "page" : null }, icon(ic), h("span", { text: label }))));
-  fill(main, pageHead("Ajustes", section[3]),
-    h("div", { class: "settings-layout" }, subnav, h("div", { class: "settings-body" }, cards[sec]())));
+  fill(main, pageHead(section[1], section[3], null, [h("span", { text: "Ajustes" })]),
+    h("div", { class: "settings-body" }, cards[sec]()));
   if (sec === "general") {
     draw();
     if (cfg.main_domain) check();
   }
-  const active = subnav.querySelector(".active");
-  if (active && active.scrollIntoView) active.scrollIntoView({ block: "nearest", inline: "center" });
 }
 
 /* ------------------------------------------------------------------ admin: panel */
