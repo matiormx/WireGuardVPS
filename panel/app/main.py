@@ -1466,7 +1466,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/branding")
     def branding(request: Request, c: Conn):
-        return {**branding_for(c, request), "logo": brand.url(c), "v": brand.version(c), "install_url": install_url(c, request)}
+        return {**branding_for(c, request), "logo": brand.url(c), "v": brand.version(c), "install_url": install_url(c, request),
+                "app_version": static_v}
 
     @app.get("/api/admin/settings")
     def get_settings(_: Admin, c: Conn):

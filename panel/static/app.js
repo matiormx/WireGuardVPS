@@ -500,7 +500,9 @@ function shell(active) {
       ? settingsNavGroup(icon(ic), label, key === active)
       : h("a", { href, class: key === active ? "active" : null, onClick: () => setMenu(false) }, icon(ic), label)),
       isStandalone() ? null : h("a", { href: "#", class: "install-link", onClick: (e) => { e.preventDefault(); setMenu(false); installApp(); } },
-        icon("download"), "Instalar app")),
+        icon("download"), "Instalar app"),
+      h("a", { href: "#", class: "install-link", title: "Descarga de nuevo la app del servidor (no cierra la sesión)",
+        onClick: (e) => { e.preventDefault(); setMenu(false); refreshApp(); } }, icon("refresh"), "Recargar app")),
     h("div", { class: "spacer" }),
     h("div", { class: "userbox" },
       h("div", { class: "avatar", text: initials(state.me.name || state.me.username) }),
@@ -4195,6 +4197,36 @@ if ("serviceWorker" in navigator && window.isSecureContext) {
     }).catch(() => {});
   });
 }
+
+/* «Recargar app»: borra la copia guardada (caché del service worker) y vuelve a cargar todo
+   del servidor. No toca la sesión ni los datos. */
+const APP_VERSION = ((document.querySelector('script[src*="/static/app.js"]') || {}).src || "").split("v=")[1] || "";
+async function refreshApp() {
+  toast("Recargando la app…");
+  try {
+    if ("caches" in window) await Promise.all((await caches.keys()).filter((k) => k.startsWith("wgp-")).map((k) => caches.delete(k)));
+    if ("serviceWorker" in navigator) await Promise.all((await navigator.serviceWorker.getRegistrations()).map((r) => r.unregister()));
+  } catch { /* se recarga igualmente */ }
+  location.reload();
+}
+/* Versión nueva en el servidor: aviso fijo con «Recargar» (además de la recarga automática). */
+let newVersionShown = false;
+async function checkAppVersion() {
+  if (newVersionShown || !APP_VERSION) return;
+  try {
+    const r = await fetch("/api/branding", { credentials: "same-origin", cache: "no-store" });
+    const b = await r.json();
+    if (b.app_version && b.app_version !== APP_VERSION) {
+      newVersionShown = true;
+      const bar = h("div", { class: "update-bar", role: "status" }, icon("refresh"), h("span", { text: "Hay una versión nueva del panel." }),
+        h("button", { class: "btn sm primary", onClick: refreshApp }, "Recargar"));
+      document.body.append(bar);
+    }
+  } catch { /* sin conexión: se vuelve a mirar más tarde */ }
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) checkAppVersion(); });
+setInterval(checkAppVersion, 10 * 60 * 1000);
+setTimeout(checkAppVersion, 5000);
 
 /* ------------------------------------------------------------------ arranque */
 (async function boot() {
