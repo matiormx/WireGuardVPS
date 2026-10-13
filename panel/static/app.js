@@ -3189,7 +3189,7 @@ function exitsCard() {
         h("div", { class: "blocked-row" }, h("span", { class: "flag", text: flag(data.main.country) }),
           h("div", { class: "grow" }, h("div", { class: "name", text: data.main.name }), h("div", { class: "meta", text: "Este servidor · salida por defecto" })),
           h("button", { class: "btn sm", onClick: mainModal }, "Editar")),
-        data.exits.map((e) => h("div", { class: "blocked-row" }, h("span", { class: "flag", text: flag(e.country) }),
+        data.exits.map((e) => h("div", { class: "blocked-row stack" }, h("span", { class: "flag", text: flag(e.country) }),
           h("div", { class: "grow" },
             h("div", { class: "name" }, e.name, " ", h("span", { class: `badge ${!e.enabled ? "off" : e.online ? "ok" : "warn"}`,
               text: !e.enabled ? "Desactivada" : e.kind === "ip" ? (e.online ? "Activa" : "Pendiente de aplicar")
@@ -3197,6 +3197,7 @@ function exitsCard() {
             h("div", { class: "meta mono", text: e.kind === "ip" ? [`IP adicional ${e.address}`, `${e.devices} disp.`].join(" · ")
               : [`${e.host}:${e.port}`, `${e.devices} disp.`, e.handshake ? `último contacto ${ago(e.handshake)}` : null,
                 e.rx + e.tx ? `${fmtBytes(e.rx + e.tx)}` : null, e.failover ? null : "sin respaldo"].filter(Boolean).join(" · ") })),
+          h("div", { class: "row-actions" },
           e.kind === "server" ? h("button", { class: "btn sm", onClick: async () => { try { exitInstallModal(e.name, await api("GET", `/api/admin/exits/${e.id}/install`)); } catch (err) { toast(err.message, "err"); } } }, "Instalar") : null,
           h("button", { class: "btn ghost icon", title: "Editar", onClick: () => exitModal(e) }, icon("edit")),
           e.kind === "ip" ? null : h("button", { class: "btn ghost icon", title: e.failover ? "Respaldo activado: si cae, sus dispositivos salen por el principal (pulsa para desactivarlo)" : "Sin respaldo: si cae, sus dispositivos se quedan sin Internet (pulsa para activarlo)",
@@ -3207,7 +3208,7 @@ function exitsCard() {
             if (await confirmDialog({ title: "Eliminar salida", message: `Sus ${e.devices} dispositivos volverán a salir por el servidor principal.`, confirmLabel: "Eliminar" })) {
               run(() => api("DELETE", `/api/admin/exits/${e.id}`), "Salida eliminada");
             }
-          } }, icon("trash"))))),
+          } }, icon("trash")))))),
       data.exits.length ? null : h("p", { class: "help", text: "Lo más sencillo: contrata IPs adicionales de otros países para este VPS y añádelas aquí." }));
   };
   reload().catch((e) => fill(card, h("p", { class: "note", text: e.message })));
@@ -3288,26 +3289,29 @@ function alertsConfigCard() {
     onSubmit: async (fd) => { cfg = await api("PUT", "/api/admin/alerts-config", { telegram_token: fd.get("token").trim() }); toast("Bot de Telegram conectado"); draw(); },
   });
   const draw = () => {
-    const delays = [2, 5, 10, 15, 30, 60].map((n) => h("option", { value: String(n), selected: n === cfg.delay_min, text: `${n} min` }));
+    const delays = [2, 5, 10, 15, 30, 60].map((n) => h("option", { value: String(n), selected: n === cfg.delay_min, text: `${n} minutos sin conectar` }));
     fill(card,
       h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Avisos" }),
         h("div", { class: "note", text: "Canales que podrán usar tú y tus clientes para recibir avisos. Las notificaciones push funcionan siempre (con HTTPS)." }))),
       h("div", { class: "grid", style: { gap: "14px" } },
-        h("div", { class: "blocked-row" }, h("span", { class: "channel-icon" }, icon("send")),
+        h("div", { class: "blocked-row stack" }, h("span", { class: "channel-icon" }, icon("send")),
           h("div", { class: "grow" }, h("div", { class: "name", text: "Telegram" }),
             h("div", { class: "meta", text: cfg.telegram.configured ? `Bot @${cfg.telegram.bot}` : "Sin configurar" })),
-          h("button", { class: "btn sm", onClick: telegramModal }, cfg.telegram.configured ? "Cambiar" : "Configurar"),
-          cfg.telegram.configured ? h("button", { class: "btn ghost icon", title: "Quitar", onClick: () => save({ telegram_token: "" }, "Telegram desactivado") }, icon("trash")) : null),
-        h("div", { class: "blocked-row", style: { flexWrap: "wrap" } }, h("span", { class: "channel-icon" }, icon("mail")),
+          h("div", { class: "row-actions" },
+            h("button", { class: "btn sm", onClick: telegramModal }, cfg.telegram.configured ? "Cambiar" : "Configurar"),
+            cfg.telegram.configured ? h("button", { class: "btn ghost icon", title: "Quitar", onClick: () => save({ telegram_token: "" }, "Telegram desactivado") }, icon("trash")) : null)),
+        h("div", { class: "blocked-row stack" }, h("span", { class: "channel-icon" }, icon("mail")),
           h("div", { class: "grow" }, h("div", { class: "name", text: "Email" }),
             h("div", { class: "meta", text: cfg.email.provider === "cloudflare"
               ? (cfg.email.ready ? `Cloudflare Email Service · ${cfg.cloudflare.from}` : "Cloudflare: sin configurar")
               : cfg.smtp.host ? `SMTP ${cfg.smtp.host}:${cfg.smtp.port} · ${cfg.smtp.from}` : "Sin configurar" })),
-          h("button", { class: `btn sm ${cfg.email.provider === "smtp" && cfg.email.ready ? "primary" : ""}`, onClick: smtpModal }, "SMTP"),
-          h("button", { class: `btn sm ${cfg.email.provider === "cloudflare" && cfg.email.ready ? "primary" : ""}`, onClick: cloudflareModal }, "Cloudflare"),
-          cfg.email.ready ? h("button", { class: "btn ghost sm", onClick: testEmail }, "Probar") : null),
-        h("label", { class: "inline-field" }, "Considerar caído un dispositivo tras",
-          h("select", { class: "input", onChange: (e) => save({ delay_min: Number(e.target.value) }, "Guardado") }, delays), "sin conectar")));
+          h("div", { class: "row-actions" },
+            h("button", { class: `btn sm ${cfg.email.provider === "smtp" && cfg.email.ready ? "primary" : ""}`, onClick: smtpModal }, "SMTP"),
+            h("button", { class: `btn sm ${cfg.email.provider === "cloudflare" && cfg.email.ready ? "primary" : ""}`, onClick: cloudflareModal }, "Cloudflare"),
+            cfg.email.ready ? h("button", { class: "btn ghost sm", onClick: testEmail }, "Probar") : null)),
+        field("Considerar caído un dispositivo tras",
+          h("select", { class: "input", style: { maxWidth: "240px" }, onChange: (e) => save({ delay_min: Number(e.target.value) }, "Guardado") }, delays),
+          "Tiempo sin conectar antes de avisar de un dispositivo vigilado.")));
   };
   api("GET", "/api/admin/alerts-config").then((d) => { cfg = d; draw(); }).catch((e) => fill(card, h("p", { class: "note", text: e.message })));
   return card;

@@ -701,3 +701,12 @@ button.rank:hover .name { color: var(--accent); }
   .subnav a { padding: 8px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
   .subnav a.active { border-color: var(--accent); }
 }
+
+/* Filas con varias acciones: en el móvil los botones pasan debajo del texto. */
+.blocked-row .row-actions { display: flex; align-items: center; gap: 6px; flex: none; }
+.blocked-row.stack .meta { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .blocked-row.stack { flex-wrap: wrap; row-gap: 8px; }
+  .blocked-row.stack .grow { flex: 1 1 calc(100% - 56px); }
+  .blocked-row.stack .row-actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+}
