@@ -47,7 +47,9 @@ def short_name(c: sqlite3.Connection) -> str:
 
 
 def version(c: sqlite3.Connection) -> str:
-    return get_setting(c, "brand_version") or "2"
+    v = get_setting(c, "brand_version") or "2"
+    # Sin logo propio se sirve el de /static: su marca de versión cambia con él (el W pasó a WG).
+    return v if has_logo(c) else f"{v}-wg"
 
 
 def has_logo(c: sqlite3.Connection) -> bool:
