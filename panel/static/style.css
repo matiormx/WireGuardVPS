@@ -721,3 +721,13 @@ button.rank:hover .name { color: var(--accent); }
   border: 1px solid var(--accent); box-shadow: var(--shadow); font-size: 14px; width: max-content; max-width: calc(100vw - 32px); }
 .update-bar span { flex: 1; min-width: 0; }
 .update-bar svg { width: 17px; height: 17px; color: var(--accent); flex: none; }
+
+/* Códigos de descuento */
+.discount-field { display: grid; gap: 6px; }
+.discount-link { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--accent); width: fit-content; }
+.discount-link svg, .discount-ok svg { width: 16px; height: 16px; flex: none; }
+.discount-ok { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--success-soft); color: var(--text); font-size: 14px; }
+.discount-ok svg { stroke: var(--success); }
+.discount-ok span { flex: 1; min-width: 0; }
+.check-list { display: grid; gap: 6px; }
+.check-list .check { display: flex; align-items: center; gap: 8px; font-size: 14px; }

@@ -13,6 +13,7 @@ const REFRESH_MS = 10000;
 /* ------------------------------------------------------------------ iconos */
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ICONS = {
+  tag: '<path d="M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/><path d="M7 7h.01"/>',
   chevron: '<path d="M6 9l6 6 6-6"/>',
   logo: '<path d="M4 7l4.5 11L12 10l3.5 8L20 7"/>',
   dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
@@ -3621,12 +3622,13 @@ async function planView(main, tenantId) {
   const invoicesBox = h("div", { class: "card" }, spinnerBlock());
   if (hashParam("pago") === "ok") toast("Pago recibido: tu plan se activará en unos segundos");
 
+  const disc = discountField(null);
   const choose = async (p, btn) => {
     const changing = b.plan && ["active", "trialing", "past_due", "unpaid"].includes(b.status);
     if (changing && !(await confirmDialog({ title: `Cambiar a ${p.name}`, message: `Pasarás a pagar ${p.price}${p.interval === "year" ? " al año" : " al mes"}. La diferencia de este periodo se ajusta en tu próxima factura.`, confirmLabel: "Cambiar de plan", danger: false }))) return;
     btn.disabled = true;
     try {
-      const r = await openStripe(`/api/billing/checkout${qs}`, { plan_id: p.id });
+      const r = await openStripe(`/api/billing/checkout${qs}`, { plan_id: p.id, discount_code: disc.value() });
       if (r && r.changed) { b = r; toast(`Ahora tienes el plan ${p.name}`); state.me = await api("GET", "/api/me"); draw(); }
     } catch (e) { toast(e.message, "err"); btn.disabled = false; }
   };
@@ -3668,6 +3670,7 @@ async function planView(main, tenantId) {
             h("div", { class: "note", text: b.limits.exits ? "Incluye salidas por país." : "No incluye salidas por país." })))),
       b.stripe && b.plans.length ? h("div", null,
         h("h3", { style: { margin: "24px 0 12px" }, text: b.plan ? "Cambiar de plan" : "Elige tu plan" }),
+        h("div", { style: { marginBottom: "14px", maxWidth: "520px" } }, disc.el),
         h("div", { class: "plan-grid" }, b.plans.map((p) => planCard(p, { current: b.plan && b.plan.id === p.id && !["canceled", "pending", "manual", "none"].includes(b.status),
           action: h("button", { class: "btn primary block", onClick: (e) => choose(p, e.currentTarget) },
             b.plan && ["active", "trialing", "past_due", "unpaid"].includes(b.status) ? "Cambiar a este plan" : "Contratar") })))) : null,
@@ -3801,6 +3804,7 @@ async function billingAdminView(main) {
             }
           } }, icon("trash")))))
           : h("p", { class: "note", style: { margin: 0 }, text: "Crea tu primer plan, por ejemplo «Hogar» con 5 dispositivos por 4,99 €/mes." })),
+      data.stripe && data.stripe.connected ? discountsCard(data.plans) : null,
       h("div", { class: "card" },
         h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Opciones" }))),
         h("div", { class: "grid", style: { gap: "16px" } },
@@ -3822,6 +3826,113 @@ async function billingAdminView(main) {
   draw();
 }
 
+/* «¿Tienes un código de descuento?»: se comprueba en el panel y se manda al pago. */
+function discountField(planId) {
+  let applied = null;
+  const box = h("div", { class: "discount-field" });
+  const showLink = () => fill(box, h("a", { href: "#", class: "discount-link", onClick: (e) => { e.preventDefault(); showInput(); } },
+    icon("tag"), "¿Tienes un código de descuento?"));
+  const showInput = () => {
+    const inp = input({ placeholder: "CÓDIGO", class: "input mono", maxlength: "32", autocapitalize: "characters", spellcheck: "false", autocomplete: "off",
+      value: applied ? applied.code : "" });
+    const msg = h("div", { class: "help" });
+    const apply = async () => {
+      msg.textContent = "";
+      if (!inp.value.trim()) { applied = null; return; }
+      try {
+        const pid = typeof planId === "function" ? planId() : planId;
+        applied = await api("POST", "/api/billing/discount", { code: inp.value, ...(pid ? { plan_id: pid } : {}) });
+        draw();
+      } catch (e) { applied = null; msg.textContent = e.message; msg.style.color = "var(--danger)"; }
+    };
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); apply(); } });
+    fill(box, h("div", { class: "input-group" }, inp, h("button", { class: "btn", type: "button", onClick: apply }, "Aplicar")), msg);
+    setTimeout(() => inp.focus(), 30);
+  };
+  const draw = () => {
+    if (!applied) return showLink();
+    fill(box, h("div", { class: "discount-ok" }, icon("check"),
+      h("span", null, h("b", { class: "mono", text: applied.code }), ` ${applied.label}`, applied.after ? ` · ${applied.after} (antes ${applied.before})` : ""),
+      h("button", { class: "btn ghost sm", type: "button", onClick: () => { applied = null; showLink(); } }, "Quitar")));
+  };
+  showLink();
+  return { el: box, value: () => (applied ? applied.code : null), recheck: () => { if (applied) showInput(); } };
+}
+
+/* Facturación › Códigos de descuento */
+function discountsCard(plans) {
+  const card = h("div", { class: "card" }, spinnerBlock());
+  let list = null;
+  const load = async () => { list = (await api("GET", "/api/admin/discounts")).discounts; draw(); };
+  const newModal = () => {
+    const kind = h("select", { class: "input", name: "kind" }, h("option", { value: "percent", text: "Porcentaje (%)" }), h("option", { value: "amount", text: "Importe fijo (€)" }));
+    const dur = h("select", { class: "input", name: "duration" },
+      h("option", { value: "repeating", text: "Durante unos meses" }), h("option", { value: "forever", text: "Permanente" }), h("option", { value: "once", text: "Sólo el primer pago" }));
+    const monthsField = field("Meses", input({ name: "months", type: "number", min: "1", max: "60", value: "3", inputmode: "numeric" }), "Cuántas mensualidades llevan el descuento.");
+    dur.addEventListener("change", () => { monthsField.hidden = dur.value !== "repeating"; });
+    const codeIn = input({ name: "code", required: true, maxlength: "32", class: "input mono", autocapitalize: "characters", spellcheck: "false", placeholder: "VERANO20" });
+    const gen = () => { const a = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; const b = new Uint32Array(8); crypto.getRandomValues(b); codeIn.value = Array.from(b, (x) => a[x % a.length]).join(""); };
+    formModal({
+      title: "Nuevo código de descuento",
+      submitLabel: "Crear código",
+      fields: [
+        h("div", { class: "full" }, field("Código", h("div", { class: "input-group" }, codeIn, h("button", { class: "btn", type: "button", onClick: gen }, "Generar")),
+          "Lo que escribe el cliente al contratar. Letras, números y guiones.")),
+        field("Tipo", kind),
+        field("Valor", input({ name: "value", type: "number", required: true, min: "0.01", step: "0.01", inputmode: "decimal", placeholder: "20" })),
+        field("Duración del descuento", dur),
+        monthsField,
+        field("Límite de usos (opcional)", input({ name: "max", type: "number", min: "1", inputmode: "numeric", placeholder: "Sin límite" })),
+        field("Válido hasta (opcional)", input({ name: "expires", type: "date" }), "Después de esta fecha ya no se puede usar."),
+        plans.length ? h("div", { class: "full" }, field("Planes", h("div", { class: "check-list" }, plans.filter((p) => p.price_cents > 0).map((p) =>
+          h("label", { class: "check" }, h("input", { type: "checkbox", name: "plans", value: String(p.id) }), h("span", { text: `${p.name} (${p.price}${p.interval === "year" ? "/año" : "/mes"})` })))),
+          "Sin marcar ninguno: vale para todos.")) : null,
+        h("div", { class: "full" }, field("Nota interna (opcional)", input({ name: "note", maxlength: "200", placeholder: "Campaña de verano, colaborador…" }))),
+      ],
+      onSubmit: async (fd) => {
+        const value = Number(String(fd.get("value")).replace(",", "."));
+        const body = { code: fd.get("code"), duration: fd.get("duration"), note: fd.get("note") || "",
+          plan_ids: fd.getAll("plans").map(Number) };
+        if (fd.get("kind") === "percent") body.percent_off = value; else body.amount_off = Math.round(value * 100);
+        if (body.duration === "repeating") body.months = Number(fd.get("months"));
+        if (fd.get("max")) body.max_redemptions = Number(fd.get("max"));
+        if (fd.get("expires")) body.expires_at = Math.floor(new Date(`${fd.get("expires")}T23:59:59`).getTime() / 1000);
+        const r = await api("POST", "/api/admin/discounts", body);
+        toast(`Código ${r.code} creado: ${r.label}`);
+        load();
+      },
+    });
+  };
+  const draw = () => {
+    const names = Object.fromEntries(plans.map((p) => [p.id, p.name]));
+    fill(card,
+      h("div", { class: "card-head" }, h("div", null, h("h2", { text: "Códigos de descuento" }),
+        h("div", { class: "note", text: "El cliente lo escribe al contratar o cambiar de plan. Porcentaje o importe, sólo el primer pago, unos meses o para siempre." })),
+        h("button", { class: "btn primary", onClick: newModal }, icon("plus"), "Nuevo código")),
+      list.length ? h("div", { class: "blocked-list" }, list.map((x) => h("div", { class: `blocked-row stack${x.active && !x.expired ? "" : " muted"}` },
+        h("span", { class: "channel-icon" }, icon("tag")),
+        h("div", { class: "grow" },
+          h("div", { class: "name" }, h("span", { class: "mono", text: x.code }), " ",
+            !x.active ? h("span", { class: "badge off", text: "Desactivado" }) : x.expired ? h("span", { class: "badge warn", text: "Caducado" }) : null),
+          h("div", { class: "meta", text: [x.label,
+            x.redeemed != null ? `${x.redeemed}${x.max_redemptions ? `/${x.max_redemptions}` : ""} usos` : (x.max_redemptions ? `máx. ${x.max_redemptions} usos` : null),
+            x.expires_at ? `hasta ${fmtDate(x.expires_at)}` : null,
+            x.plan_ids.length ? x.plan_ids.map((i) => names[i] || "?").join(", ") : "todos los planes", x.note || null].filter(Boolean).join(" · ") })),
+        h("div", { class: "row-actions" },
+          h("button", { class: "btn ghost icon", title: "Copiar código", onClick: () => copyText(x.code, "Código copiado") }, icon("copy")),
+          h("button", { class: "btn ghost icon", title: x.active ? "Desactivar" : "Activar", onClick: async () => {
+            try { await api("PATCH", `/api/admin/discounts/${x.id}`, { active: !x.active }); toast(x.active ? "Código desactivado" : "Código activado"); load(); } catch (e) { toast(e.message, "err"); }
+          } }, icon("power")),
+          h("button", { class: "btn ghost icon", title: "Eliminar", onClick: async () => {
+            if (!(await confirmDialog({ title: `Eliminar ${x.code}`, message: "Nadie más podrá usarlo. Quien ya lo tiene en su suscripción conserva el descuento.", confirmLabel: "Eliminar" }))) return;
+            try { await api("DELETE", `/api/admin/discounts/${x.id}`); toast("Código eliminado"); load(); } catch (e) { toast(e.message, "err"); }
+          } }, icon("trash"))))))
+        : h("p", { class: "note", style: { margin: 0 }, text: "Aún no hay códigos. Por ejemplo: BIENVENIDA con un 100 % el primer mes, o VERANO20 con un 20 % durante 3 meses." }));
+  };
+  load().catch((e) => fill(card, h("p", { class: "note", text: e.message })));
+  return card;
+}
+
 /* ------------------------------------------------------------------ alta pública */
 async function signupView(step) {
   if (step === "ok") {
@@ -3836,16 +3947,19 @@ async function signupView(step) {
   const err = h("div", { class: "help", style: { color: "var(--danger)", minHeight: "18px" } });
   const btn = h("button", { class: "btn primary block", type: "submit" }, "Continuar al pago");
   const cards = h("div", { class: "plan-pick" }, info.plans.map((p) => h("label", { class: "plan-option" },
-    h("input", { type: "radio", name: "plan", value: String(p.id), checked: p.id === chosen, onChange: () => { chosen = p.id; } }),
+    h("input", { type: "radio", name: "plan", value: String(p.id), checked: p.id === chosen, onChange: () => { chosen = p.id; disc.recheck(); } }),
     h("span", null, h("b", { text: p.name }), h("em", { text: `${p.price}${p.interval === "year" ? "/año" : "/mes"}` }),
       h("small", { text: planFeatures(p).slice(0, 4).join(" · ") })))));
+  const disc = discountField(() => chosen);
+  if (hashParam("codigo")) setTimeout(() => { const i = disc.el.querySelector("a"); if (i) i.click(); const inp = disc.el.querySelector("input"); if (inp) { inp.value = hashParam("codigo"); inp.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" })); } }, 50);
   const form = h("form", { onSubmit: async (e) => {
     e.preventDefault();
     const fd = new FormData(form);
     err.textContent = "";
     btn.disabled = true;
     try {
-      await openStripe("/api/signup", { name: fd.get("name"), email: fd.get("email"), username: fd.get("username"), password: fd.get("password"), plan_id: chosen });
+      await openStripe("/api/signup", { name: fd.get("name"), email: fd.get("email"), username: fd.get("username"), password: fd.get("password"), plan_id: chosen,
+        discount_code: disc.value() });
     } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
   } },
     cards,
@@ -3853,6 +3967,7 @@ async function signupView(step) {
     field("Email", input({ name: "email", type: "email", required: true, autocomplete: "email" })),
     field("Usuario", input({ name: "username", required: true, pattern: "[A-Za-z0-9][A-Za-z0-9._\\-]{2,31}", autocomplete: "username", autocapitalize: "none", spellcheck: "false" })),
     field("Contraseña", input({ name: "password", type: "password", required: true, minlength: "8", autocomplete: "new-password" })),
+    disc.el,
     err, btn,
     h("p", { class: "note", style: { textAlign: "center", margin: 0 } }, "¿Ya tienes cuenta? ", h("a", { href: "#/", text: "Entrar" })));
   publicShell(h("p", { class: "lead", text: "Crea tu red privada" }), form);

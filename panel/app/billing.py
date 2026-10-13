@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 
 from . import security
 from . import cfdns
-from . import reserved
+from . import discounts, reserved
 from .db import get_setting, set_setting, username_taken
 
 log = logging.getLogger("wgp.billing")
@@ -182,6 +182,7 @@ class AssignIn(BaseModel):
 
 class CheckoutIn(BaseModel):
     plan_id: int
+    discount_code: str | None = Field(default=None, max_length=40)
 
 
 class SignupIn(BaseModel):
@@ -190,6 +191,7 @@ class SignupIn(BaseModel):
     username: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$")
     password: str = Field(min_length=8, max_length=256)
     plan_id: int
+    discount_code: str | None = Field(default=None, max_length=40)
 
 
 # --------------------------------------------------------------------------- motor
@@ -615,7 +617,7 @@ def register(app: FastAPI, d) -> None:
         return cus["id"]
 
     def checkout_session(c: sqlite3.Connection, s: Stripe, t: sqlite3.Row, plan: sqlite3.Row, base: str,
-                         success: str, cancel: str) -> str:
+                         success: str, cancel: str, discount: sqlite3.Row | None = None) -> str:
         if not plan["stripe_price_id"]:
             b.sync_plan(c, plan, s)
             plan = plan_or_404(c, plan["id"])
@@ -628,6 +630,10 @@ def register(app: FastAPI, d) -> None:
             "success_url": f"{base}{success}", "cancel_url": f"{base}{cancel}",
             "allow_promotion_codes": True, "locale": "es",
         }
+        if discount is not None:
+            # Código ya validado en el panel (Stripe no admite las dos opciones a la vez).
+            del params["allow_promotion_codes"]
+            params["discounts"] = [{"promotion_code": discount["stripe_promo_id"]}]
         if get_setting(c, "billing_tax") == "1":
             params.update(automatic_tax={"enabled": True}, customer_update={"address": "auto", "name": "auto"},
                           tax_id_collection={"enabled": True}, billing_address_collection="required")
@@ -642,6 +648,7 @@ def register(app: FastAPI, d) -> None:
         plan = plan_or_404(c, body.plan_id, active_only=True)
         if plan["price_cents"] <= 0 or (not plan["public"] and not p.is_admin):
             raise HTTPException(422, "Ese plan no se puede contratar desde aquí")
+        discount = discounts.resolve(c, body.discount_code, plan)
         s = b.require(c)
         base = return_base(c, request)
         try:
@@ -652,14 +659,16 @@ def register(app: FastAPI, d) -> None:
                     plan = plan_or_404(c, plan["id"])
                 sub = s.request("GET", f"subscriptions/{t['stripe_subscription_id']}")
                 item = sub["items"]["data"][0]["id"]
-                sub = s.request("POST", f"subscriptions/{sub['id']}", {
-                    "items": [{"id": item, "price": plan["stripe_price_id"]}], "proration_behavior": "create_prorations",
-                    "cancel_at_period_end": False, "metadata": {"wgp_tenant": tid}})
+                change = {"items": [{"id": item, "price": plan["stripe_price_id"]}], "proration_behavior": "create_prorations",
+                          "cancel_at_period_end": False, "metadata": {"wgp_tenant": tid}}
+                if discount is not None:
+                    change["discounts"] = [{"promotion_code": discount["stripe_promo_id"]}]
+                sub = s.request("POST", f"subscriptions/{sub['id']}", change)
                 b.apply_subscription(c, sub)
                 c.commit()
                 d.apply_wg()
                 return {"changed": True, **tenant_billing(c, tid)}
-            url = checkout_session(c, s, t, plan, base, "#/plan?pago=ok", "#/plan")
+            url = checkout_session(c, s, t, plan, base, "#/plan?pago=ok", "#/plan", discount)
         except StripeError as exc:
             raise HTTPException(409, str(exc)) from None
         return {"url": url}
@@ -711,6 +720,7 @@ def register(app: FastAPI, d) -> None:
         email = body.email.strip()
         if not EMAIL_RE.match(email):
             raise HTTPException(422, "Email no válido")
+        discount = discounts.resolve(c, body.discount_code, plan)
         if username_taken(c, body.username):
             raise HTTPException(409, "Ese nombre de usuario ya existe; elige otro")
         reserved.check_username(c, body.username)
@@ -728,7 +738,7 @@ def register(app: FastAPI, d) -> None:
         b.apply_plan(c, tid, plan["id"])
         t = d.tenant_or_404(c, tid)
         try:
-            url = checkout_session(c, b.require(c), t, plan, return_base(c, request), "#/signup/ok", "#/signup")
+            url = checkout_session(c, b.require(c), t, plan, return_base(c, request), "#/signup/ok", "#/signup", discount)
         except StripeError as exc:
             c.rollback()
             raise HTTPException(409, str(exc)) from None

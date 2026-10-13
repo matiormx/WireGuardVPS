@@ -71,6 +71,21 @@ class FakeStripe(http.server.BaseHTTPRequestHandler):
             return self._reply(sub)
         if path == "invoices":
             return self._reply({"data": FakeStripe.db["invoices"]})
+        if path == "coupons" and method == "POST":
+            return self._reply({"id": nid("co")})
+        if path.startswith("coupons/") and method == "DELETE":
+            return self._reply({"id": path.split("/")[1], "deleted": True})
+        if path == "promotion_codes" and method == "POST":
+            pc = {"id": nid("promo"), "code": form.get("code"), "active": True, "times_redeemed": 0, "coupon": form.get("coupon")}
+            FakeStripe.db.setdefault("promos", {})[pc["id"]] = pc
+            return self._reply(pc)
+        if path == "promotion_codes":
+            return self._reply({"data": list(FakeStripe.db.get("promos", {}).values())})
+        if path.startswith("promotion_codes/"):
+            pc = FakeStripe.db["promos"][path.split("/")[1]]
+            if "active" in form:
+                pc["active"] = form["active"] == "true"
+            return self._reply(pc)
         return self._reply({"error": {"message": f"no implementado: {path}"}}, 404)
 
     def do_GET(self):  # noqa: N802

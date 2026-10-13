@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field, field_validator
 
 import bcrypt
 
-from . import account, alerts, reserved, backup, billing, brand, cfdns, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, sysmon, updates, wg
+from . import account, alerts, reserved, backup, billing, discounts, brand, cfdns, caddy, dnsfilter, domains, exits, forwards, history, members, monitor, site, passkeys, security, sysmon, updates, wg
 from .config import Settings, load_settings
 from .db import (LABEL_RE, Database, get_setting, make_hostname, name_in_use, set_setting,
                  unique_hostname, username_taken)
@@ -1557,6 +1557,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     vars(deps).update(host_of=domains.host_of, billing=bill, BillingUser=BillingUser, next_net=lambda c: wg.next_free_net_index(c, settings),
                       notify_admins=notifier.notify_admins)
     billing.register(app, deps)
+    discounts.register(app, deps)
     deps.clean_host = _clean_host
     deps.host_of = domains.host_of
     site.register(app, deps)

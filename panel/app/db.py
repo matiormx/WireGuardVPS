@@ -245,6 +245,23 @@ CREATE TABLE IF NOT EXISTS dns_top (
     count     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant_id, day, domain)
 );
+CREATE TABLE IF NOT EXISTS discounts (
+    id               INTEGER PRIMARY KEY,
+    code             TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    percent_off      REAL,
+    amount_off       INTEGER,                 -- céntimos
+    currency         TEXT NOT NULL DEFAULT 'eur',
+    duration         TEXT NOT NULL,           -- once | repeating | forever
+    months           INTEGER,
+    max_redemptions  INTEGER,
+    expires_at       INTEGER,
+    plan_ids         TEXT NOT NULL DEFAULT '',
+    active           INTEGER NOT NULL DEFAULT 1,
+    stripe_coupon_id TEXT,
+    stripe_promo_id  TEXT,
+    note             TEXT NOT NULL DEFAULT '',
+    created_at       INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS account_security (
     role        TEXT NOT NULL,
     user_id     INTEGER NOT NULL,
